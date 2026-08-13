@@ -11,7 +11,7 @@ VM_COMP_OBJ     = $(VM_OBJ) _compiler.o
 UNIX_OBJ        = u-main.o
 PROGRAM		= vx-scheme
 DEFVER          = -DVERSION=$(VERSION)
-CFLAGS		= -O2 -fno-exceptions -fno-rtti -Wall $(DEFVER)
+CFLAGS		= -std=c++20 -O2 -fno-exceptions -fno-rtti -Wall $(DEFVER)
 CC		= gcc	
 TC              = ../testcases
 

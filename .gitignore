@@ -1,1 +1,6 @@
 z/
+*.o
+vxs-*
+vx-scheme
+_*
+

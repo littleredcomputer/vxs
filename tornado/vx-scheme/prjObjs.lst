@@ -1,6 +1,0 @@
-vx-main.o
-env.o
-io.o
-subr.o
-symtab.o
-cell.o

@@ -15,31 +15,18 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
-#ifndef WIN32
 #include <unistd.h>
-#else
-#include <io.h>
-// We need to do bit manipulations on pointers in order to
-// implement our storage model (garbage collection bits, etc.)
-// MSVC quite properly complains about this, but since it's
-// necessary in this case we squelch the warnings.
-#pragma warning(disable : 4311)
-#pragma warning(disable : 4312)
-#endif
-#if __GNUG__ >= 3
-#endif
+
 #if defined(__GNUC__)
 // Statically allocated cells must lie upon an 8-byte
 // boundary, so that the lower three bits of pointers
 // to such objects are free for our use.
 #define ALIGN8 __attribute__((aligned(8)))
 #define PACKED __attribute__((packed))
-#elif defined(WIN32)
-#define PACKED
-#define ALIGN8 __declspec(align(8))
 #else
 #error "must have a way of aligning Cells to 8-byte boundary"
 #endif
+
 
 class OS;
 class Cell;
@@ -1138,17 +1125,13 @@ extern psymbol s_callcc;
 
 typedef unsigned char byte;
 
-#if defined(WIN32)
-#pragma pack(push, 1)
-#endif
+
 struct vm_insn {
   byte opcode;
   byte count;
   const void *operand;
 } PACKED;
-#if defined(WIN32)
-#pragma pack(pop)
-#endif
+
 
 struct vm_cproc {
   vm_insn *insns;

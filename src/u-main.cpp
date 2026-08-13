@@ -10,12 +10,8 @@
 #include <stdio.h>
 #include <time.h>
 #include "vx-scheme.h"
-#ifndef WIN32
 #include <sys/time.h>
 #include <unistd.h>
-#else
-#include <windows.h>
-#endif
 #include <setjmp.h>
 
 static jmp_buf jb;
@@ -31,21 +27,10 @@ static bool jmpbuf_set = false;
 
 double OS::get_time() {
   double sec;
-#ifdef WIN32
-  FILETIME filetime;
-  GetSystemTimeAsFileTime(&filetime);
-  ULARGE_INTEGER ul;
-  ul.HighPart = filetime.dwHighDateTime;
-  ul.LowPart = filetime.dwLowDateTime;
-  // FILETIMES  are in 100ns units.
-  sec = ul.QuadPart / 100000000.;
-  sec += ul.QuadPart % 100000000;
-#else
   struct timeval t;
   gettimeofday(&t, 0);
   sec = t.tv_sec;
   sec += t.tv_usec / 1e6;
-#endif
   return sec;
 }
 

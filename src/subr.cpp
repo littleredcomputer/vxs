@@ -13,9 +13,7 @@
 #include <float.h>
 #include <math.h>
 #include <errno.h>
-#ifdef WIN32
-#include <windows.h>
-#endif
+
 
 //---------------------------------------------------------------------
 // Utilities
@@ -1353,12 +1351,8 @@ static Cell *sk_impl_platform(Context *ctx, Cell *arglist) {
   psymbol s;
 #if defined(__CYGWIN__)
   s = intern("cygwin");
-#elif defined(VXWORKS)
-  s = intern("VxWorks");
 #elif defined(__unix__)
   s = intern("unix");
-#elif defined(WIN32)
-  s = intern("win32");
 #else
   s = intern("unknown");
 #endif
@@ -1440,23 +1434,14 @@ Cell *symbol_value(Context *ctx, Cell *arglist) {
 // Get/Set current working directory
 
 static Cell *sk_getcwd(Context *ctx, Cell *arglist) {
-#ifdef WIN32
-  char buf[MAX_PATH];
-  GetCurrentDirectory(sizeof(buf), buf);
-#else
   char buf[PATH_MAX];
   getcwd(buf, sizeof(buf));
-#endif
   return ctx->make_string(buf);
 }
 
 static Cell *sk_chdir(Context *ctx, Cell *arglist) {
   const char *dir = car(arglist)->StringValue();
-#ifdef WIN32
-  bool ok = SetCurrentDirectory(dir) == TRUE;
-#else
   bool ok = chdir(dir) == 0;
-#endif
   return ctx->make_boolean(ok);
 }
 

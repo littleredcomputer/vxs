@@ -1,3 +1,0 @@
-cd "../../vx-scheme/SIMNTgnu"
-ld < vx-scheme.out
-cd "../../../testcases"
