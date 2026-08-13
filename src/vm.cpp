@@ -220,9 +220,9 @@ Cell *Context::execute(Cell *proc, Cell *args) {
   }
 
   r_cproc = proc;
-  bool trace = OS::flag(TRACE_VM);
-  bool trace_stack = OS::flag(TRACE_VMSTACK);
-  bool count_insns = OS::flag(COUNT_INSNS);
+  bool trace = debug_flag(TRACE_VM);
+  bool trace_stack = debug_flag(TRACE_VMSTACK);
+  bool count_insns = debug_flag(COUNT_INSNS);
 
   int xcount[n_vmops];
   if (count_insns)

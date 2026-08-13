@@ -33,9 +33,9 @@ static Cell *with_output_to_file(Context *ctx, Cell *arglist) {
 }
 
 static Cell *time(Context *ctx, Cell *arglist) {
-  double t0 = OS::get_time();
+  double t0 = vx_get_time();
   Cell *val = ctx->execute(car(arglist), nil);
-  double t1 = OS::get_time();
+  double t1 = vx_get_time();
   ctx->gc_protect(val);
   Cell *d = ctx->make_real(t1 - t0);
   ctx->gc_protect(d);

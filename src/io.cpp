@@ -330,7 +330,7 @@ Cell *Context::read(FILE *fp) {
 }
 
 void Cell::real_to_string(double d, char *buf, int nbytes) {
-  sprintf(buf, "%.15g", d);
+  snprintf(buf, sizeof(buf), "%.15g", d);
 
   // Now if buf contains neither a `.' nor an `e', then
   // the number was whole, and it won't "read back" as
@@ -355,7 +355,7 @@ void Cell::write(sstring &ss) const {
     switch (t) {
     case Int: {
       char buf[40];
-      sprintf(buf, "%" PRIdPTR, IntValue());
+      snprintf(buf, sizeof(buf), "%" PRIdPTR, IntValue());
       ss.append(buf);
       break;
     }
@@ -445,7 +445,7 @@ void Cell::write(sstring &ss) const {
     case Lambda: {
       Procedure proc = LambdaValue();
       ss.append(flag(MACRO) ? "#<macro " : "#<lambda ");
-      if (OS::flag(DEBUG_PRINT_PROCEDURES)) {
+      if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
         proc.arglist->write(ss);
         ss.append(' ');
         proc.body->write(ss);

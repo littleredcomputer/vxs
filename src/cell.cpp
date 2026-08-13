@@ -376,10 +376,9 @@ double Cell::RealValue() const {
 const char *Cell::name() const { return typeName[type()]; }
 
 void Cell::typefail(Type t1, Type t2) const {
-  sprintf(OS::errbuf, "type check failure: wanted %s, got %s", typeName[t2],
-          typeName[t1]); /* XXX sprintf into fixed buf */
-
-  OS::exception();
+  char buf[256];
+  snprintf(buf, sizeof(buf), "type check failure: wanted %s, got %s", typeName[t2], typeName[t1]);
+  error(buf);
 }
 
 void Cell::dump(FILE *out) {
@@ -665,7 +664,7 @@ TOP:
     mem.active.push((Cell *)new Slab(this));
     mem.free = 0;
     mem.low_water = false;
-    mem.no_inline_gc = OS::flag(DEBUG_NO_INLINE_GC);
+    mem.no_inline_gc = debug_flag(DEBUG_NO_INLINE_GC);
   }
 
   // Check the "top" slab to see if there's any room
@@ -730,7 +729,7 @@ inline void Cell::gc_set_cdr(Cell *src) {
 // support n-way marking instead of just 2-way marking.
 
 void Context::mark(Cell *P) {
-  bool traceall = OS::flag(TRACE_GC_ALL);
+  bool traceall = debug_flag(TRACE_GC_ALL);
   if (P == nil || P == 0 || Cell::short_atom(P) || P->ca.i & Cell::MARK)
     return;
 
@@ -926,7 +925,7 @@ E6:
 }
 
 void Slab::sweep(Context *ctx) {
-  bool traceall = OS::flag(TRACE_GC_ALL);
+  bool traceall = debug_flag(TRACE_GC_ALL);
 
   for (Cell *p = start; p < next; ++p) {
     unsigned int word = p->ca.i;
@@ -994,7 +993,7 @@ void Slab::sweep(Context *ctx) {
 }
 
 void Context::gc() {
-  bool gc_verbose = OS::flag(TRACE_GC);
+  bool gc_verbose = debug_flag(TRACE_GC);
   Cell *p;
 
   if (!ok_to_gc) {

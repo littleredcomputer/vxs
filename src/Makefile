@@ -8,10 +8,10 @@ BOOTSTRAP_OBJ	= $(OBJ) interp.o vm.o
 VM_OBJ          = $(OBJ) vm.o lib.o _library.o
 VM_COMP_OBJ     = $(VM_OBJ) _compiler.o 
 #
-UNIX_OBJ        = u-main.o
+UNIX_OBJ        = main.o
 PROGRAM		= vx-scheme
 DEFVER          = -DVERSION=$(VERSION)
-CFLAGS		= -std=c++20 -O2 -fno-exceptions -fno-rtti -Wall $(DEFVER)
+CFLAGS		= -std=c++20 -O2 -fno-rtti -Wall $(DEFVER)
 CC		= gcc	
 TC              = ../testcases
 

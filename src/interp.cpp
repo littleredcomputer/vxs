@@ -307,7 +307,7 @@ Cell *Context::interp_evaluator(Cell *form) {
   r_cont = eval_complete;
   r_exp = form;
   r_qq = 0;
-  trace = OS::flag(TRACE_EVAL);
+  trace = debug_flag(TRACE_EVAL);
 
 #define GOTO(x)                                                                \
   do {                                                                         \
@@ -565,13 +565,13 @@ TOP:
     r_proc = Cell::caar(&r_argl);
 
     clear(r_argl);
-    save(make_real(OS::get_time()));
+    save(make_real(vx_get_time()));
     save_i(ev_time1); // cont
     GOTO(apply_dispatch2);
 
   case ev_time1:
 
-    t1 = OS::get_time();
+    t1 = vx_get_time();
     restore(r_tmp);
     r_tmp = make_real(t1 - r_tmp->RealValue());
     RETURN_VALUE(cons(r_tmp, r_val));
@@ -1414,7 +1414,7 @@ Cell *Context::find(Cell *env, Cell *c) {
 
   // Can the OS magically supply a value??
 
-  if ((val = OS::undef(this, s->truename))) {
+  if ((val = 0)) { // undef check
     // Yes! The OS has produced a value.  We cache
     // it in the outermost environment, as if it
     // had been established there with (define).

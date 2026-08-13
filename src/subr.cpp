@@ -731,7 +731,7 @@ Cell *number_to_string(Context *ctx, Cell *arglist) {
     }
 
     char buf[80];
-    sprintf(buf, fmt, car(arglist)->IntValue());
+    snprintf(buf, sizeof(buf), fmt, car(arglist)->IntValue());
     return ctx->make_string(buf);
   }
   case Cell::Real: {

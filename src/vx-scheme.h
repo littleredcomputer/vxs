@@ -35,23 +35,9 @@ class Context;
 
 // OS abstraction layer
 
-class OS {
-public:
-  static double get_time();        // get timestamp
-  static bool interactive(int fd); // terminal input?
-  // supply value for undef symbol
-  static Cell *undef(Context *, const char *);
-  // report exception and restart
-  static void exception();
-  // manage debug flags
-  static unsigned int flags();
-  static bool flag(int bit) { return (flags() & bit) != 0; }
-
-  // XXX global error buffer, set just before a longjmp to the
-  // REPL.  This should be made context local.
-  static const int ebufsize = 256;
-  static char errbuf[ebufsize];
-};
+unsigned int debug_flags();
+inline bool debug_flag(int bit) { return (debug_flags() & bit) != 0; }
+double vx_get_time();
 
 typedef Cell *(*subr_f)(Context *ctx, Cell *arglist);
 typedef void (*magic_set_f)(Context *, void *key, Cell *rhs);
