@@ -1,0 +1,9 @@
+RUNTIME="vm.o cell.o subr.o ctx.o io.o symtab.o u-main.o lib.o"
+#./vx-scheme ../testcases/pi.scm  < compile-file.scm > pi.cc
+#gcc -g -c pi.cc
+#g++ -g -o pi vm.o cell.o subr.o ctx.o io.o symtab.o u-main.o pi.o
+
+
+./vx-scheme compile-file.scm < compile-file.scm > _compile-file.cc
+g++ -g -c _compile-file.cc
+g++ -g -o compile-file ${RUNTIME} _compiler.o _compile-file.o

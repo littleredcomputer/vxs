@@ -1,0 +1,778 @@
+SECTION(2 1)
+SECTION(3 4)
+ #<subr boolean?>
+    #<subr char?>
+       #<subr null?>
+          #<subr number?>
+             #<subr pair?>
+                #<subr procedure?>
+                   #<subr string?>
+                      #<subr symbol?>
+                         #<subr vector?>
+(#t #f #f #f #f #f #f #f #f)#t
+(#t #f #f #f #f #f #f #f #f)#f
+(#f #t #f #f #f #f #f #f #f)#\a
+(#f #f #t #f #f #f #f #f #f)()
+(#f #f #f #t #f #f #f #f #f)9739
+(#f #f #f #f #t #f #f #f #f)(test)
+(#f #f #f #f #f #t #f #f #f)#<lambda (e) ...>
+(#f #f #f #f #f #f #t #f #f)"test"
+(#f #f #f #f #f #f #t #f #f)""
+(#f #f #f #f #f #f #f #t #f)test
+(#f #f #f #f #f #f #f #f #t)#()
+(#f #f #f #f #f #f #f #f #t)#(a b c)
+SECTION(4 1 2)
+(quote (quote a))  ==> (quote a)
+(quote (quote a))  ==> (quote a)
+SECTION(4 1 3)
+(#<subr *> 3 4)  ==> 12
+SECTION(4 1 4)
+(#<lambda (x) ...> 4)  ==> 8
+(#<lambda (x y) ...> 7 10)  ==> 3
+(#<lambda (y) ...> 6)  ==> 10
+(#<lambda x ...> 3 4 5 6)  ==> (3 4 5 6)
+(#<lambda (x y . z) ...> 3 4 5 6)  ==> (5 6)
+SECTION(4 1 5)
+(if yes)  ==> yes
+(if no)  ==> no
+(if 1)  ==> 1
+SECTION(4 1 6)
+(define 3)  ==> 3
+(set! 5)  ==> 5
+SECTION(4 2 1)
+(cond greater)  ==> greater
+(cond equal)  ==> equal
+(cond 2)  ==> 2
+(case composite)  ==> composite
+(case consonant)  ==> consonant
+(and #t)  ==> #t
+(and #f)  ==> #f
+(and (f g))  ==> (f g)
+(and #t)  ==> #t
+(or #t)  ==> #t
+(or #t)  ==> #t
+(or #f)  ==> #f
+(or #f)  ==> #f
+(or (b c))  ==> (b c)
+SECTION(4 2 2)
+(let 6)  ==> 6
+(let 35)  ==> 35
+(let* 70)  ==> 70
+(letrec #t)  ==> #t
+(let 5)  ==> 5
+(let 34)  ==> 34
+(let 6)  ==> 6
+(let 34)  ==> 34
+(let* 7)  ==> 7
+(let* 34)  ==> 34
+(let* 8)  ==> 8
+(let* 34)  ==> 34
+(letrec 9)  ==> 9
+(letrec 34)  ==> 34
+(letrec 10)  ==> 10
+(letrec 34)  ==> 34
+SECTION(4 2 3)
+(begin 6)  ==> 6
+SECTION(4 2 4)
+(do #(0 1 2 3 4))  ==> #(0 1 2 3 4)
+(do 25)  ==> 25
+(let 1)  ==> 1
+(let ((6 1 3) (-5 -2)))  ==> ((6 1 3) (-5 -2))
+(let -1)  ==> -1
+SECTION(4 2 6)
+(quasiquote (list 3 4))  ==> (list 3 4)
+(quasiquote (list a (quote a)))  ==> (list a (quote a))
+(quasiquote (a 3 4 5 6 b))  ==> (a 3 4 5 6 b)
+(quasiquote ((foo 7) . cons))  ==> ((foo 7) . cons)
+(quasiquote #(10 5 2 4 3 8))  ==> #(10 5 2 4 3 8)
+(quasiquote 5)  ==> 5
+(quasiquote (a (quasiquote (b (unquote (+ 1 2)) (unquote (foo 4 d)) e)) f))  ==> (a (quasiquote (b (unquote (+ 1 2)) (unquote (foo 4 d)) e)) f)
+(quasiquote (a (quasiquote (b (unquote x) (unquote (quote y)) d)) e))  ==> (a (quasiquote (b (unquote x) (unquote (quote y)) d)) e)
+(quasiquote (list 3 4))  ==> (list 3 4)
+(quasiquote (quasiquote (list (unquote (+ 1 2)) 4)))  ==> (quasiquote (list (unquote (+ 1 2)) 4))
+SECTION(5 2 1)
+(define 6)  ==> 6
+(define 1)  ==> 1
+(#<lambda (x) ...> 6)  ==> 9
+SECTION(5 2 2)
+(define 45)  ==> 45
+(#<lambda () ...>)  ==> 5
+(define 34)  ==> 34
+(#<lambda () ...>)  ==> 5
+(define 34)  ==> 34
+(#<lambda (x) ...> 88)  ==> 88
+(#<lambda (x) ...> 4)  ==> 4
+(define 34)  ==> 34
+(internal-define 99)  ==> 99
+(internal-define 77)  ==> 77
+SECTION(6 1)
+(#<subr not> #t)  ==> #f
+(#<subr not> 3)  ==> #f
+(#<subr not> (3))  ==> #f
+(#<subr not> #f)  ==> #t
+(#<subr not> ())  ==> #f
+(#<subr not> ())  ==> #f
+(#<subr not> nil)  ==> #f
+SECTION(6 2)
+(#<subr eqv?> a a)  ==> #t
+(#<subr eqv?> a b)  ==> #f
+(#<subr eqv?> 2 2)  ==> #t
+(#<subr eqv?> () ())  ==> #t
+(#<subr eqv?> 10000 10000)  ==> #t
+(#<subr eqv?> (1 . 2) (1 . 2))  ==> #f
+(#<subr eqv?> #<lambda () ...> #<lambda () ...>)  ==> #f
+(#<subr eqv?> #f nil)  ==> #f
+(#<subr eqv?> #<lambda (x) ...> #<lambda (x) ...>)  ==> #t
+(#<subr eqv?> #<lambda () ...> #<lambda () ...>)  ==> #t
+(#<subr eqv?> #<lambda () ...> #<lambda () ...>)  ==> #f
+(#<subr eqv?> #<lambda () ...> #<lambda () ...>)  ==> #f
+(#<subr eq?> a a)  ==> #t
+(#<subr eq?> (a) (a))  ==> #f
+(#<subr eq?> () ())  ==> #t
+(#<subr eq?> #<subr car> #<subr car>)  ==> #t
+(#<subr eq?> (a) (a))  ==> #t
+(#<subr eq?> #() #())  ==> #t
+(#<subr eq?> #<lambda (x) ...> #<lambda (x) ...>)  ==> #t
+(#<subr equal?> a a)  ==> #t
+(#<subr equal?> (a) (a))  ==> #t
+(#<subr equal?> (a (b) c) (a (b) c))  ==> #t
+(#<subr equal?> "abc" "abc")  ==> #t
+(#<subr equal?> 2 2)  ==> #t
+(#<subr equal?> #(a a a a a) #(a a a a a))  ==> #t
+SECTION(6 3)
+(dot (a b c d e))  ==> (a b c d e)
+(#<subr list?> (a b c))  ==> #t
+(set-cdr! (a . 4))  ==> (a . 4)
+(#<subr eqv?> (a . 4) (a . 4))  ==> #t
+(dot (a b c . d))  ==> (a b c . d)
+(#<subr list?> (a . 4))  ==> #f
+(list? #f)  ==> #f
+(#<subr cons> a ())  ==> (a)
+(#<subr cons> (a) (b c d))  ==> ((a) b c d)
+(#<subr cons> "a" (b c))  ==> ("a" b c)
+(#<subr cons> a 3)  ==> (a . 3)
+(#<subr cons> (a b) c)  ==> ((a b) . c)
+(#<subr car> (a b c))  ==> a
+(#<subr car> ((a) b c d))  ==> (a)
+(#<subr car> (1 . 2))  ==> 1
+(#<subr cdr> ((a) b c d))  ==> (b c d)
+(#<subr cdr> (1 . 2))  ==> 2
+(#<subr list> a 7 c)  ==> (a 7 c)
+(#<subr list>)  ==> ()
+(#<subr length> (a b c))  ==> 3
+(#<subr length> (a (b) (c d e)))  ==> 3
+(#<subr length> ())  ==> 0
+(#<subr append> (x) (y))  ==> (x y)
+(#<subr append> (a) (b c d))  ==> (a b c d)
+(#<subr append> (a (b)) ((c)))  ==> (a (b) (c))
+(#<subr append>)  ==> ()
+(#<subr append> (a b) (c . d))  ==> (a b c . d)
+(#<subr append> () a)  ==> a
+(#<subr reverse> (a b c))  ==> (c b a)
+(#<subr reverse> (a (b c) d (e (f))))  ==> ((e (f)) d (b c) a)
+(#<subr list-ref> (a b c d) 2)  ==> c
+(#<subr memq> a (a b c))  ==> (a b c)
+(#<subr memq> b (a b c))  ==> (b c)
+(#<subr memq> a (b c d))  ==> #f
+(#<subr memq> (a) (b (a) c))  ==> #f
+(#<subr member> (a) (b (a) c))  ==> ((a) c)
+(#<subr memv> 101 (100 101 102))  ==> (101 102)
+(#<subr assq> a ((a 1) (b 2) (c 3)))  ==> (a 1)
+(#<subr assq> b ((a 1) (b 2) (c 3)))  ==> (b 2)
+(#<subr assq> d ((a 1) (b 2) (c 3)))  ==> #f
+(#<subr assq> (a) (((a)) ((b)) ((c))))  ==> #f
+(#<subr assoc> (a) (((a)) ((b)) ((c))))  ==> ((a))
+(#<subr assv> 5 ((2 3) (5 7) (11 13)))  ==> (5 7)
+SECTION(6 4)
+(#<subr symbol?> a)  ==> #t
+(standard-case #t)  ==> #t
+(standard-case #t)  ==> #t
+(#<subr symbol->string> flying-fish)  ==> "flying-fish"
+(#<subr symbol->string> martin)  ==> "martin"
+(#<subr symbol->string> Malvina)  ==> "Malvina"
+(standard-case #t)  ==> #t
+(string-set! "cb")  ==> "cb"
+(#<subr symbol->string> ab)  ==> "ab"
+(#<subr string->symbol> "ab")  ==> ab
+(#<subr eq?> mississippi mississippi)  ==> #t
+(string->symbol #f)  ==> #f
+(#<subr string->symbol> "jollywog")  ==> jollywog
+SECTION(6 5 5)
+(#<subr number?> 3)  ==> #t
+(#<subr complex?> 3)  ==> #t
+(#<subr real?> 3)  ==> #t
+(#<subr rational?> 3)  ==> #t
+(#<subr integer?> 3)  ==> #t
+(#<subr exact?> 3)  ==> #t
+(#<subr inexact?> 3)  ==> #f
+(#<subr => 22 22 22)  ==> #t
+(#<subr => 22 22)  ==> #t
+(#<subr => 34 34 35)  ==> #f
+(#<subr => 34 35)  ==> #f
+(#<subr >> 3 -6246)  ==> #t
+(#<subr >> 9 9 -2424)  ==> #f
+(#<subr >=> 3 -4 -6246)  ==> #t
+(#<subr >=> 9 9)  ==> #t
+(#<subr >=> 8 9)  ==> #f
+(#<subr <> -1 2 3 4 5 6 7 8)  ==> #t
+(#<subr <> -1 2 3 4 4 5 6 7)  ==> #f
+(#<subr <=> -1 2 3 4 5 6 7 8)  ==> #t
+(#<subr <=> -1 2 3 4 4 5 6 7)  ==> #t
+(#<subr <> 1 3 2)  ==> #f
+(#<subr >=> 1 3 2)  ==> #f
+(#<subr zero?> 0)  ==> #t
+(#<subr zero?> 1)  ==> #f
+(#<subr zero?> -1)  ==> #f
+(#<subr zero?> -100)  ==> #f
+(#<subr positive?> 4)  ==> #t
+(#<subr positive?> -4)  ==> #f
+(#<subr positive?> 0)  ==> #f
+(#<subr negative?> 4)  ==> #f
+(#<subr negative?> -4)  ==> #t
+(#<subr negative?> 0)  ==> #f
+(#<subr odd?> 3)  ==> #t
+(#<subr odd?> 2)  ==> #f
+(#<subr odd?> -4)  ==> #f
+(#<subr odd?> -1)  ==> #t
+(#<subr even?> 3)  ==> #f
+(#<subr even?> 2)  ==> #t
+(#<subr even?> -4)  ==> #t
+(#<subr even?> -1)  ==> #f
+(#<subr max> 34 5 7 38 6)  ==> 38
+(#<subr min> 3 5 5 330 4 -24)  ==> -24
+(#<subr +> 3 4)  ==> 7
+(#<subr +> 3)  ==> 3
+(#<subr +>)  ==> 0
+(#<subr *> 4)  ==> 4
+(#<subr *>)  ==> 1
+(#<subr -> 3 4)  ==> -1
+(#<subr -> 3)  ==> -3
+(#<subr abs> -7)  ==> 7
+(#<subr abs> 7)  ==> 7
+(#<subr abs> 0)  ==> 0
+(#<subr quotient> 35 7)  ==> 5
+(#<subr quotient> -35 7)  ==> -5
+(#<subr quotient> 35 -7)  ==> -5
+(#<subr quotient> -35 -7)  ==> 5
+(#<subr modulo> 13 4)  ==> 1
+(#<subr remainder> 13 4)  ==> 1
+(#<subr modulo> -13 4)  ==> 3
+(#<subr remainder> -13 4)  ==> -1
+(#<subr modulo> 13 -4)  ==> -3
+(#<subr remainder> 13 -4)  ==> 1
+(#<subr modulo> -13 -4)  ==> -1
+(#<subr remainder> -13 -4)  ==> -1
+(#<subr modulo> 0 86400)  ==> 0
+(#<subr modulo> 0 -86400)  ==> 0
+(#<lambda (n1 n2) ...> 238 9)  ==> #t
+(#<lambda (n1 n2) ...> -238 9)  ==> #t
+(#<lambda (n1 n2) ...> 238 -9)  ==> #t
+(#<lambda (n1 n2) ...> -238 -9)  ==> #t
+(#<subr gcd> 0 4)  ==> 4
+(#<subr gcd> -4 0)  ==> 4
+(#<subr gcd> 32 -36)  ==> 4
+(#<subr gcd>)  ==> 0
+(#<subr lcm> 32 -36)  ==> 288
+(#<subr lcm>)  ==> 1
+SECTION(6 5 9)
+(#<subr number->string> 0)  ==> "0"
+(#<subr number->string> 100)  ==> "100"
+(#<subr number->string> 256 16)  ==> "100"
+(#<subr string->number> "100")  ==> 100
+(#<subr string->number> "100" 16)  ==> 256
+(#<subr string->number> "")  ==> #f
+(#<subr string->number> ".")  ==> #f
+(#<subr string->number> "d")  ==> #f
+(#<subr string->number> "D")  ==> #f
+(#<subr string->number> "i")  ==> #f
+(#<subr string->number> "I")  ==> #f
+(#<subr string->number> "3i")  ==> #f
+(#<subr string->number> "3I")  ==> #f
+(#<subr string->number> "33i")  ==> #f
+(#<subr string->number> "33I")  ==> #f
+(#<subr string->number> "3.3i")  ==> #f
+(#<subr string->number> "3.3I")  ==> #f
+(#<subr string->number> "-")  ==> #f
+(#<subr string->number> "+")  ==> #f
+SECTION(6 6)
+(#<subr eqv?> #\  #\ )  ==> #t
+(#<subr eqv?> #\  #\ )  ==> #t
+(#<subr char?> #\a)  ==> #t
+(#<subr char?> #\()  ==> #t
+(#<subr char?> #\ )  ==> #t
+(#<subr char?> #\
+)  ==> #t
+(#<subr char=?> #\A #\B)  ==> #f
+(#<subr char=?> #\a #\b)  ==> #f
+(#<subr char=?> #\9 #\0)  ==> #f
+(#<subr char=?> #\A #\A)  ==> #t
+(#<subr char<?> #\A #\B)  ==> #t
+(#<subr char<?> #\a #\b)  ==> #t
+(#<subr char<?> #\9 #\0)  ==> #f
+(#<subr char<?> #\A #\A)  ==> #f
+(#<subr char>?> #\A #\B)  ==> #f
+(#<subr char>?> #\a #\b)  ==> #f
+(#<subr char>?> #\9 #\0)  ==> #t
+(#<subr char>?> #\A #\A)  ==> #f
+(#<subr char<=?> #\A #\B)  ==> #t
+(#<subr char<=?> #\a #\b)  ==> #t
+(#<subr char<=?> #\9 #\0)  ==> #f
+(#<subr char<=?> #\A #\A)  ==> #t
+(#<subr char>=?> #\A #\B)  ==> #f
+(#<subr char>=?> #\a #\b)  ==> #f
+(#<subr char>=?> #\9 #\0)  ==> #t
+(#<subr char>=?> #\A #\A)  ==> #t
+(#<subr char-ci=?> #\A #\B)  ==> #f
+(#<subr char-ci=?> #\a #\B)  ==> #f
+(#<subr char-ci=?> #\A #\b)  ==> #f
+(#<subr char-ci=?> #\a #\b)  ==> #f
+(#<subr char-ci=?> #\9 #\0)  ==> #f
+(#<subr char-ci=?> #\A #\A)  ==> #t
+(#<subr char-ci=?> #\A #\a)  ==> #t
+(#<subr char-ci<?> #\A #\B)  ==> #t
+(#<subr char-ci<?> #\a #\B)  ==> #t
+(#<subr char-ci<?> #\A #\b)  ==> #t
+(#<subr char-ci<?> #\a #\b)  ==> #t
+(#<subr char-ci<?> #\9 #\0)  ==> #f
+(#<subr char-ci<?> #\A #\A)  ==> #f
+(#<subr char-ci<?> #\A #\a)  ==> #f
+(#<subr char-ci>?> #\A #\B)  ==> #f
+(#<subr char-ci>?> #\a #\B)  ==> #f
+(#<subr char-ci>?> #\A #\b)  ==> #f
+(#<subr char-ci>?> #\a #\b)  ==> #f
+(#<subr char-ci>?> #\9 #\0)  ==> #t
+(#<subr char-ci>?> #\A #\A)  ==> #f
+(#<subr char-ci>?> #\A #\a)  ==> #f
+(#<subr char-ci<=?> #\A #\B)  ==> #t
+(#<subr char-ci<=?> #\a #\B)  ==> #t
+(#<subr char-ci<=?> #\A #\b)  ==> #t
+(#<subr char-ci<=?> #\a #\b)  ==> #t
+(#<subr char-ci<=?> #\9 #\0)  ==> #f
+(#<subr char-ci<=?> #\A #\A)  ==> #t
+(#<subr char-ci<=?> #\A #\a)  ==> #t
+(#<subr char-ci>=?> #\A #\B)  ==> #f
+(#<subr char-ci>=?> #\a #\B)  ==> #f
+(#<subr char-ci>=?> #\A #\b)  ==> #f
+(#<subr char-ci>=?> #\a #\b)  ==> #f
+(#<subr char-ci>=?> #\9 #\0)  ==> #t
+(#<subr char-ci>=?> #\A #\A)  ==> #t
+(#<subr char-ci>=?> #\A #\a)  ==> #t
+(#<subr char-alphabetic?> #\a)  ==> #t
+(#<subr char-alphabetic?> #\A)  ==> #t
+(#<subr char-alphabetic?> #\z)  ==> #t
+(#<subr char-alphabetic?> #\Z)  ==> #t
+(#<subr char-alphabetic?> #\0)  ==> #f
+(#<subr char-alphabetic?> #\9)  ==> #f
+(#<subr char-alphabetic?> #\ )  ==> #f
+(#<subr char-alphabetic?> #\;)  ==> #f
+(#<subr char-numeric?> #\a)  ==> #f
+(#<subr char-numeric?> #\A)  ==> #f
+(#<subr char-numeric?> #\z)  ==> #f
+(#<subr char-numeric?> #\Z)  ==> #f
+(#<subr char-numeric?> #\0)  ==> #t
+(#<subr char-numeric?> #\9)  ==> #t
+(#<subr char-numeric?> #\ )  ==> #f
+(#<subr char-numeric?> #\;)  ==> #f
+(#<subr char-whitespace?> #\a)  ==> #f
+(#<subr char-whitespace?> #\A)  ==> #f
+(#<subr char-whitespace?> #\z)  ==> #f
+(#<subr char-whitespace?> #\Z)  ==> #f
+(#<subr char-whitespace?> #\0)  ==> #f
+(#<subr char-whitespace?> #\9)  ==> #f
+(#<subr char-whitespace?> #\ )  ==> #t
+(#<subr char-whitespace?> #\;)  ==> #f
+(#<subr char-upper-case?> #\0)  ==> #f
+(#<subr char-upper-case?> #\9)  ==> #f
+(#<subr char-upper-case?> #\ )  ==> #f
+(#<subr char-upper-case?> #\;)  ==> #f
+(#<subr char-lower-case?> #\0)  ==> #f
+(#<subr char-lower-case?> #\9)  ==> #f
+(#<subr char-lower-case?> #\ )  ==> #f
+(#<subr char-lower-case?> #\;)  ==> #f
+(#<subr integer->char> 46)  ==> #\.
+(#<subr integer->char> 65)  ==> #\A
+(#<subr integer->char> 97)  ==> #\a
+(#<subr char-upcase> #\A)  ==> #\A
+(#<subr char-upcase> #\a)  ==> #\A
+(#<subr char-downcase> #\A)  ==> #\a
+(#<subr char-downcase> #\a)  ==> #\a
+SECTION(6 7)
+(#<subr string?> "The word \"recursion\\\" has many meanings.")  ==> #t
+(string-set! "?**")  ==> "?**"
+(#<subr string> #\a #\b #\c)  ==> "abc"
+(#<subr string>)  ==> ""
+(#<subr string-length> "abc")  ==> 3
+(#<subr string-ref> "abc" 0)  ==> #\a
+(#<subr string-ref> "abc" 2)  ==> #\c
+(#<subr string-length> "")  ==> 0
+(#<subr substring> "ab" 0 0)  ==> ""
+(#<subr substring> "ab" 1 1)  ==> ""
+(#<subr substring> "ab" 2 2)  ==> ""
+(#<subr substring> "ab" 0 1)  ==> "a"
+(#<subr substring> "ab" 1 2)  ==> "b"
+(#<subr substring> "ab" 0 2)  ==> "ab"
+(#<subr string-append> "foo" "bar")  ==> "foobar"
+(#<subr string-append> "foo")  ==> "foo"
+(#<subr string-append> "foo" "")  ==> "foo"
+(#<subr string-append> "" "foo")  ==> "foo"
+(#<subr string-append>)  ==> ""
+(#<subr make-string> 0)  ==> ""
+(#<subr string=?> "" "")  ==> #t
+(#<subr string<?> "" "")  ==> #f
+(#<subr string>?> "" "")  ==> #f
+(#<subr string<=?> "" "")  ==> #t
+(#<subr string>=?> "" "")  ==> #t
+(#<subr string-ci=?> "" "")  ==> #t
+(#<subr string-ci<?> "" "")  ==> #f
+(#<subr string-ci>?> "" "")  ==> #f
+(#<subr string-ci<=?> "" "")  ==> #t
+(#<subr string-ci>=?> "" "")  ==> #t
+(#<subr string=?> "A" "B")  ==> #f
+(#<subr string=?> "a" "b")  ==> #f
+(#<subr string=?> "9" "0")  ==> #f
+(#<subr string=?> "A" "A")  ==> #t
+(#<subr string<?> "A" "B")  ==> #t
+(#<subr string<?> "a" "b")  ==> #t
+(#<subr string<?> "9" "0")  ==> #f
+(#<subr string<?> "A" "A")  ==> #f
+(#<subr string>?> "A" "B")  ==> #f
+(#<subr string>?> "a" "b")  ==> #f
+(#<subr string>?> "9" "0")  ==> #t
+(#<subr string>?> "A" "A")  ==> #f
+(#<subr string<=?> "A" "B")  ==> #t
+(#<subr string<=?> "a" "b")  ==> #t
+(#<subr string<=?> "9" "0")  ==> #f
+(#<subr string<=?> "A" "A")  ==> #t
+(#<subr string>=?> "A" "B")  ==> #f
+(#<subr string>=?> "a" "b")  ==> #f
+(#<subr string>=?> "9" "0")  ==> #t
+(#<subr string>=?> "A" "A")  ==> #t
+(#<subr string-ci=?> "A" "B")  ==> #f
+(#<subr string-ci=?> "a" "B")  ==> #f
+(#<subr string-ci=?> "A" "b")  ==> #f
+(#<subr string-ci=?> "a" "b")  ==> #f
+(#<subr string-ci=?> "9" "0")  ==> #f
+(#<subr string-ci=?> "A" "A")  ==> #t
+(#<subr string-ci=?> "A" "a")  ==> #t
+(#<subr string-ci<?> "A" "B")  ==> #t
+(#<subr string-ci<?> "a" "B")  ==> #t
+(#<subr string-ci<?> "A" "b")  ==> #t
+(#<subr string-ci<?> "a" "b")  ==> #t
+(#<subr string-ci<?> "9" "0")  ==> #f
+(#<subr string-ci<?> "A" "A")  ==> #f
+(#<subr string-ci<?> "A" "a")  ==> #f
+(#<subr string-ci>?> "A" "B")  ==> #f
+(#<subr string-ci>?> "a" "B")  ==> #f
+(#<subr string-ci>?> "A" "b")  ==> #f
+(#<subr string-ci>?> "a" "b")  ==> #f
+(#<subr string-ci>?> "9" "0")  ==> #t
+(#<subr string-ci>?> "A" "A")  ==> #f
+(#<subr string-ci>?> "A" "a")  ==> #f
+(#<subr string-ci<=?> "A" "B")  ==> #t
+(#<subr string-ci<=?> "a" "B")  ==> #t
+(#<subr string-ci<=?> "A" "b")  ==> #t
+(#<subr string-ci<=?> "a" "b")  ==> #t
+(#<subr string-ci<=?> "9" "0")  ==> #f
+(#<subr string-ci<=?> "A" "A")  ==> #t
+(#<subr string-ci<=?> "A" "a")  ==> #t
+(#<subr string-ci>=?> "A" "B")  ==> #f
+(#<subr string-ci>=?> "a" "B")  ==> #f
+(#<subr string-ci>=?> "A" "b")  ==> #f
+(#<subr string-ci>=?> "a" "b")  ==> #f
+(#<subr string-ci>=?> "9" "0")  ==> #t
+(#<subr string-ci>=?> "A" "A")  ==> #t
+(#<subr string-ci>=?> "A" "a")  ==> #t
+SECTION(6 8)
+(#<subr vector?> #(0 (2 2 2 2) "Anna"))  ==> #t
+(#<subr vector> a b c)  ==> #(a b c)
+(#<subr vector>)  ==> #()
+(#<subr vector-length> #(0 (2 2 2 2) "Anna"))  ==> 3
+(#<subr vector-length> #())  ==> 0
+(#<subr vector-ref> #(1 1 2 3 5 8 13 21) 5)  ==> 8
+(vector-set #(0 ("Sue" "Sue") "Anna"))  ==> #(0 ("Sue" "Sue") "Anna")
+(#<subr make-vector> 2 hi)  ==> #(hi hi)
+(#<subr make-vector> 0)  ==> #()
+(#<subr make-vector> 0 a)  ==> #()
+SECTION(6 9)
+(#<subr procedure?> #<subr car>)  ==> #t
+(#<subr procedure?> #<lambda (x) ...>)  ==> #t
+(#<subr procedure?> (lambda (x) (* x x)))  ==> #f
+(#<builtin call-with-current-continuation> #<subr procedure?>)  ==> #t
+(#<builtin apply> #<subr +> (3 4))  ==> 7
+(#<builtin apply> #<lambda (a b) ...> (3 4))  ==> 7
+(#<builtin apply> #<subr +> 10 (3 4))  ==> 17
+(#<builtin apply> #<subr list> ())  ==> ()
+(#<lambda args ...> 12 75)  ==> 30
+(#<builtin map> #<subr cadr> ((a b) (d e) (g h)))  ==> (b e h)
+(#<builtin map> #<subr +> (1 2 3) (4 5 6))  ==> (5 7 9)
+(#<builtin map> #<subr +> (1 2 3))  ==> (1 2 3)
+(#<builtin map> #<subr *> (1 2 3))  ==> (1 2 3)
+(#<builtin map> #<subr -> (1 2 3))  ==> (-1 -2 -3)
+(for-each #(0 1 4 9 16))  ==> #(0 1 4 9 16)
+(#<builtin call-with-current-continuation> #<lambda (exit) ...>)  ==> -3
+(#<lambda (obj) ...> (1 2 3 4))  ==> 4
+(#<lambda (obj) ...> (a b . c))  ==> #f
+(#<builtin map> #<subr cadr> ())  ==> ()
+SECTION(6 10 1)
+(#<subr input-port?> #<input-port>)  ==> #t
+(#<subr output-port?> #<output-port>)  ==> #t
+(#<builtin call-with-input-file> "r4rstest.scm" #<subr input-port?>)  ==> #t
+(#<subr input-port?> #<input-port>)  ==> #t
+SECTION(6 10 2)
+(#<subr peek-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read> #<input-port>)  ==> (define cur-section (quote ()))
+(#<subr peek-char> #<input-port>)  ==> #\(
+(#<subr read> #<input-port>)  ==> (define errs (quote ()))
+SECTION(6 10 3)
+(#<builtin call-with-output-file> "tmp1" #<lambda (test-file) ...>)  ==> #t
+(#<subr read> #<input-port>)  ==> (define foo (quote (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))))
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(input-port? #t)  ==> #t
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read> #<input-port>)  ==> (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))
+(#<subr read> #<input-port>)  ==> (define foo (quote (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))))
+(#<subr output-port?> #<output-port>)  ==> #t
+(#<subr read> #<input-port>)  ==> (define foo (quote (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))))
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(input-port? #t)  ==> #t
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read> #<input-port>)  ==> (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))
+(#<subr read> #<input-port>)  ==> (define foo (quote (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))))
+
+
+Passed all tests
+
+;testing inexact numbers; 
+SECTION(6 5 5)
+(#<subr inexact?> 3.9)  ==> #t
+(inexact? #t)  ==> #t
+(max 4.)  ==> 4.
+(exact->inexact 4.)  ==> 4.
+(#<subr round> -4.5)  ==> -4.
+(#<subr round> -3.5)  ==> -4.
+(#<subr round> -3.9)  ==> -4.
+(#<subr round> 0.)  ==> 0.
+(#<subr round> 0.25)  ==> 0.
+(#<subr round> 0.8)  ==> 1.
+(#<subr round> 3.5)  ==> 4.
+(#<subr round> 4.5)  ==> 4.
+(#<subr expt> 0 0)  ==> 1
+(#<subr expt> 0 1)  ==> 0
+(#<builtin call-with-output-file> "tmp3" #<lambda (test-file) ...>)  ==> #t
+(#<subr read> #<input-port>)  ==> (define foo (quote (0.25 -3.25)))
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(#<subr eof-object?> #<eof-object>)  ==> #t
+(input-port? #t)  ==> #t
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read-char> #<input-port>)  ==> #\;
+(#<subr read> #<input-port>)  ==> (0.25 -3.25)
+(#<subr read> #<input-port>)  ==> (define foo (quote (0.25 -3.25)))
+(pentium-fdiv-bug #t)  ==> #t
+
+Passed all tests
+SECTION(6 5 6)
+Number readback failure for (+ 0. (* -100 4.94065645841247e-324))
+-4.94065645841247e-322
+(float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+Number readback failure for (+ 1. (* -100 1.11022302462516e-016))
+0.999999999999989
+Number readback failure for (+ 10. (* -100 1.77635683940025e-015))
+9.99999999999982
+Number readback failure for (+ 100. (* -100 1.4210854715202e-014))
+99.9999999999986
+Number readback failure for (+ 1e+020 (* -100 16384.))
+9.99999999999984e+019
+Number readback failure for (+ 1e+050 (* -100 2.07691874341393e+034))
+9.99999999999979e+049
+Number readback failure for (+ 1e+100 (* -100 1.94266889222573e+084))
+9.99999999999981e+099
+Number readback failure for (+ 0.1 (* -100 1.38777878078145e-017))
+0.0999999999999986
+Number readback failure for (+ 0.01 (* -100 1.73472347597681e-018))
+0.00999999999999983
+Number readback failure for (+ 0.001 (* -100 2.16840434497101e-019))
+0.000999999999999978
+Number readback failure for (+ 1e-020 (* -100 1.50463276905253e-036))
+9.99999999999985e-021
+Number readback failure for (+ 1e-050 (* -100 1.18694596821997e-066))
+9.99999999999988e-051
+Number readback failure for (+ 1e-100 (* -100 1.26897091865782e-116))
+9.99999999999987e-101
+(mult-float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+Number readback failure for (+ 3. (* -100 4.44089209850063e-016))
+2.99999999999996
+Number readback failure for (+ 30. (* -100 3.5527136788005e-015))
+29.9999999999996
+Number readback failure for (+ 300. (* -100 5.6843418860808e-014))
+299.999999999994
+Number readback failure for (+ 3e+020 (* -100 65536.))
+2.99999999999993e+020
+Number readback failure for (+ 3e+050 (* -100 4.15383748682786e+034))
+2.99999999999996e+050
+Number readback failure for (+ 3e+100 (* -100 3.88533778445146e+084))
+2.99999999999996e+100
+Number readback failure for (+ 0.3 (* -100 5.55111512312578e-017))
+0.299999999999994
+Number readback failure for (+ 0.03 (* -100 3.46944695195361e-018))
+0.0299999999999997
+Number readback failure for (+ 0.003 (* -100 4.33680868994202e-019))
+0.00299999999999996
+Number readback failure for (+ 3e-020 (* -100 6.01853107621011e-036))
+2.99999999999994e-020
+Number readback failure for (+ 3e-050 (* -100 4.7477838728799e-066))
+2.99999999999995e-050
+Number readback failure for (+ 3e-100 (* -100 5.0758836746313e-116))
+2.99999999999995e-100
+(mult-float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+Number readback failure for (+ 7. (* -100 8.88178419700125e-016))
+6.99999999999991
+Number readback failure for (+ 70. (* -100 1.4210854715202e-014))
+69.9999999999986
+Number readback failure for (+ 700. (* -100 1.13686837721616e-013))
+699.999999999989
+Number readback failure for (+ 7e+020 (* -100 131072.))
+6.99999999999987e+020
+Number readback failure for (+ 7e+050 (* -100 8.30767497365572e+034))
+6.99999999999992e+050
+Number readback failure for (+ 7e+100 (* -100 1.55413511378058e+085))
+6.99999999999984e+100
+Number readback failure for (+ 0.7 (* -99 1.11022302462516e-016))
+0.699999999999989
+Number readback failure for (+ 0.07 (* -100 1.38777878078145e-017))
+0.0699999999999986
+Number readback failure for (+ 0.007 (* -100 8.67361737988404e-019))
+0.00699999999999991
+Number readback failure for (+ 7e-020 (* -99 1.20370621524202e-035))
+6.99999999999988e-020
+Number readback failure for (+ 7e-050 (* -100 9.4955677457598e-066))
+6.99999999999991e-050
+Number readback failure for (+ 7e-100 (* -100 1.01517673492626e-115))
+6.9999999999999e-100
+(mult-float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+Number readback failure for (+ 3.14159265358979 (* -100 4.44089209850063e-016))
+3.14159265358975
+Number readback failure for (+ 31.4159265358979 (* -100 3.5527136788005e-015))
+31.4159265358976
+Number readback failure for (+ 314.159265358979 (* -100 5.6843418860808e-014))
+314.159265358974
+Number readback failure for (+ 3.14159265358979e+020 (* -100 65536.))
+3.14159265358973e+020
+Number readback failure for (+ 3.14159265358979e+050 (* -100 4.15383748682786e+034))
+3.14159265358975e+050
+Number readback failure for (+ 3.14159265358979e+100 (* -100 3.88533778445146e+084))
+3.14159265358975e+100
+Number readback failure for (+ 0.314159265358979 (* -100 5.55111512312578e-017))
+0.314159265358974
+Number readback failure for (+ 0.0314159265358979 (* -100 6.93889390390723e-018))
+0.0314159265358972
+Number readback failure for (+ 0.00314159265358979 (* -99 4.33680868994202e-019))
+0.00314159265358975
+Number readback failure for (+ 3.14159265358979e-020 (* -100 6.01853107621011e-036))
+3.14159265358973e-020
+Number readback failure for (+ 3.14159265358979e-050 (* -100 4.7477838728799e-066))
+3.14159265358975e-050
+Number readback failure for (+ 3.14159265358979e-100 (* -100 5.0758836746313e-116))
+3.14159265358974e-100
+(mult-float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+Number readback failure for (+ 2.71828182845905 (* -100 4.44089209850063e-016))
+2.718281828459
+Number readback failure for (+ 27.1828182845905 (* -100 3.5527136788005e-015))
+27.1828182845901
+Number readback failure for (+ 271.828182845905 (* -100 5.6843418860808e-014))
+271.828182845899
+Number readback failure for (+ 2.71828182845905e+020 (* -100 32768.))
+2.71828182845901e+020
+Number readback failure for (+ 2.71828182845905e+050 (* -100 4.15383748682786e+034))
+2.718281828459e+050
+Number readback failure for (+ 2.71828182845905e+100 (* -100 3.88533778445146e+084))
+2.71828182845901e+100
+Number readback failure for (+ 0.271828182845905 (* -99 5.55111512312578e-017))
+0.271828182845899
+Number readback failure for (+ 0.0271828182845905 (* -100 3.46944695195361e-018))
+0.0271828182845901
+Number readback failure for (+ 0.00271828182845905 (* -100 4.33680868994202e-019))
+0.002718281828459
+Number readback failure for (+ 2.71828182845904e-020 (* -100 6.01853107621011e-036))
+2.71828182845898e-020
+Number readback failure for (+ 2.71828182845905e-050 (* -100 4.7477838728799e-066))
+2.718281828459e-050
+Number readback failure for (+ 2.71828182845905e-100 (* -100 5.0758836746313e-116))
+2.71828182845899e-100
+(mult-float-print-test #f)  ==> #f
+ BUT EXPECTED #t
+
+To fully test continuations do:
+(test-cont)
+
+;testing scheme 4 functions; 
+SECTION(6 7)
+(#<subr string->list> "P l")  ==> (#\P #\  #\l)
+(#<subr string->list> "")  ==> ()
+(#<subr list->string> (#\1 #\\ #\"))  ==> "1\\\""
+(#<subr list->string> ())  ==> ""
+SECTION(6 8)
+(#<subr vector->list> #(dah dah didah))  ==> (dah dah didah)
+(#<subr vector->list> #())  ==> ()
+(#<subr list->vector> (dididit dah))  ==> #(dididit dah)
+(#<subr list->vector> ())  ==> #()
+SECTION(6 10 4)
+(load (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c)))  ==> (#t #f a () 9739 -3 . #((test) "te \" \" st" "" test #() b c))
+
+errors were:
+(SECTION (got expected (call)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (float-print-test #f)))
+
+
+
+;testing DELAY and FORCE; 
+SECTION(6 9)
+(delay 3)  ==> 3
+(delay (3 3))  ==> (3 3)
+(delay 2)  ==> 2
+(#<builtin force> #<promise #<lambda () ...>>)  ==> 6
+(#<builtin force> #<promise 6>)  ==> 6
+(force 3)  ==> 3
+
+errors were:
+(SECTION (got expected (call)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (float-print-test #f)))
+
+
+
+;testing continuations; 
+SECTION(6 9)
+(#<lambda (x y) ...> (a (b (c))) ((a) b c))  ==> #t
+(#<lambda (x y) ...> (a (b (c))) ((a) b c d))  ==> #f
+
+errors were:
+(SECTION (got expected (call)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (mult-float-print-test #f)))
+((6 5 6) (#f #t (float-print-test #f)))
+
