@@ -66,15 +66,10 @@ static const int n_vmops = sizeof(optab) / sizeof(*optab);
 
 static bool exact_top_n(cellvector *cv, int n) {
   int sz = cv->size();
-  for (int ix = sz - n; ix < sz; ++ix)
-    switch (cv->get_unchecked(ix)->type()) {
-    case Cell::Type::Int:
-      continue;
-    case Cell::Type::Real:
+  for (int ix = sz - n; ix < sz; ++ix) {
+    if (!cv->get_unchecked(ix)->is<intptr_t>())
       return false;
-    default:
-      return false;
-    }
+  }
   return true;
 }
 
@@ -267,8 +262,7 @@ case 2: // subr
     if (!subr)
       error("missing primitive procedure");
     Cell *proc = cdr(subr);
-    Cell::Type type = proc->type();
-    if (type == Cell::Type::Cproc) {
+    if (proc->is<Cell::Cproc>()) {
       // Yuck.  When the current procedure was compiled, the
       // routine we are about to invoke was a builtin (subr): now
       // it's a compiled procedure.  The optimized calling
@@ -286,8 +280,8 @@ case 2: // subr
         m_stack.push(cv.pop());
       r_cproc = proc;
       goto PROC;
-    } else if (type == Cell::Type::Subr) {
-      insn->InsnValue()->payload = cdr(subr)->SubrValue();
+    } else if (auto *s = proc->get_if<Cell::Subr>()) {
+      insn->InsnValue()->payload = s;
     } else {
       error("subr invoked on non-procedure");
     }
@@ -475,16 +469,15 @@ case 23: // apply.
 case 24: // apply
   r_exp = m_stack.pop();
   {
-    Cell::Type type = r_exp->type();
-    if (type == Cell::Type::Cproc) {
+    if (r_exp->is<Cell::Cproc>()) {
       n_args = insn->InsnValue()->int_val();
       r_cproc = r_exp;
       goto PROC;
-    } else if (type == Cell::Type::Subr) {
+    } else if (auto *s = r_exp->get_if<Cell::Subr>()) {
       r_val = pop_list(insn->InsnValue()->int_val());
       save(r_envt);
       save(r_cproc);
-      r_val = r_exp->SubrValue()->subr(this, r_val);
+      r_val = s->subr(this, r_val);
       restore(r_cproc);
       restore(r_envt);
       goto RETURN;
@@ -531,10 +524,9 @@ case 31: // cdr
   break;
 case 32: { // zero?
   Cell *c = m_stack.pop();
-  Cell::Type t = c->type();
-  if (t == Cell::Type::Int)
+  if (c->is<intptr_t>())
     m_stack.push(make_boolean(c->IntValue() == 0));
-  else if (t == Cell::Type::Real)
+  else if (c->is<double>())
     m_stack.push(make_boolean(c->RealValue() == 0.0));
   else
     error("non-numeric type");

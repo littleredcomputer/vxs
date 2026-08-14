@@ -294,7 +294,6 @@ static const char *state_name[] = {
 
 Cell *Context::interp_evaluator(Cell *form) {
   psymbol s;
-  Cell::Type t;
   Cell::Procedure lambda;
   intptr_t flag = 0;
   double t1;
@@ -320,10 +319,9 @@ Cell *Context::interp_evaluator(Cell *form) {
       r_val = nil;                                                             \
       GOTO(r_cont);                                                            \
     }                                                                          \
-    Cell::Type __t = (r_exp)->type();                                          \
-    if (__t == Cell::Type::Cons)                                               \
+    if ((r_exp)->is<Cell::Cons>())                                             \
       GOTO(ev_application);                                                    \
-    if (__t == Cell::Type::Symbol)                                             \
+    if ((r_exp)->is<Cell::Symbol>())                                           \
       r_val = get(r_env, r_exp);                                               \
     else                                                                       \
       r_val = r_exp;                                                           \
@@ -342,11 +340,10 @@ Cell *Context::interp_evaluator(Cell *form) {
 // where r_env end r_unev are saved/restored.
 
 #define CALL_EVAL(label)                                                       \
-  t = (r_exp)->type();                                                         \
-  if (t == Cell::Type::Symbol) {                                               \
+  if ((r_exp)->is<Cell::Symbol>()) {                                           \
     r_val = get(r_env, r_exp);                                                 \
     goto label##__2;                                                           \
-  } else if (t != Cell::Type::Cons) {                                          \
+  } else if (!(r_exp)->is<Cell::Cons>()) {                                     \
     r_val = r_exp;                                                             \
     goto label##__2;                                                           \
   } else {                                                                     \
@@ -358,7 +355,7 @@ Cell *Context::interp_evaluator(Cell *form) {
   case label:                                                                  \
     restore(r_unev);                                                           \
     restore(r_env);                                                            \
-    label##__2:
+  label##__2:
 
 TOP:
 
@@ -373,13 +370,12 @@ TOP:
       GOTO(r_cont);
     }
 
-    switch (r_exp->type()) {
-    case Cell::Type::Symbol:
+    if (r_exp->is<Cell::Symbol>()) {
       r_val = get(r_env, r_exp);
       GOTO(r_cont);
-    case Cell::Type::Cons:
+    } else if (r_exp->is<Cell::Cons>()) {
       GOTO(ev_application);
-    default: // self-evaluating
+    } else { // self-evaluating
       r_val = r_exp;
       GOTO(r_cont);
     }
@@ -420,13 +416,12 @@ TOP:
 
   case apply_dispatch2:
 
-    switch (r_proc->type()) {
-    case Cell::Type::Builtin:
+    if (auto *bi = r_proc->get_if<Cell::Builtin>()) {
       // =================================================
       //            THE BUILTIN SPECIAL FORMS
       // =================================================
 
-      s = r_proc->BuiltinValue();
+      s = bi->s;
 
       if (s == s_if)
         GOTO(ev_if);
@@ -501,13 +496,9 @@ TOP:
         GOTO(apply_dispatch2);
       } else
         error("unimplemented builtin ", s->key);
-      break;
-
-    case Cell::Type::Subr:
-      r_val = r_proc->SubrValue()->subr(this, Cell::car(&r_argl));
-      break;
-
-    case Cell::Type::Lambda:
+    } else if (auto *subr = r_proc->get_if<Cell::Subr>()) {
+      r_val = subr->subr(this, Cell::car(&r_argl));
+    } else if (r_proc->is<Cell::Lambda>()) {
       lambda = r_proc->LambdaValue();
 
       if (r_proc->flag(Cell::Flag::Macro)) {
@@ -523,25 +514,18 @@ TOP:
 
       r_unev = lambda.body;
       GOTO(ev_sequence);
-
-    case Cell::Type::Cont:
+    } else if (r_proc->is<Cell::Cont>()) {
       r_val = Cell::caar(&r_argl);
       load_continuation(r_proc);
-      break;
-
-    case Cell::Type::Cproc:
+    } else if (r_proc->is<Cell::Cproc>()) {
       if (vm_execute) {
         (this->*vm_execute)(r_proc, Cell::car(&r_argl));
       } else {
-        error("VM not loaded: can't dispatch a compiled procedure");
+        error("no virtual machine executor");
       }
-      break;
-
-    default:
-      r_proc->dump(stdout);
-      error("can't dispatch one of those.");
+    } else {
+      error("bad procedure in apply");
     }
-
     restore_i(r_cont);
     GOTO(r_cont);
 
@@ -627,7 +611,7 @@ TOP:
   case ev_define:
     r_tmp = car(r_unev);
 
-    if (r_tmp->type() == Cell::Type::Symbol) {
+    if (r_tmp->is<Cell::Symbol>()) {
       save(r_env);
       save(r_unev);
       r_exp = cadr(r_unev);
@@ -689,7 +673,7 @@ TOP:
     // The plan is to accumulate the list of variables (v) in
     // r_varl, and the list of initializers (e) in r_argl.
 
-    if (car(r_unev)->type() == Cell::Type::Symbol) {
+    if (car(r_unev)->is<Cell::Symbol>()) {
       r_proc = car(r_unev); // named let: stash in r_proc
       r_unev = cdr(r_unev);
     } else
@@ -976,9 +960,8 @@ TOP:
     // save a flag.
 
     ++r_qq;
-    t = r_unev->type();
 
-    if (t == Cell::Type::Vec) {
+    if (r_unev->is<Cell::Vec>()) {
       save_i(1);
       r_unev = vector_to_list(this, cons(r_unev, nil)); // yyy
     } else
@@ -989,11 +972,10 @@ TOP:
 
   case ev_qq0:
 
-    t = r_unev->type();
-    if (t == Cell::Type::Cons) {
+    if (r_unev->is<Cell::Cons>()) {
       r_exp = car(r_unev);
 
-      if (r_exp->type() == Cell::Type::Symbol) {
+      if (r_exp->is<Cell::Symbol>()) {
         p = r_exp->SymbolValue();
 
         if (p == s_unquote) // unquote: evaluate sequel.
@@ -1020,7 +1002,7 @@ TOP:
           goto QQCONS;
       }
 
-      else if (r_exp->type() == Cell::Type::Cons &&
+      else if (r_exp->is<Cell::Cons>() &&
                car(r_exp)->is_symbol(s_unquote_splicing)) {
         if (r_qq == 1) {
           // unquote_splicing: generate list, and splice it
@@ -1308,12 +1290,12 @@ void Context::bind_arguments(Cell *env, Cell *variables, Cell *values) {
   Cell *var;
   Cell *val;
 
-  if (variables->type() == Cell::Type::Cons) {
+  if (variables->is<Cell::Cons>()) {
     for (var = variables, val = values; var != nil;
          var = cdr(var), val = cdr(val)) {
       bind(env, car(var), car(val));
 
-      if (cdr(var)->type() == Cell::Type::Symbol) {
+      if (cdr(var)->is<Cell::Symbol>()) {
         // Implement "dotted tail" procedure call.  If
         // the cdr of var is another symbol, then this
         // was to the right of the "dot"; put all the rest
@@ -1340,7 +1322,7 @@ Cell *Context::get(Cell *env, Cell *c) {
 
   Cell *res = pResult->unsafe_cdr();
 
-  if (res->type() == Cell::Type::Magic)
+  if (res->is<Cell::MagicBox *>())
     return res->unsafe_magic_box()->get_f(this, res->unsafe_magic_vp());
   else
     return res;
@@ -1354,7 +1336,7 @@ void Context::set(Cell *env, Cell *var, Cell *value) {
   if (!target)
     error("unbound variable ", s->key);
 
-  if ((d = cdr(target)) && d->type() == Cell::Type::Magic)
+  if ((d = cdr(target)) && d->is<Cell::MagicBox *>())
     d->unsafe_magic_box()->set_f(this, d->unsafe_magic_vp(), value);
   else
     Cell::setcdr(target, value);

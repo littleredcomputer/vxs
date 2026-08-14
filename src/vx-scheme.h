@@ -19,6 +19,9 @@
 #include <unistd.h>
 #include <variant>
 
+template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
 #if defined(__GNUC__)
 // Statically allocated cells must lie upon an 8-byte
 // boundary, so that the lower three bits of pointers
@@ -504,6 +507,26 @@ public:
 
   template <typename T> T &as() { return std::get<T>(val); }
 
+  template <typename T> const T *get_if() const {
+    if (short_atom(this))
+      return nullptr;
+    return std::get_if<T>(&val);
+  }
+  template <typename T> T *get_if() {
+    if (short_atom(this))
+      return nullptr;
+    return std::get_if<T>(&val);
+  }
+
+  template <typename Visitor>
+  decltype(auto) visit(Visitor &&visitor) const {
+    return std::visit(std::forward<Visitor>(visitor), val);
+  }
+  template <typename Visitor>
+  decltype(auto) visit(Visitor &&visitor) {
+    return std::visit(std::forward<Visitor>(visitor), val);
+  }
+
   enum class Flag : uint8_t {
     Forced = 1 << 0,
     Macro = 1 << 1,
@@ -526,11 +549,11 @@ public:
   }
   static inline bool long_atom(const Cell *c) {
     return (reinterpret_cast<uintptr_t>(c) & ATOM) == 0 &&
-           c->type() != Type::Cons;
+           !c->is<Cons>();
   }
   static inline bool atomic(const Cell *c) {
     return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0 ||
-           c->type() != Type::Cons;
+           !c->is<Cons>();
   }
   static Cell *notcons();
 
@@ -540,8 +563,8 @@ public:
   inline intptr_t e_skip() const { return std::get<Symbol>(val).e_skip; }
   inline intptr_t b_skip() const { return std::get<Symbol>(val).b_skip; }
   inline bool is_quickened() const {
-    if (type() == Type::Symbol)
-      return std::get<Symbol>(val).is_quickened();
+    if (auto *s = get_if<Symbol>())
+      return s->is_quickened();
     return false;
   }
   void set_lexaddr(intptr_t e_skip, intptr_t b_skip) {
@@ -550,8 +573,6 @@ public:
     s.b_skip = static_cast<int16_t>(b_skip);
   }
 
-  static const unsigned int IGNORE = (unsigned int)(~0u << 16);
-  static const unsigned int IGN_MASK = ~IGNORE;
   static const char *typeName[static_cast<size_t>(Type::NUM_TYPES)];
   static int typeCount[static_cast<size_t>(Type::NUM_TYPES)];
 
@@ -562,9 +583,7 @@ public:
       m_flags &= ~static_cast<uint8_t>(f);
   }
   void set_flag(Flag f, bool b = true) { flag(f, b); }
-  bool flag(Flag f) const {
-    return (m_flags & static_cast<uint8_t>(f)) != 0;
-  }
+  bool flag(Flag f) const { return (m_flags & static_cast<uint8_t>(f)) != 0; }
 
   void dump(FILE *);
 
@@ -644,30 +663,30 @@ public:
   const Insn *InsnValue() const;
   Insn *InsnValue();
 
-  cellvector *unsafe_vector_value() const {
-    switch (type()) {
-    case Type::Vec:
-      return std::get<Vec>(val).cv;
-    case Type::Lambda:
-      return std::get<Lambda>(val).cv;
-    case Type::Cproc:
-      return std::get<Cproc>(val).cv;
-    case Type::Promise:
-      return std::get<Promise>(val).cv;
-    case Type::Cpromise:
-      return std::get<Cpromise>(val).cv;
-    case Type::Cont:
-      return std::get<Cont>(val).cv;
-    default:
-      return nullptr;
-    }
+  cellvector *vector_payload() const {
+    if (short_atom(this))
+      error("expecting a vector-backed cell");
+    return std::visit(
+        overloaded{
+            [](const Vec &v) { return v.cv; },
+            [](const Lambda &l) { return l.cv; },
+            [](const Cproc &cp) { return cp.cv; },
+            [](const Promise &p) { return p.cv; },
+            [](const Cpromise &cp) { return cp.cv; },
+            [](const Cont &k) { return k.cv; },
+            [](const auto &) -> cellvector * {
+              error("expecting a vector-backed cell");
+              return nullptr;
+            }},
+        val);
   }
+  cellvector *unsafe_vector_value() const { return vector_payload(); }
   MagicBox *unsafe_magic_box() const { return std::get<MagicBox *>(val); }
   void *unsafe_magic_vp() const { return std::get<MagicBox *>(val)->key; }
 
   static void real_to_string(double, char *, int);
   double asReal() const {
-    return (type() == Type::Int) ? (double)IntValue() : RealValue();
+    return is<intptr_t>() ? (double)IntValue() : RealValue();
   }
   bool isBoolean() { return this == &Bool_T || this == &Bool_F; }
   bool istrue() { return this != &Bool_F; }

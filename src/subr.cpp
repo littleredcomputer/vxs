@@ -40,21 +40,15 @@ static FILE *iport(Context *ctx, Cell *arglist) {
 // other type is encountered, an error is thrown.
 
 static bool exact_list(Cell *arglist) {
-  for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-    switch (car(a)->type()) {
-    case Cell::Type::Int:
-      continue;
-    case Cell::Type::Real:
+  for (Cell *a = arglist; a != nil; a = Cell::cdr(a)) {
+    if (!Cell::car(a)->is<intptr_t>())
       return false;
-    default:
-      return false;
-    }
-
+  }
   return true;
 }
 
 inline static double asReal(Cell *c) {
-  if (c->type() == Cell::Type::Int)
+  if (c->is<intptr_t>())
     return (double)c->IntValue();
   else
     return c->RealValue();
@@ -196,9 +190,9 @@ Cell *skmin(Context *ctx, Cell *arglist) {
 
 Cell *skabs(Context *ctx, Cell *arglist) {
   Cell *c = car(arglist);
-  if (c->type() == Cell::Type::Int)
+  if (c->is<intptr_t>())
     return ctx->make_int(std::abs(c->IntValue()));
-  else if (c->type() == Cell::Type::Real)
+  else if (c->is<double>())
     return ctx->make_real(fabs(c->RealValue()));
   else
     error("numeric type expected");
@@ -364,8 +358,8 @@ Cell *eq(Context *ctx, Cell *arglist) {
 
 Cell *eqv(Context *ctx, Cell *arglist) {
   // If they're both real, compare them as numbers; else use eq
-  if (car(arglist)->type() == Cell::Type::Real &&
-      cadr(arglist)->type() == Cell::Type::Real)
+  if (car(arglist)->is<double>() &&
+      cadr(arglist)->is<double>())
     return ctx->make_boolean(car(arglist)->RealValue() ==
                              cadr(arglist)->RealValue());
   return eq(ctx, arglist);
@@ -623,7 +617,7 @@ Cell *null_p(Context *ctx, Cell *arglist) {
 
 Cell *zero_p(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
-  if (a->type() == Cell::Type::Int)
+  if (a->is<intptr_t>())
     return ctx->make_boolean(a->IntValue() == 0);
   else
     return ctx->make_boolean(a->RealValue() == 0.0);
@@ -636,24 +630,24 @@ static Cell *cons_accessor(Context *ctx, Cell *a) {
   return Accessor(Cell::car(a));
 }
 
-template <Cell::Type T>
+template <typename T>
 static Cell *type_predicate(Context *ctx, Cell *a) {
-  return ctx->make_boolean(Cell::car(a)->type() == T);
+  return ctx->make_boolean(Cell::car(a)->is<T>());
 }
 
-static constexpr subr_f string_p  = type_predicate<Cell::Type::String>;
-static constexpr subr_f symbol_p  = type_predicate<Cell::Type::Symbol>;
-static constexpr subr_f vector_p  = type_predicate<Cell::Type::Vec>;
-static constexpr subr_f char_p    = type_predicate<Cell::Type::Char>;
-static constexpr subr_f input_p   = type_predicate<Cell::Type::Iport>;
-static constexpr subr_f output_p  = type_predicate<Cell::Type::Oport>;
-static constexpr subr_f integer_p = type_predicate<Cell::Type::Int>;
-static constexpr subr_f exact_p   = type_predicate<Cell::Type::Int>;
-static constexpr subr_f inexact_p = type_predicate<Cell::Type::Real>;
+static constexpr subr_f string_p  = type_predicate<std::string>;
+static constexpr subr_f symbol_p  = type_predicate<Cell::Symbol>;
+static constexpr subr_f vector_p  = type_predicate<Cell::Vec>;
+static constexpr subr_f char_p    = type_predicate<char>;
+static constexpr subr_f input_p   = type_predicate<Cell::Iport>;
+static constexpr subr_f output_p  = type_predicate<Cell::Oport>;
+static constexpr subr_f integer_p = type_predicate<intptr_t>;
+static constexpr subr_f exact_p   = type_predicate<intptr_t>;
+static constexpr subr_f inexact_p = type_predicate<double>;
 
 static Cell *number_p(Context *ctx, Cell *a) {
-  Cell::Type t = Cell::car(a)->type();
-  return ctx->make_boolean(t == Cell::Type::Int || t == Cell::Type::Real);
+  Cell *c = Cell::car(a);
+  return ctx->make_boolean(c->is<intptr_t>() || c->is<double>());
 }
 
 static constexpr subr_f rational_p = number_p;
@@ -672,15 +666,14 @@ Cell *boolean_p(Context *ctx, Cell *arglist) {
 
 Cell *procedure_p(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
-  Cell::Type t = a->type();
 
-  return ctx->make_boolean(t == Cell::Type::Subr || t == Cell::Type::Lambda ||
-                           t == Cell::Type::Cont || t == Cell::Type::Cproc ||
-                           (t == Cell::Type::Builtin && !a->macro()));
+  return ctx->make_boolean(a->is<Cell::Subr>() || a->is<Cell::Lambda>() ||
+                           a->is<Cell::Cont>() || a->is<Cell::Cproc>() ||
+                           (a->is<Cell::Builtin>() && !a->macro()));
 }
 
 Cell *primitive_procedure_p(Context *ctx, Cell *arglist) {
-  return ctx->make_boolean(car(arglist)->type() == Cell::Type::Subr);
+  return ctx->make_boolean(car(arglist)->is<Cell::Subr>());
 }
 
 Cell *list_p(Context *ctx, Cell *arglist) {
@@ -691,7 +684,7 @@ Cell *list_p(Context *ctx, Cell *arglist) {
     if (p == nil)
       return ctx->make_boolean(true);
 
-    if (p->type() != Cell::Type::Cons)
+    if (!p->is<Cell::Cons>())
       return ctx->make_boolean(false);
 
     p = Cell::cdr(p);
@@ -703,8 +696,7 @@ Cell *list_p(Context *ctx, Cell *arglist) {
 
 Cell *number_to_string(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
-  switch (a->type()) {
-  case Cell::Type::Int: {
+  if (a->is<intptr_t>()) {
     const char *fmt = "%d";
 
     if (cdr(arglist) != nil) {
@@ -719,20 +711,16 @@ Cell *number_to_string(Context *ctx, Cell *arglist) {
       else
         error("unsupported output base"); // XXX
     }
-
-    char buf[80];
-    snprintf(buf, sizeof(buf), fmt, car(arglist)->IntValue());
+    char buf[40];
+    snprintf(buf, sizeof(buf), fmt, a->IntValue());
     return ctx->make_string(buf);
-  }
-  case Cell::Type::Real: {
-    char buf[80];
+  } else if (a->is<double>()) {
+    char buf[40];
     Cell::real_to_string(a->RealValue(), buf, sizeof(buf));
     return ctx->make_string(buf);
   }
-
-  default:
-    return ctx->make_boolean(false);
-  }
+  error("expected a number");
+  return nil;
 }
 
 Cell *string_length(Context *ctx, Cell *arglist) {
@@ -1093,15 +1081,17 @@ Cell *reverse(Context *ctx, Cell *arglist) {
 }
 
 Cell *exact_to_inexact(Context *ctx, Cell *arglist) {
-  return ctx->make_real(asReal(car(arglist)));
+  Cell *a = car(arglist);
+  if (a->is<intptr_t>())
+    return ctx->make_real((double)a->IntValue());
+  return ctx->make_real(a->RealValue());
 }
 
 Cell *inexact_to_exact(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
-  if (a->type() == Cell::Type::Int)
+  if (a->is<intptr_t>())
     return ctx->make_int(a->IntValue());
-  else
-    return ctx->make_int(static_cast<intptr_t>(a->RealValue()));
+  return ctx->make_int(static_cast<intptr_t>(a->RealValue()));
 }
 
 // Round to nearest int... which would be easy except that the Scheme

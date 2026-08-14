@@ -346,147 +346,124 @@ void Cell::write(FILE *out) const {
 }
 
 void Cell::write(sstring &ss) const {
-  if (this == &Nil)
+  if (this == &Nil) {
     ss.append("()");
-  else {
-    Type t = type();
-    switch (t) {
-    case Type::Int: {
-      char buf[40];
-      snprintf(buf, sizeof(buf), "%" PRIdPTR, IntValue());
-      ss.append(buf);
-      break;
-    }
-    case Type::Symbol:
-      ss.append(SymbolValue()->key);
-      break;
-    case Type::Builtin:
-      ss.append("#<builtin ");
-      ss.append(BuiltinValue()->key);
-      ss.append(">");
-      break;
-    case Type::Char:
-      ss.append("#\\");
-      // XXX escaping?
-      ss.append(CharValue());
-      break;
-    case Type::Iport:
-      ss.append("#<input-port>");
-      break;
-    case Type::Oport:
-      ss.append("#<output-port>");
-      break;
-    case Type::Subr:
-      ss.append("#<subr ");
-      ss.append(SubrValue()->name);
-      ss.append('>');
-      break;
-    case Type::Cont:
-      ss.append("#<continuation>");
-      break;
-    case Type::Real: {
-      char buf[80];
-      real_to_string(RealValue(), buf, sizeof(buf));
-      ss.append(buf);
-      break;
-    }
-    case Type::Unique:
-      // "Unique" objects (like #t and EOF) keep their
-      // printed representations in their cdrs.
-      ss.append(std::get<Cell::Unique>(val).s);
-      break;
-    case Type::Cons: {
-      const Cell *d;
-      ss.append('(');
-      for (d = this; d->type() == Type::Cons; d = cdr(d)) {
-        if (d == nil) {
-          ss.append(')');
-          return;
-        }
-        car(d)->write(ss);
-        if (cdr(d) != nil)
-          ss.append(' ');
-      }
-      ss.append(". ");
-      d->write(ss);
-      ss.append(')');
-      break;
-    }
-    case Type::String: {
-      const std::string &str = StringValue();
-      ss.append('"');
-      for (char ch : str) {
-        if (ch == '"')
-          ss.append("\\\"");
-        else if (ch == '\\')
-          ss.append("\\\\");
-        else if (ch == '\n')
-          ss.append("\\n");
-        else
-          ss.append(ch);
-      }
-      ss.append('"');
-      break;
-    }
-    case Type::Vec: {
-      cellvector *v = VectorValue();
-      ss.append("#(");
-      for (int ix = 0; ix < v->size(); ++ix) {
-        if (ix != 0)
-          ss.append(' ');
-        v->get(ix)->write(ss);
-      }
-      ss.append(')');
-      break;
-    }
-    case Type::Lambda: {
-      Procedure proc = LambdaValue();
-      ss.append(flag(Flag::Macro) ? "#<macro " : "#<lambda ");
-      if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
-        proc.arglist->write(ss);
-        ss.append(' ');
-        proc.body->write(ss);
-        ss.append('>');
-      } else {
-        proc.arglist->write(ss);
-        ss.append(" ...>");
-      }
-      break;
-    }
-    case Type::Promise:
-      ss.append("#<promise ");
-      PromiseValue()->write(ss);
-      ss.append('>');
-      break;
-    case Type::Cproc:
-      ss.append("#<compiled-procedure>");
-      break;
-    case Type::Cpromise:
-      if (flag(Flag::Forced))
-        CPromiseValue()->write(ss);
-      else
-        ss.append("#<compiled-promise>");
-      break;
-    case Type::Insn:
-      ss.append("#<vm-instruction>");
-      break;
-    default:
-      ss.append("#<?>");
-    }
+    return;
   }
+  if (short_atom(this)) {
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%" PRIdPTR, IntValue());
+    ss.append(buf);
+    return;
+  }
+
+  std::visit(
+      overloaded{
+          [&](intptr_t i) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%" PRIdPTR, i);
+            ss.append(buf);
+          },
+          [&](const Cell::Symbol &s) { ss.append(s.s->key); },
+          [&](const Cell::Builtin &b) {
+            ss.append("#<builtin ");
+            ss.append(b.s->key);
+            ss.append(">");
+          },
+          [&](char ch) {
+            ss.append("#\\");
+            ss.append(ch);
+          },
+          [&](const Cell::Iport &) { ss.append("#<input-port>"); },
+          [&](const Cell::Oport &) { ss.append("#<output-port>"); },
+          [&](const Cell::Subr &s) {
+            ss.append("#<subr ");
+            ss.append(s.name);
+            ss.append('>');
+          },
+          [&](const Cell::Cont &) { ss.append("#<continuation>"); },
+          [&](double d) {
+            char buf[80];
+            real_to_string(d, buf, sizeof(buf));
+            ss.append(buf);
+          },
+          [&](const Cell::Unique &u) { ss.append(u.s); },
+          [&](const Cell::Cons &) {
+            const Cell *d;
+            ss.append('(');
+            for (d = this; d->is<Cell::Cons>(); d = cdr(d)) {
+              if (d == nil) {
+                ss.append(')');
+                return;
+              }
+              car(d)->write(ss);
+              if (cdr(d) != nil)
+                ss.append(' ');
+            }
+            ss.append(". ");
+            d->write(ss);
+            ss.append(')');
+          },
+          [&](const std::string &str) {
+            ss.append('"');
+            for (char ch : str) {
+              if (ch == '"')
+                ss.append("\\\"");
+              else if (ch == '\\')
+                ss.append("\\\\");
+              else if (ch == '\n')
+                ss.append("\\n");
+              else
+                ss.append(ch);
+            }
+            ss.append('"');
+          },
+          [&](const Cell::Vec &v) {
+            ss.append("#(");
+            for (int ix = 0; ix < v.cv->size(); ++ix) {
+              if (ix != 0)
+                ss.append(' ');
+              v.cv->get(ix)->write(ss);
+            }
+            ss.append(')');
+          },
+          [&](const Cell::Lambda &) {
+            Procedure proc = LambdaValue();
+            ss.append(flag(Flag::Macro) ? "#<macro " : "#<lambda ");
+            if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
+              proc.arglist->write(ss);
+              ss.append(' ');
+              proc.body->write(ss);
+              ss.append('>');
+            } else {
+              proc.arglist->write(ss);
+              ss.append(" ...>");
+            }
+          },
+          [&](const Cell::Promise &p) {
+            ss.append("#<promise ");
+            p.cv->get(0)->write(ss);
+            ss.append('>');
+          },
+          [&](const Cell::Cproc &) { ss.append("#<compiled-procedure>"); },
+          [&](const Cell::Cpromise &p) {
+            if (flag(Flag::Forced))
+              p.cv->get(0)->write(ss);
+            else
+              ss.append("#<compiled-promise>");
+          },
+          [&](const Cell::Insn &) { ss.append("#<vm-instruction>"); },
+          [&](const auto &) { ss.append("#<?>"); }},
+      val);
 }
 
 void Cell::display(FILE *out) {
-  switch (type()) {
-  case Type::Char:
-    fputc(CharValue(), out);
-    break;
-  case Type::String:
-    fputs(StringValue().c_str(), out);
-    break;
-  default:
+  if (auto *ch = get_if<char>())
+    fputc(*ch, out);
+  else if (auto *str = get_if<std::string>())
+    fputs(str->c_str(), out);
+  else
     write(out);
-  }
   fflush(out);
 }
 

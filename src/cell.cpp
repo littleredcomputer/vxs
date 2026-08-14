@@ -65,7 +65,7 @@ Cell *Cell::notcons() {
 }
 
 bool Cell::ispair() {
-  return type() == Type::Cons && this != unspecified && this != nil;
+  return is<Cons>() && this != unspecified && this != nil;
 }
 
 void Cell::sanity_check() {
@@ -79,8 +79,6 @@ bool Cell::eq(Cell *that) {
     return false;
   if (!atomic(this) || !atomic(that))
     return false; // Conses must have the exact same pointer to be eq
-  if (type() != that->type())
-    return false;
   return val == that->val;
 }
 
@@ -90,33 +88,39 @@ bool Cell::equal(Cell *c) {
   if (short_atom(this) || short_atom(c))
     return false;
 
-  Type t0 = type();
-  Type t1 = c->type();
-
   if (this == &Nil && c == &Nil)
     return true;
-  else if (t0 == Type::Cons && t1 == Type::Cons)
-    return std::get<Cons>(val).car->equal(std::get<Cons>(c->val).car) &&
-           std::get<Cons>(val).cdr->equal(std::get<Cons>(c->val).cdr);
-  else if (t0 == Type::Vec && t1 == Type::Vec) {
-    cellvector *cv = VectorValue();
-    cellvector *ocv = c->VectorValue();
-    int s = cv->size();
 
-    if (s != ocv->size())
-      return false;
-
-    for (int ix = 0; ix < s; ++ix)
-      if (!cv->get(ix)->equal(ocv->get(ix)))
+  if (auto *p1 = get_if<Cons>()) {
+    if (auto *p2 = c->get_if<Cons>())
+      return p1->car->equal(p2->car) && p1->cdr->equal(p2->cdr);
+    return false;
+  }
+  if (auto *v1 = get_if<Vec>()) {
+    if (auto *v2 = c->get_if<Vec>()) {
+      cellvector *cv = v1->cv;
+      cellvector *ocv = v2->cv;
+      int s = cv->size();
+      if (s != ocv->size())
         return false;
-
-    return true;
-  } else if (t0 == Type::String && t1 == Type::String)
-    return StringValue() == c->StringValue();
-  else if (t0 == Type::Real && t1 == Type::Real)
-    return RealValue() == c->RealValue();
-  else
-    return eq(c);
+      for (int ix = 0; ix < s; ++ix)
+        if (!cv->get(ix)->equal(ocv->get(ix)))
+          return false;
+      return true;
+    }
+    return false;
+  }
+  if (auto *s1 = get_if<std::string>()) {
+    if (auto *s2 = c->get_if<std::string>())
+      return *s1 == *s2;
+    return false;
+  }
+  if (auto *d1 = get_if<double>()) {
+    if (auto *d2 = c->get_if<double>())
+      return *d1 == *d2;
+    return false;
+  }
+  return eq(c);
 }
 
 //------------------------------------------------------------------------
@@ -606,8 +610,8 @@ E2:
         cv->gc_index = 0;
         T = P;
       }
-    } else if (P->type() == Cell::Type::Symbol) {
-      psymbol ps = std::get<Cell::Symbol>(P->val).s;
+    } else if (auto *sym = P->get_if<Cell::Symbol>()) {
+      psymbol ps = sym->s;
       if (ps->plist && ps->plist->gc_uplink == 0 && ps->plist->size() > 0) {
         ps->plist->gc_uplink = T;
         ps->plist->gc_index = 0;
@@ -660,8 +664,8 @@ E6:
         goto next_element;
       goto E2;
     }
-  } else if (Q->type() == Cell::Type::Symbol) {
-    psymbol ps = std::get<Cell::Symbol>(Q->val).s;
+  } else if (auto *sym = Q->get_if<Cell::Symbol>()) {
+    psymbol ps = sym->s;
   next_property:
     int i = ps->plist->gc_index++;
     if (i >= ps->plist->size()) {
@@ -698,37 +702,23 @@ void Slab::sweep(Context *ctx) {
   for (Cell *p = start; p < next; ++p) {
     if (p->m_gc_mark) {
       p->m_gc_mark = false;
-    } else if (p->type() != Cell::Type::Free &&
-               !std::holds_alternative<Cell::Free>(p->val)) {
+    } else if (!p->is<Cell::Free>()) {
       if (traceall) {
         printf("s ");
         p->dump(stdout);
         putchar('\n');
       }
-      Cell::Type t = p->type();
 
-      switch (t) {
-      case Cell::Type::Cont:
-      case Cell::Type::Promise:
-      case Cell::Type::Cproc:
-      case Cell::Type::Cpromise:
-      case Cell::Type::Lambda:
-      case Cell::Type::Vec:
+      if (p->flag(Cell::Flag::VRef)) {
         p->unsafe_vector_value()->free();
-        break;
-      case Cell::Type::Iport:
-        if (FILE *f = std::get<Cell::Iport>(p->val).f)
-          fclose(f);
-        break;
-      case Cell::Type::Oport:
-        if (FILE *f = std::get<Cell::Oport>(p->val).f)
-          fclose(f);
-        break;
-      case Cell::Type::Magic:
-        delete std::get<Cell::MagicBox *>(p->val);
-        break;
-      default:
-        break;
+      } else if (auto *ip = p->get_if<Cell::Iport>()) {
+        if (ip->f)
+          fclose(ip->f);
+      } else if (auto *op = p->get_if<Cell::Oport>()) {
+        if (op->f)
+          fclose(op->f);
+      } else if (auto *mb = p->get_if<Cell::MagicBox *>()) {
+        delete *mb;
       }
 
       --ctx->cellsAlloc;
