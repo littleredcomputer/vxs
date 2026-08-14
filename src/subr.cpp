@@ -722,27 +722,40 @@ Cell *list_p(Context *ctx, Cell *arglist) {
 Cell *number_to_string(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
   if (a->is<intptr_t>()) {
-    const char *fmt = "%d";
-
+    int base = 10;
     if (cdr(arglist) != nil) {
-      int base = cadr(arglist)->IntValue();
-
-      if (base == 16)
-        fmt = "%x";
-      else if (base == 8)
-        fmt = "%o";
-      else if (base == 10)
-        fmt = "%d";
-      else
-        error("unsupported output base"); // XXX
+      base = cadr(arglist)->IntValue();
     }
-    char buf[40];
-    snprintf(buf, sizeof(buf), fmt, a->IntValue());
-    return ctx->make_string(buf);
+    intptr_t val = a->IntValue();
+    if (base == 10)
+      return ctx->make_string(std::to_string(val));
+    if (base == 16) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%lx", static_cast<unsigned long>(val));
+      return ctx->make_string(buf);
+    }
+    if (base == 8) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%lo", static_cast<unsigned long>(val));
+      return ctx->make_string(buf);
+    }
+    if (base == 2) {
+      if (val == 0)
+        return ctx->make_string("0");
+      std::string bin;
+      uintptr_t uval = (val < 0) ? -val : val;
+      while (uval > 0) {
+        bin.push_back((uval & 1) ? '1' : '0');
+        uval >>= 1;
+      }
+      if (val < 0)
+        bin.push_back('-');
+      std::reverse(bin.begin(), bin.end());
+      return ctx->make_string(std::move(bin));
+    }
+    error("unsupported output base");
   } else if (a->is<double>()) {
-    char buf[40];
-    Cell::real_to_string(a->RealValue(), buf, sizeof(buf));
-    return ctx->make_string(buf);
+    return ctx->make_string(Cell::real_to_string(a->RealValue()));
   }
   error("expected a number");
   return nil;

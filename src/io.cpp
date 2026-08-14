@@ -327,16 +327,14 @@ Cell *Context::read(FILE *fp) {
   return read(fsio);
 }
 
-void Cell::real_to_string(double d, char *buf, int nbytes) {
-  snprintf(buf, nbytes, "%.15g", d);
-
-  // Now if buf contains neither a `.' nor an `e', then
-  // the number was whole, and it won't "read back" as
-  // a Real, as desired.  We tack on a decimal point in
-  // that event.
-
-  if (!strpbrk(buf, ".eE"))
-    strcat(buf, ".");
+std::string Cell::real_to_string(double d) {
+  char buf[64];
+  int n = snprintf(buf, sizeof(buf), "%.15g", d);
+  if (n > 0 && !strpbrk(buf, ".eE")) {
+    buf[n] = '.';
+    buf[n + 1] = '\0';
+  }
+  return std::string(buf);
 }
 
 void Cell::write(FILE *out) const {
@@ -351,18 +349,14 @@ void Cell::write(sstring &ss) const {
     return;
   }
   if (short_atom(this)) {
-    char buf[40];
-    snprintf(buf, sizeof(buf), "%ld", IntValue());
-    ss.append(buf);
+    ss.append(std::to_string(IntValue()));
     return;
   }
 
   std::visit(
       overloaded{
           [&](intptr_t i) {
-            char buf[40];
-            snprintf(buf, sizeof(buf), "%ld", i);
-            ss.append(buf);
+            ss.append(std::to_string(i));
           },
           [&](const Cell::Symbol &s) { ss.append(s.s->key); },
           [&](const Cell::Builtin &b) {
@@ -383,9 +377,7 @@ void Cell::write(sstring &ss) const {
           },
           [&](const Cell::Cont &) { ss.append("#<continuation>"); },
           [&](double d) {
-            char buf[80];
-            real_to_string(d, buf, sizeof(buf));
-            ss.append(buf);
+            ss.append(real_to_string(d));
           },
           [&](const Cell::Unique &u) { ss.append(u.s); },
           [&](const Cell::Cons &) {

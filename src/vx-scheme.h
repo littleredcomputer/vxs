@@ -692,7 +692,7 @@ public:
   }
   cellvector *unsafe_vector_value() const { return vector_payload(); }
 
-  static void real_to_string(double, char *, int);
+  static std::string real_to_string(double);
   double asReal() const {
     return is<intptr_t>() ? (double)IntValue() : RealValue();
   }
