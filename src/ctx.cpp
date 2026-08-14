@@ -26,15 +26,15 @@ psymbol s_quote = intern("quote");
 // The Universal Cells
 //
 
-ALIGN8 Cell Cell::Nil;
-ALIGN8 Cell Cell::Unspecified("#<unspecified>");
-ALIGN8 Cell Cell::Unassigned("#<unassigned>");
-ALIGN8 Cell Cell::Eof_Object("#<eof-object>");
-ALIGN8 Cell Cell::Bool_T("#t");
-ALIGN8 Cell Cell::Bool_F("#f");
-ALIGN8 Cell Cell::Error("#<error>");
-ALIGN8 Cell Cell::Halt("#<halt>");
-ALIGN8 Cell Cell::Unimplemented("#<unimplemented>");
+Cell Cell::Nil;
+Cell Cell::Unspecified("#<unspecified>");
+Cell Cell::Unassigned("#<unassigned>");
+Cell Cell::Eof_Object("#<eof-object>");
+Cell Cell::Bool_T("#t");
+Cell Cell::Bool_F("#f");
+Cell Cell::Error("#<error>");
+Cell Cell::Halt("#<halt>");
+Cell Cell::Unimplemented("#<unimplemented>");
 
 Cell *nil = &Cell::Nil;
 Cell *unspecified = &Cell::Unspecified;

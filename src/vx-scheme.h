@@ -22,15 +22,7 @@
 template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-#if defined(__GNUC__)
-// Statically allocated cells must lie upon an 8-byte
-// boundary, so that the lower three bits of pointers
-// to such objects are free for our use.
-#define ALIGN8 __attribute__((aligned(8)))
-#define PACKED __attribute__((packed))
-#else
-#error "must have a way of aligning Cells to 8-byte boundary"
-#endif
+
 
 class OS;
 class Cell;
@@ -298,16 +290,16 @@ public:
   };
 
   // Static pre-allocated cells
-  ALIGN8 static Cell Nil;
-  ALIGN8 static Cell Unspecified;
-  ALIGN8 static Cell Unassigned;
-  ALIGN8 static Cell Eof_Object;
-  ALIGN8 static Cell Bool_T;
-  ALIGN8 static Cell Bool_F;
-  ALIGN8 static Cell Apply;
-  ALIGN8 static Cell Error;
-  ALIGN8 static Cell Halt;
-  ALIGN8 static Cell Unimplemented;
+  static Cell Nil;
+  static Cell Unspecified;
+  static Cell Unassigned;
+  static Cell Eof_Object;
+  static Cell Bool_T;
+  static Cell Bool_F;
+  static Cell Apply;
+  static Cell Error;
+  static Cell Halt;
+  static Cell Unimplemented;
 
   struct Cons {
     Cell *car = nullptr;
@@ -708,9 +700,10 @@ public:
     }
   }
 
-  static void stats();
   static void sanity_check();
 };
+
+static_assert(alignof(Cell) >= 2, "Cell must be at least 2-byte aligned for tagged pointers");
 
 // class Environment
 //
