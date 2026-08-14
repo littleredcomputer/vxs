@@ -103,9 +103,9 @@ Cell *Context::eval(Cell *form) {
   return make_boolean(false);
 }
 
-void error(const char *message, const char *m2 /* = 0 */) {
-  std::string err = message;
-  if (m2) {
+void error(std::string_view message, std::string_view m2) {
+  std::string err(message);
+  if (!m2.empty()) {
     err += m2;
   }
   throw std::runtime_error(err);

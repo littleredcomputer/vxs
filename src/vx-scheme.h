@@ -16,6 +16,7 @@
 
 #include <coroutine>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <variant>
 
@@ -97,10 +98,7 @@ extern Cell *unspecified;
 extern Cell *unassigned;
 extern Cell *unimplemented;
 
-void error(const char *, const char * = 0);
-inline void error(const std::string &s, const char *s2 = 0) {
-  error(s.c_str(), s2);
-}
+void error(std::string_view s1, std::string_view s2 = {});
 
 class cellvector {
 public:
@@ -199,17 +197,18 @@ private:
 // we can respect the case of the sybmol as written.
 
 struct symbol {
-  symbol *llink = nullptr; // Left binary tree link
-  symbol *rlink = nullptr; // Right binary tree link
-  const char *key = nullptr; // Search key (symbol name)
-  const char *truename = nullptr; // case-sensitive name, if diff.
+  std::string name;
+  std::string truename_str;
+  const char *key = nullptr; // Search key (symbol name, points to name.c_str())
+  const char *truename = nullptr; // case-sensitive name, if diff
   cellvector *plist = nullptr; // property list
-  int16_t b = 0; // Balance factor
 };
 using psymbol = symbol *;
 
+psymbol intern(std::string_view name);
 psymbol intern(const char *name);
 psymbol intern(const std::string &name);
+psymbol intern_stet(std::string_view name);
 psymbol intern_stet(const char *name);
 psymbol intern_stet(const std::string &name);
 Cell *vector_from_list(Context *ctx, Cell *);
@@ -251,48 +250,66 @@ private:
 };
 
 // ------------------------------------------------------------------------
-// An "sstring" is a simple extensible string.  It reallocates storage
-// as necessary to support arbitrary growth.  It is a poor cousin to
-// STL's string, but with considerably less code-bloat since there's no
-// template expansion or nontrivial inlining.
-//
-// In order to avoid involving the strstream class, we also extend
-// our sstream with a small amount of I/O semantics.  This allows
-// sstrings to be passed to the lexical analyzer.
+// An "sstring" is an extensible string with I/O streaming semantics.
 
 class sstring : public sio {
 public:
-  sstring();
-  virtual ~sstring();
+  sstring() = default;
+  explicit sstring(std::string_view sv) : m_str(sv) {}
 
-  char *str() { return base; }
-  char &operator[](size_t ix) { return base[ix]; }
+  const char *str() const { return m_str.c_str(); }
+  char *str() { return m_str.data(); }
+  const std::string &string() const { return m_str; }
+  std::string_view view() const { return m_str; }
 
-  void append(const char *);
-  void append(const char *, size_t len);
-  void append(const char);
-  size_t length() { return sz; }
-  void claim(); // claim dynamic storage
-  bool operator==(const char *s) { return !strcmp(base, s); }
+  char &operator[](size_t ix) { return m_str[ix]; }
+  const char &operator[](size_t ix) const { return m_str[ix]; }
+
+  void append(std::string_view sv) { m_str.append(sv); }
+  void append(char ch) { m_str.push_back(ch); }
+  void append(const char *s) {
+    if (s)
+      m_str.append(s);
+  }
+  void append(const char *s, size_t len) {
+    if (s)
+      m_str.append(s, len);
+  }
+
+  size_t length() const { return m_str.size(); }
+  size_t size() const { return m_str.size(); }
+  bool empty() const { return m_str.empty(); }
+  void clear() {
+    m_str.clear();
+    m_pos = 0;
+  }
+
+  bool operator==(std::string_view sv) const { return m_str == sv; }
 
   // I/O behavior
-
-  int get();
-  int peek();
-  bool eof();
-  void unget();
-  void ignore();
+  int get() override {
+    if (m_pos < m_str.size())
+      return static_cast<unsigned char>(m_str[m_pos++]);
+    return EOF;
+  }
+  int peek() override {
+    if (m_pos < m_str.size())
+      return static_cast<unsigned char>(m_str[m_pos]);
+    return EOF;
+  }
+  bool eof() const { return m_pos >= m_str.size(); }
+  void unget() override {
+    if (m_pos > 0)
+      --m_pos;
+  }
+  void ignore() override {
+    if (m_pos < m_str.size())
+      ++m_pos;
+  }
 
 private:
-  static constexpr size_t stat_size = 32;
-  char c[stat_size];
-
-  size_t sz;
-  size_t alloc;
-  char *base;
-  char *end;
-  char *pos; // I/O read position
-  bool claimed;
+  std::string m_str;
+  size_t m_pos = 0;
 };
 
 //----------------------------------------------------------------------
