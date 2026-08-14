@@ -9,7 +9,6 @@
 
 #include "vx-scheme.h"
 
-static const char *nomem_error = "out of memory";
 
 Cell *Context::make_int(intptr_t i) {
   // If the integer fits in 63 bits (1-bit tag ATOM = 0x1),
@@ -19,10 +18,6 @@ Cell *Context::make_int(intptr_t i) {
   }
   return alloc<intptr_t>(i);
 }
-
-// Context::make_string
-//   Makes a string of the indicated length -- it is UNINITIALIZED
-
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   Cell *c = alloc<Cell::Vec>(cellvector::alloc(n));
@@ -34,9 +29,8 @@ Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   return c;
 }
 
-Cell *Context::make_iport(std::string_view fname) {
-  std::string path(fname);
-  FILE *ip = fopen(path.c_str(), "r");
+Cell *Context::make_iport(const std::string &fname) {
+  FILE *ip = fopen(fname.c_str(), "r");
   if (ip)
     return make_iport(ip);
 
@@ -44,9 +38,8 @@ Cell *Context::make_iport(std::string_view fname) {
   return nil;
 }
 
-Cell *Context::make_oport(std::string_view fname) {
-  std::string path(fname);
-  FILE *ofs = fopen(path.c_str(), "w");
+Cell *Context::make_oport(const std::string &fname) {
+  FILE *ofs = fopen(fname.c_str(), "w");
   if (ofs)
     return make_oport(ofs);
 
@@ -237,7 +230,7 @@ cellvector::cellvector(int size, int alloc) { make_cv(size, alloc); }
 void cellvector::make_cv(int size, int alloc) {
   v = (Cell **)malloc(alloc * sizeof(Cell *));
   if (!v)
-    error(nomem_error);
+    error("out of memory");
   allocated = alloc;
 
   for (int ix = 0; ix < alloc; ++ix)
@@ -270,7 +263,7 @@ void cellvector::expand() {
   Cell **v2 = (Cell **)malloc(new_alloc * sizeof(Cell *));
 
   if (!v2)
-    error(nomem_error);
+    error("out of memory");
 
   memcpy(v2, v, allocated * sizeof(Cell *));
   ::free(v);

@@ -890,9 +890,9 @@ public:
   Cell *make_symbol(psymbol y) { return alloc<Cell::Symbol>(y); }
   Cell *make_boolean(bool b) { return b ? &Cell::Bool_T : &Cell::Bool_F; }
   Cell *make_vector(int n, Cell *init = &Cell::Unspecified);
-  Cell *make_iport(std::string_view fname);
+  Cell *make_iport(const std::string &fname);
   Cell *make_iport(FILE *ip) { return alloc<Cell::Iport>(ip); }
-  Cell *make_oport(std::string_view fname);
+  Cell *make_oport(const std::string &fname);
   Cell *make_oport(FILE *op) { return alloc<Cell::Oport>(op); }
   Cell *make_procedure(Cell *env, Cell *body, Cell *arglist);
   Cell *make_promise(Cell *env, Cell *body);
@@ -915,8 +915,8 @@ public:
 
   // ------------------------------------------------------------
 
-  void with_input(std::string_view fname) { istack.push(make_iport(fname)); }
-  void with_output(std::string_view fname) { ostack.push(make_oport(fname)); }
+  void with_input(const std::string &fname) { istack.push(make_iport(fname)); }
+  void with_output(const std::string &fname) { ostack.push(make_oport(fname)); }
 
   void without_output() { fflush(ostack.pop()->OportValue()); }
 
