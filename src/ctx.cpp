@@ -15,9 +15,9 @@
 //
 
 const char *Cell::typeName[] = {
-    "int",    "symbol", "unique", "string",   "real",    "subr", "lambda",
-    "vector", "char",   "iport",  "oport",    "promise", "cont", "builtin",
-    "magic",  "insn",   "cproc",  "cpromise", "cons"};
+    "cons", "lambda", "cont", "insn", "vector", "cproc", "cpromise",
+    "promise", "builtin", "magic", "subr", "iport", "oport",
+    "symbol", "string", "real", "int", "char", "unique"};
 
 INTERN_SYM(s_unquote, "unquote");
 INTERN_SYM(s_unquote_splicing, "unquote-splicing");

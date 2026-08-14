@@ -395,7 +395,7 @@ void Cell::write(sstring &ss) const {
     case Unique:
       // "Unique" objects (like #t and EOF) keep their
       // printed representations in their cdrs.
-      ss.append(cd.u);
+      ss.append(std::get<Cell::UniqueVal>(val).s);
       break;
     case Cons: {
       const Cell *d;

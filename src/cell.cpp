@@ -42,9 +42,7 @@ Cell *Context::make_char(char ch) {
 
 Cell *Context::make_real(double d) {
   Cell *c = alloc(Cell::Real);
-  double *pd = (double *)malloc(sizeof(double));
-  *pd = d;
-  c->init_real(pd);
+  c->init_real(d);
   return c;
 }
 
@@ -53,10 +51,7 @@ Cell *Context::make_real(double d) {
 
 Cell *Context::make_string(size_t len) {
   Cell *c = alloc(Cell::String);
-  size_t boxsize = sizeof(Cell::StringBox) + len + 1;
-  Cell::StringBox *pbox = (Cell::StringBox *)xmalloc(boxsize);
-  pbox->length = len;
-  c->init_string(pbox);
+  c->init_string(std::string(len, '\0'));
   return c;
 }
 
@@ -78,16 +73,13 @@ Cell *Context::make_string(const char *s, size_t len) {
 
 Cell *Context::make_subr(subr_f s, const char *name) {
   Cell *c = alloc(Cell::Subr);
-  Cell::SubrBox *psubr = new Cell::SubrBox();
-  psubr->subr = s;
-  psubr->name = name;
-  c->init_subr(psubr);
+  c->init_subr(s, name);
   return c;
 }
 
 Cell *Context::make_builtin(psymbol y) {
   Cell *c = alloc(Cell::Builtin);
-  c->init_symbol(y);
+  c->init_builtin(y);
   return c;
 }
 
@@ -104,7 +96,7 @@ Cell *Context::make_boolean(bool b) {
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   Cell *c = alloc(Cell::Vec);
-  c->init_vector(cellvector::alloc(n));
+  c->val = Cell::VecVal{cellvector::alloc(n)};
   c->flag(Cell::VREF, true);
 
   for (int ix = 0; ix < n; ++ix)
@@ -147,17 +139,13 @@ Cell *Context::make_oport(FILE *op) {
 
 Cell *Context::make(Cell *ca, Cell *cd /* = &Nil*/) {
   Cell *c = alloc(Cell::Cons);
-  c->set_unsafe_car(ca);
-  c->set_unsafe_cdr(cd);
+  c->val = Cell::ConsPair{ca, cd};
   return c;
 }
 
 Cell *Context::make_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
   Cell *c = alloc(Cell::Magic);
-  Cell::MagicBox *mbox = (Cell::MagicBox *)xmalloc(sizeof(Cell::MagicBox));
-  mbox->key = key;
-  mbox->set_f = set_f;
-  mbox->get_f = get_f;
+  c->init_magic(key, set_f, get_f);
   return c;
 }
 
@@ -197,30 +185,32 @@ void Cell::sanity_check() {
     exit(bad);
 };
 
-bool Cell::eq(const Cell *that) const {
-  if (this == that) // the easy case
+bool Cell::eq(Cell *that) {
+  if (this == that)
     return true;
   if (short_atom(this) || short_atom(that))
-    return false; // then the above case would have detected equality
-  if (long_atom(ca.p) && long_atom(that->unsafe_car())) {
-    bool part1 = (ca.i & IGN_MASK) == (that->get_car_word() & IGN_MASK) &&
-                 cd.i == that->get_cdr_word();
-
-    return part1;
-  }
-  // If both are conses, they are eq iff they are the same cons.
-  // But that would have been detected by the first test.
-  return false;
+    return false;
+  if (!atomic(this) || !atomic(that))
+    return false; // Conses must have the exact same pointer to be eq
+  if (type() != that->type())
+    return false;
+  return val == that->val;
 }
 
-bool Cell::equal(const Cell *c) const {
+bool Cell::equal(Cell *c) {
+  if (this == c)
+    return true;
+  if (short_atom(this) || short_atom(c))
+    return false;
+    
   Type t0 = type();
   Type t1 = c->type();
 
   if (this == &Nil && c == &Nil)
     return true;
   else if (t0 == Cons && t1 == Cons)
-    return ca.p->equal(c->unsafe_car()) && cd.p->equal(c->unsafe_cdr());
+    return std::get<ConsPair>(val).car->equal(std::get<ConsPair>(c->val).car) &&
+           std::get<ConsPair>(val).cdr->equal(std::get<ConsPair>(c->val).cdr);
   else if (t0 == Vec && t1 == Vec) {
     cellvector *cv = VectorValue();
     cellvector *ocv = c->VectorValue();
@@ -280,7 +270,7 @@ Cell *Cell::cddddr(const Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
 
 psymbol Cell::SymbolValue() const {
   typecheck(Symbol);
-  return cd.y;
+  return std::get<SymbolVal>(val).s;
 }
 
 void Cell::stats() {
@@ -297,146 +287,129 @@ void Cell::stats() {
 //======================================================================
 
 intptr_t Cell::IntValue() const {
-  if (short_atom(this))
-    return reinterpret_cast<intptr_t>(this) >> 8;
-
+  if (short_atom(this)) return reinterpret_cast<intptr_t>(this) >> 8;
   typecheck(Int);
-  return cd.i;
+  return std::get<intptr_t>(val);
 }
 
 char Cell::CharValue() const {
   typecheck(Char);
-  return cd.c;
+  return std::get<char>(val);
 }
 
-Cell::SubrBox *Cell::SubrValue() const {
+const Cell::SubrVal *Cell::SubrValue() const {
   typecheck(Subr);
-  return cd.f;
+  return &std::get<SubrVal>(val);
 }
 
 char *Cell::StringValue() const {
   typecheck(String);
-  return cd.s->s;
+  return const_cast<char*>(std::get<std::string>(val).c_str());
 }
 
 size_t Cell::StringLength() const {
   typecheck(String);
-  return cd.s->length;
+  return std::get<std::string>(val).length();
 }
 
 FILE *Cell::IportValue() const {
   typecheck(Iport);
-  return cd.ip;
+  return std::get<IportVal>(val).f;
 }
 
 FILE *Cell::OportValue() const {
   typecheck(Oport);
-  return cd.op;
+  return std::get<OportVal>(val).f;
 }
 
-void *Cell::ContValue() const {
-  typecheck(Cont);
-  return cd.j;
-}
+
 
 cellvector *Cell::VectorValue() const {
   typecheck(Vec);
-  return cd.cv;
+  return std::get<VecVal>(val).cv;
 }
 
 cellvector *Cell::CProcValue() const {
   typecheck(Cproc);
-  return cd.cv;
+  return std::get<CprocVal>(val).cv;
 }
 
 Cell *Cell::PromiseValue() const {
   typecheck(Promise);
-  return cd.cv->get(0);
+  return std::get<PromiseVal>(val).cv->get(0);
 }
 
 Cell *Cell::CPromiseValue() const {
   typecheck(Cpromise);
-  return cd.cv->get(0);
+  return std::get<CpromiseVal>(val).cv->get(0);
 }
 
 psymbol Cell::BuiltinValue() const {
   typecheck(Builtin);
-  return cd.y;
+  return std::get<BuiltinVal>(val).s;
 }
 
 Cell::Procedure Cell::LambdaValue() const {
   typecheck(Lambda);
-  return Procedure(cd.cv->get(0), cd.cv->get(1), cd.cv->get(2));
+  cellvector* cv = std::get<LambdaVal>(val).cv;
+  return Procedure(cv->get(0), cv->get(1), cv->get(2));
 }
 
 double Cell::RealValue() const {
   typecheck(Real);
-  return *(cd.d);
+  return std::get<double>(val);
 }
 
 const char *Cell::name() const { return typeName[type()]; }
 
-void Cell::typefail(Type t1, Type t2) const {
-  char buf[256];
-  snprintf(buf, sizeof(buf), "type check failure: wanted %s, got %s",
-           typeName[t2], typeName[t1]);
-  error(buf);
+void Cell::typefail(Type actual, Type wanted) const {
+  fprintf(stderr, "caught: type check failure: wanted %s, got %s\n",
+          typeName[wanted], typeName[actual]);
+  abort();
 }
 
 void Cell::dump(FILE *out) {
   Type t = type();
   fprintf(out, "[%p ", this);
-  if (ca.i == (FREE | ATOM))
-    fputs("free ", out);
-  else {
-    if (m_gc_mark)
-      fputs("mark ", out);
-    if (short_atom(ca.p)) {
-      printf("short %" PRIdPTR " ", ca.p->IntValue());
-    } else {
-      if (ca.i & ATOM) {
-        printf("atom %04" PRIxPTR " ", ca.i);
-        if (ca.i & FORCED)
-          fputs("forced ", out);
-        if (ca.i & QUICK)
-          fputs("quick ", out);
-        if (ca.i & MACRO)
-          fputs("macro ", out);
-        if (ca.i & VREF)
-          fputs("vref ", out);
-      }
 
-      fputs(typeName[t], out);
+  if (m_gc_mark)
+    fputs("mark ", out);
 
-      switch (t) {
-      case Cons:
-        fputs(" ", out);
-        if (ca.p == nil)
-          fputs("nil", out);
-        else
-          fprintf(out, "%p", ca.p);
-        fputs(" ", out);
-        if (cd.p == nil)
-          fputs("nil", out);
-        else
-          fprintf(out, "%p", cd.p);
-        break;
+  if (flag(FORCED)) fputs("forced ", out);
+  if (flag(QUICK)) fputs("quick ", out);
+  if (flag(MACRO)) fputs("macro ", out);
+  if (flag(VREF)) fputs("vref ", out);
 
-      case Int:
-        fprintf(out, " %" PRIdPTR, cd.i);
-        break;
-      case Real:
-        fprintf(out, " %g", RealValue());
-        break;
-      case Unique:
-        fprintf(out, " %s", cd.u);
-        break;
-      case Symbol:
-        fprintf(out, " %s", SymbolValue()->key);
-      default:
-        break;
-      }
-    }
+  fputs(typeName[t], out);
+
+  switch (t) {
+  case Cons:
+    fputs(" ", out);
+    if (std::get<ConsPair>(val).car == nil)
+      fputs("nil", out);
+    else
+      fprintf(out, "%p", std::get<ConsPair>(val).car);
+    fputs(" ", out);
+    if (std::get<ConsPair>(val).cdr == nil)
+      fputs("nil", out);
+    else
+      fprintf(out, "%p", std::get<ConsPair>(val).cdr);
+    break;
+
+  case Int:
+    fprintf(out, " %" PRIdPTR, std::get<intptr_t>(val));
+    break;
+  case Real:
+    fprintf(out, " %g", std::get<double>(val));
+    break;
+  case Unique:
+    fprintf(out, " %s", std::get<Cell::UniqueVal>(val).s);
+    break;
+  case Symbol:
+    fprintf(out, " %s", std::get<Cell::SymbolVal>(val).s->key);
+    break;
+  default:
+    break;
   }
   fputc(']', out);
 }
@@ -645,10 +618,13 @@ Cell *Context::alloc(Cell::Type t) {
 TOP:
   if ((a = mem.free)) {
     ++cellsAlloc;
-    mem.free = a->unsafe_cdr();
-    a->set_car_word(0);
-    a->set_cdr_word(0);
+    mem.free = a->next_free();
+    
     a->set_type(t);
+    a->m_flags = 0;
+    a->m_gc_mark = false;
+    a->m_gc_alt_bit = false;
+    a->m_gc_traverse_cdr = false;
     --mem.c_free;
     return a;
   }
@@ -675,8 +651,11 @@ TOP:
 
   if ((a = mem.current()->alloc())) {
     ++cellsAlloc;
-    a->set_cdr_word(0);
     a->set_type(t);
+    a->m_flags = 0;
+    a->m_gc_mark = false;
+    a->m_gc_alt_bit = false;
+    a->m_gc_traverse_cdr = false;
     return a;
   }
 
@@ -701,23 +680,11 @@ TOP:
 // GARBAGE COLLECTION
 //
 
-inline Cell *Cell::untagged(Cell *c) {
-  static const uintptr_t not_tagmask = ~Cell::TAGMASK;
 
-  return reinterpret_cast<Cell *>(reinterpret_cast<uintptr_t>(c) & not_tagmask);
-}
 
-inline void Cell::gc_set_car(Cell *src) {
-  unsigned int tagbits = ca.i & TAGMASK;
-  ca.p = src;
-  ca.i |= tagbits;
-}
+inline 
 
-inline void Cell::gc_set_cdr(Cell *src) {
-  unsigned int tagbits = cd.i & TAGMASK;
-  setcdr(this, src);
-  cd.i |= tagbits;
-}
+inline 
 
 //----------------------------------------------------------------------
 // Marking for Garbage Collection
@@ -732,114 +699,58 @@ inline void Cell::gc_set_cdr(Cell *src) {
 // support n-way marking instead of just 2-way marking.
 
 void Context::mark(Cell *P) {
-  bool traceall = debug_flag(TRACE_GC_ALL);
-  if (P == nil || P == 0 || Cell::short_atom(P) || P->is_marked())
+  bool traceall = false; // OS::flag(TRACE_GC_ALL);
+  if (P == nil || P == 0 || Cell::short_atom(P) || P->m_gc_mark)
     return;
 
-  // In Knuth's presentation, a NODE contains two pointers
-  // (which he calls ALINK and BLINK, we car and cdr), and
-  // MARK and ATOM fields.  In his layout, the MARK and
-  // ATOM fields can be manipulated easily without changing
-  // ALINK and BLINK, but in our case we store MARK and ATOM
-  // in the lower three bits of ALINK.  We must therefore
-  // be cautious when transcribing the algorithm to avoid,
-  // e.g., clearing MARK and ATOM when copying a `car' pointer.
-  // We use "gc_set_car" and "gc_set_cdr" for this purpose.
-
-  // Secondly, Knuth occasionally sets the ATOM bit of a CONS
-  // to determine which of the pointers has been placed on
-  // the stack of deferred objects.  But short atoms makes this
-  // difficult for us, as it's possible to have a cons of two
-  // short integers, say: then we need both ATOM fields of the
-  // CONS to contain that information.  Instead of using the ATOM
-  // field, we use the MARK field of the cdr, which is not used
-  // for GC purposes.
-
-  // E1:
   Cell *T = nil;
   Cell *Q = nil;
 
 E2:
-  P->set_marked(true);
+  P->m_gc_mark = true;
   if (traceall) {
     printf("m ");
     P->dump(stdout);
     putchar('\n');
   }
 
-  // -- EXTENSION to Knuth's Step E2
-  //
-  // If the cell is a cons, Knuth's algorithm will take care of
-  // marking the things referenced as a result quite handily.  But
-  // there are some atoms that can hold references too.  Knuth's
-  // algorithm works for binary trees, but to deal with vectors et
-  // al. we need to make it work for n-way trees.
-  //
-  // When an atom can hold references to other cells, we organize
-  // these into a cellvector.  In this way, we can treat all of them
-  // the same way.
-  //
-  // Whereas Knuth uses an atom bit to tell which side of a cons
-  // (car or cdr) he has stashed the pointer back to the
-  // as-yet-unmarked cells, when we traverse a vector we use an
-  // auxiliary integer field to tell us how many vector slots we
-  // have marked so far.
-
   if (Cell::atomic(P)) {
     if (P->flag(Cell::VREF)) {
-      // Getting "here" in the code means that we're seeing the
-      // vector of additional cell references for the first time
-      // (otherwise the mark bit will already be set).  Our job is
-      // to kick off the iteration by stashing the back-link and
-      // starting the mark counter.  The rest of the iteration will
-      // be handled in the "up" step below.
-
-      if (P->unsafe_vector_value()->size() > 0) {
-        P->unsafe_vector_value()->gc_uplink = T;
-        P->unsafe_vector_value()->gc_index = 0;
+      auto cv = P->unsafe_vector_value();
+      if (cv->size() > 0) {
+        cv->gc_uplink = T;
+        cv->gc_index = 0;
         T = P;
       }
     } else if (P->type() == Cell::Symbol) {
-      // Symbols have property-list vectors, and so receive
-      // similar treatment to the above.  But don't do this
-      // if we've already started to mark the properties
-      // (gc_uplink will be non-NULL in that case).
-
-      psymbol ps = P->SymbolValue();
+      psymbol ps = std::get<Cell::SymbolVal>(P->val).s;
       if (ps->plist && ps->plist->gc_uplink == 0 && ps->plist->size() > 0) {
         ps->plist->gc_uplink = T;
         ps->plist->gc_index = 0;
         T = P;
       }
     }
-
     goto E6; // E3
   }
 
-  if (!Cell::short_atom(P->unsafe_car())) {
-    Q = Cell::untagged(P->unsafe_car()); // E4
-    if (Q != nil && !(Q->is_marked())) {
-      // if (!Cell::short_atom(P->unsafe_cdr()))
-      // {
-      // P->set_cdr_word(P->get_cdr_word() | Cell::ATOM);
-      P->set_traversing_cdr(true);
-      // END
-      P->gc_set_car(T);
+  if (!Cell::atomic(P)) {
+    Q = std::get<Cell::ConsPair>(P->val).car; // E4
+    if (Q != nil && !Cell::short_atom(Q) && !Q->m_gc_mark) {
+      P->m_gc_alt_bit = true;
+      std::get<Cell::ConsPair>(P->val).car = T;
       T = P;
-      // }
       P = Q;
       goto E2;
     }
   }
 
 E5:
-  if (!Cell::short_atom(P->unsafe_cdr())) {
-    Q = Cell::untagged(P->unsafe_cdr());
-    if (Q != nil && !(Q->is_marked())) {
-      P->gc_set_cdr(T);
+  if (!Cell::atomic(P)) {
+    Q = std::get<Cell::ConsPair>(P->val).cdr;
+    if (Q != nil && !Cell::short_atom(Q) && !Q->m_gc_mark) {
+      std::get<Cell::ConsPair>(P->val).cdr = T;
       T = P;
       P = Q;
-
       goto E2;
     }
   }
@@ -851,50 +762,25 @@ E6:
   Q = T;
 
   if (Q->flag(Cell::VREF)) {
-    // We are popping a vector cell from the GC stack.
-    // If there are more cells to mark within it, keep
-    // going.
-
   next_element:
-
-    int i = Q->unsafe_vector_value()->gc_index++;
-
-    if (i >= Q->unsafe_vector_value()->size()) // all done?
-    {
-      T = Q->unsafe_vector_value()->gc_uplink;
-      Q->unsafe_vector_value()->gc_index = 0; // reset for next time
+    auto cv = Q->unsafe_vector_value();
+    int i = cv->gc_index++;
+    if (i >= cv->size()) {
+      T = cv->gc_uplink;
+      cv->gc_index = 0; 
       P = Q;
       goto E6;
-    } else // resume iteration
-    {
-      P = Q->unsafe_vector_value()->get(i); // with next element
-
-      // One wrinkle: captured continuations are implemented
-      // as vectors, and like the machine stack, these vectors
-      // can contain integer VM codes as well as cell pointers.
-      // These latter are marked with the ATOM flag.
-
-      if (reinterpret_cast<intptr_t>(P) & Cell::ATOM)
+    } else {
+      P = cv->get(i);
+      if (P == nil || Cell::short_atom(P) || P->m_gc_mark)
         goto next_element;
-
-      // Otherwise we mark, if not marked already.
-      if (P->is_marked())
-        goto next_element;
-
-      P = Cell::untagged(P);
-      if (P == nil)
-        goto next_element;
-
       goto E2;
     }
   } else if (Q->type() == Cell::Symbol) {
-    // Continue iterating over the property list of a symbol.
-    psymbol ps = Q->SymbolValue();
-
+    psymbol ps = std::get<Cell::SymbolVal>(Q->val).s;
   next_property:
     int i = ps->plist->gc_index++;
-    if (i >= ps->plist->size()) // all done?
-    {
+    if (i >= ps->plist->size()) {
       T = ps->plist->gc_uplink;
       ps->plist->gc_index = 0;
       ps->plist->gc_uplink = 0;
@@ -902,53 +788,65 @@ E6:
       goto E6;
     } else {
       P = ps->plist->get(i);
-      if (P->is_marked())
-        goto next_property;
-      P = Cell::untagged(P);
-      if (P == nil)
+      if (P == nil || Cell::short_atom(P) || P->m_gc_mark)
         goto next_property;
       goto E2;
     }
   }
 
-  //    if (Q->get_cdr_word() & Cell::ATOM)
-  if (Q->is_traversing_cdr()) {
-    //    Q->set_cdr_word(Q->get_cdr_word() & ~Cell::ATOM);
-    Q->set_traversing_cdr(false);
-    T = Cell::untagged(Q->unsafe_car());
-    Q->gc_set_car(P);
+  if (Q->m_gc_alt_bit) {
+    Q->m_gc_alt_bit = false;
+    T = std::get<Cell::ConsPair>(Q->val).car;
+    std::get<Cell::ConsPair>(Q->val).car = P;
     P = Q;
     goto E5;
   } else {
-    T = Cell::untagged(Q->unsafe_cdr());
-    Q->gc_set_cdr(P);
+    T = std::get<Cell::ConsPair>(Q->val).cdr;
+    std::get<Cell::ConsPair>(Q->val).cdr = P;
     P = Q;
     goto E6;
   }
 }
 
 void Slab::sweep(Context *ctx) {
-  bool traceall = debug_flag(TRACE_GC_ALL);
+  bool traceall = false; // OS::flag(TRACE_GC_ALL);
 
   for (Cell *p = start; p < next; ++p) {
-    unsigned int word = p->get_car_word();
-
-    if (p->is_marked()) {
-      p->set_marked(false);
-    } else if (word != (Cell::FREE | Cell::ATOM)) {
-      // FINALIZATION
-      //
-
+    if (p->m_gc_mark) {
+      p->m_gc_mark = false;
+    } else if (p->type() != Cell::Free && !std::holds_alternative<Cell::FreeVal>(p->val)) {
       if (traceall) {
         printf("s ");
         p->dump(stdout);
         putchar('\n');
       }
-      p->free_contents();
+      Cell::Type t = p->type();
+
+      switch (t) {
+      case Cell::Cont:
+      case Cell::Promise:
+      case Cell::Cproc:
+      case Cell::Cpromise:
+      case Cell::Lambda:
+      case Cell::Vec: 
+        p->unsafe_vector_value()->free();
+        break;
+      case Cell::Iport: 
+        if (FILE *f = std::get<Cell::IportVal>(p->val).f) fclose(f);
+        break;
+      case Cell::Oport:
+        if (FILE *f = std::get<Cell::OportVal>(p->val).f) fclose(f);
+        break;
+      case Cell::Magic:
+        delete std::get<Cell::MagicBox*>(p->val);
+        break;
+      default:
+        break;
+      }
 
       --ctx->cellsAlloc;
-      p->set_car_word(Cell::FREE | Cell::ATOM);
-      p->set_unsafe_cdr(ctx->mem.free);
+      p->set_type(Cell::Free);
+      std::get<Cell::FreeVal>(p->val).next = ctx->mem.free;
       ctx->mem.free = p;
       ++ctx->mem.c_free;
     }
@@ -1050,44 +948,28 @@ void Context::print_mem_stats(FILE *out) {
   fprintf(out, "; mem %d/%d\n", cellsAlloc, cellsTotal);
 }
 
-void Cell::free_contents() {
-  switch (type()) {
-  case Cell::Promise:
-  case Cell::Cproc:
-  case Cell::Cpromise:
-  case Cell::Lambda:
-  case Cell::Vec:
-    unsafe_vector_value()->free();
-    init_vector(0);
-    break;
-  case Cell::Iport:
-    if (cd.ip)
-      fclose(cd.ip);
-    break;
-  case Cell::Oport:
-    if (cd.op)
-      fclose(cd.op);
-    break;
-  case Cell::Real:
-    free(cd.d);
-    break;
-  case Cell::Subr:
-    free(cd.f);
-    break;
-  case Cell::Magic:
-    free(cd.m);
-    break;
-  case Cell::String:
-    free(cd.s);
-    break;
-  default:
-    break;
-  }
+
+bool Cell::is_symbol(psymbol s) const {
+  if (short_atom(this)) return false;
+  return type() == Cell::Symbol && std::get<Cell::SymbolVal>(val).s == s;
 }
 
-void *Context::xmalloc(size_t sz) {
-  void *v = malloc(sz);
-  if (!v)
-    error("out of heap memory");
-  return v;
+void *Context::xmalloc(size_t n) {
+  void *p = malloc(n);
+  if (!p) {
+    fprintf(stderr, "Virtual memory exhausted\\n");
+    exit(1);
+  }
+  return p;
+}
+
+
+const Cell::InsnVal* Cell::InsnValue() const {
+  typecheck(Insn);
+  return &std::get<InsnVal>(val);
+}
+
+Cell::InsnVal* Cell::InsnValue() {
+  typecheck(Insn);
+  return &std::get<InsnVal>(val);
 }

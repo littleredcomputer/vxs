@@ -851,7 +851,7 @@ Cell *nconc(Context *ctx, Cell *arglist) {
 }
 
 static Cell *member_helper(Context *ctx, Cell *arglist,
-                           bool (Cell::*equality)(const Cell *) const) {
+                           bool (Cell::*equality)(Cell *)) {
   Cell *target = car(arglist);
   Cell *list = cadr(arglist);
 
@@ -875,7 +875,7 @@ Cell *member(Context *ctx, Cell *arglist) {
 }
 
 static Cell *assoc_helper(Context *ctx, Cell *arglist,
-                          bool (Cell::*equality)(const Cell *) const) {
+                          bool (Cell::*equality)(Cell *)) {
   Cell *target = car(arglist);
   Cell *list = cadr(arglist);
 

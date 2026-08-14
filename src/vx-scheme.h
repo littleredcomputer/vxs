@@ -15,7 +15,9 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
+#include <string>
 #include <unistd.h>
+#include <variant>
 
 #if defined(__GNUC__)
 // Statically allocated cells must lie upon an 8-byte
@@ -270,46 +272,33 @@ private:
 // information.
 
 class Cell {
-public:
-  Cell *unsafe_car() const { return ca.p; }
-  void set_unsafe_car(Cell *c) { ca.p = (Cell *)c; }
-  Cell *unsafe_cdr() const { return cd.p; }
-  void set_unsafe_cdr(Cell *c) { cd.p = (Cell *)c; }
-
-  uintptr_t get_car_word() const { return ca.i; }
-  void set_car_word(uintptr_t w) { ca.i = w; }
-  uintptr_t get_cdr_word() const { return cd.i; }
-  void set_cdr_word(uintptr_t w) { cd.i = w; }
-
-  void gc_set_car(Cell *);
-  void gc_set_cdr(Cell *);
+  // friend class Context;
+  // friend class Slab;
+  // friend class InterpreterExt;
 
 public:
   void display(FILE *);
   void write(FILE *) const;
   void write(sstring &) const;
 
-  bool eq(const Cell *c) const;
-  bool eqv(const Cell *c) const { return eq(c); }
-
-  bool equal(const Cell *c) const;
-  bool is_symbol(psymbol s) {
-    return type() == Cell::Symbol && SymbolValue() == s;
-  }
+  bool eq(Cell *c);
+  bool eqv(Cell *c) { return eq(c); }
+  bool equal(Cell *c);
+  bool is_symbol(psymbol s) const;
 
   struct Procedure {
     Procedure(Cell *_envt, Cell *_body, Cell *_arglist)
         : body(_body), arglist(_arglist), envt(_envt) {}
-
-    Procedure() : body(nil), arglist(nil), envt(nil) {}
-
+    Procedure() : body(nullptr), arglist(nullptr), envt(nullptr) {}
+    bool operator==(const Procedure &o) const {
+      return body == o.body && arglist == o.arglist && envt == o.envt;
+    }
     Cell *body;
     Cell *arglist;
     Cell *envt;
   };
 
-  // Certain cells we have heard of
-
+  // Static pre-allocated cells
   ALIGN8 static Cell Nil;
   ALIGN8 static Cell Unspecified;
   ALIGN8 static Cell Unassigned;
@@ -321,19 +310,317 @@ public:
   ALIGN8 static Cell Halt;
   ALIGN8 static Cell Unimplemented;
 
-  // Access/Mutate Cons Cells.  These are checked calls, in
-  // that they will verify that they are traversing a set of
-  // cons cells at each step, using "assert_cons", which
-  // throws a C++ exception if this is not found to be true.
+  enum Type {
+    Int = 0,
+    Symbol = 1,
+    Unique = 2,
+    String = 3,
+    Real = 4,
+    Subr = 5,
+    Lambda = 6,
+    Vec = 7,
+    Char = 8,
+    Iport = 9,
+    Oport = 10,
+    Promise = 11,
+    Cont = 12,
+    Builtin = 13,
+    Magic = 14,
+    Insn = 15,
+    Cproc = 16,
+    Cpromise = 17,
+    Free = 18,
+    NUM_ATOMS = 19,
+    Cons = NUM_ATOMS,
+    NUM_TYPES = Cons + 1
+  };
+
+  struct ConsPair {
+    Cell *car;
+    Cell *cdr;
+    bool operator==(const ConsPair &o) const {
+      return car == o.car && cdr == o.cdr;
+    }
+  };
+  struct SubrVal {
+    subr_f subr;
+    const char *name;
+    bool operator==(const SubrVal &o) const {
+      return subr == o.subr && name == o.name;
+    }
+  };
+  struct MagicBox {
+    void *key;
+    magic_set_f set_f;
+    magic_get_f get_f;
+  };
+  struct InsnVal {
+    unsigned int opcode;
+    unsigned int count;
+    union {
+      intptr_t i;
+      psymbol y;
+      const SubrVal *f;
+    } payload;
+    bool operator==(const InsnVal &o) const {
+      return opcode == o.opcode && count == o.count && payload.i == o.payload.i;
+    }
+    psymbol Symbol() const { return payload.y; }
+  };
+
+  struct SymbolVal {
+    psymbol s;
+    int16_t e_skip = -2;
+    int16_t b_skip = -2;
+    bool operator==(const SymbolVal &o) const { return s == o.s; }
+  };
+  struct BuiltinVal {
+    psymbol s;
+    bool operator==(const BuiltinVal &o) const { return s == o.s; }
+  };
+  struct UniqueVal {
+    const char *s;
+    bool operator==(const UniqueVal &o) const { return s == o.s; }
+  };
+  struct LambdaVal {
+    cellvector *cv;
+    bool operator==(const LambdaVal &o) const { return cv == o.cv; }
+  };
+  struct VecVal {
+    cellvector *cv;
+    bool operator==(const VecVal &o) const { return cv == o.cv; }
+  };
+  struct IportVal {
+    FILE *f;
+    bool operator==(const IportVal &o) const { return f == o.f; }
+  };
+  struct OportVal {
+    FILE *f;
+    bool operator==(const OportVal &o) const { return f == o.f; }
+  };
+  struct PromiseVal {
+    cellvector *cv;
+    bool operator==(const PromiseVal &o) const { return cv == o.cv; }
+  };
+  struct ContVal {
+    cellvector *cv;
+    bool operator==(const ContVal &o) const { return cv == o.cv; }
+  };
+  struct CprocVal {
+    cellvector *cv;
+    bool operator==(const CprocVal &o) const { return cv == o.cv; }
+  };
+  struct CpromiseVal {
+    cellvector *cv;
+    bool operator==(const CpromiseVal &o) const { return cv == o.cv; }
+  };
+  struct FreeVal {
+    Cell *next;
+    bool operator==(const FreeVal &o) const { return next == o.next; }
+  };
+
+  using CellValue = std::variant<intptr_t,    // 0: Int
+                                 SymbolVal,   // 1: Symbol
+                                 UniqueVal,   // 2: Unique
+                                 std::string, // 3: String
+                                 double,      // 4: Real
+                                 SubrVal,     // 5: Subr
+                                 LambdaVal,   // 6: Lambda
+                                 VecVal,      // 7: Vec
+                                 char,        // 8: Char
+                                 IportVal,    // 9: Iport
+                                 OportVal,    // 10: Oport
+                                 PromiseVal,  // 11: Promise
+                                 ContVal,     // 12: Cont
+                                 BuiltinVal,  // 13: Builtin
+                                 MagicBox *,  // 14: Magic
+                                 InsnVal,     // 15: Insn
+                                 CprocVal,    // 16: Cproc
+                                 CpromiseVal, // 17: Cpromise
+                                 FreeVal,     // 18: Free
+                                 ConsPair     // 19: Cons
+                                 >;
+
+  CellValue val;
+  bool m_gc_mark = false;
+  bool m_gc_traverse_cdr = false;
+  bool m_gc_alt_bit = false;
+  uint16_t m_flags = 0;
+
+  Type type() const {
+    if (short_atom(this))
+      return Int;
+    return static_cast<Type>(val.index());
+  }
+
+  // The lowest order three bits of a pointer are called the
+  // tagbits.  They are always free for our use, since a cell
+  // consists of two words, each at least 32 bits, with the
+  // natural alignment (8 bytes for a 32-bit machine).
+
+  static const uintptr_t TAGBITS = 3;
+  static const uintptr_t ATOM = 0x1;
+  static const uintptr_t MARK = 0x2;
+  static const uintptr_t SHORT = 0x4;
+
+  static const uintptr_t TYPEBITS = 5;
+  static const uintptr_t TYPEMASK = (1 << TYPEBITS) - 1;
+  static const uintptr_t TAGMASK = (1 << TAGBITS) - 1;
+  // Make sure flag bits are disjoint from TYPE and TAG bits.
+  static const uintptr_t FLAGBASE = 1 << (TYPEBITS + TAGBITS);
+  static const uintptr_t FORCED = FLAGBASE;
+  static const uintptr_t QUICK = FLAGBASE << 1;
+  static const uintptr_t GLOBAL = FLAGBASE << 2;
+  static const uintptr_t MACRO = FLAGBASE << 3;
+  static const uintptr_t VREF = FLAGBASE << 4;
+  static const uintptr_t FREE = FLAGBASE << 5;
+  static const uintptr_t FLAGBITS = 6;
+
+  static const int GLOBAL_ENV = -1;
+
+  void typefail(Type t1, Type t2) const;
+  void typecheck(Type t) const {
+    if (type() != t)
+      typefail(type(), t);
+  }
+  bool macro() const { return flag(MACRO); }
+
+  static inline bool short_atom(const Cell *c) {
+    return ((uintptr_t)c & ATOM) != 0;
+  }
+  static inline bool long_atom(const Cell *c) {
+    return ((uintptr_t)c & ATOM) == 0 && c->type() != Cons;
+  }
+  static inline bool atomic(const Cell *c) {
+    return ((uintptr_t)c & ATOM) != 0 || c->type() != Cons;
+  }
+  static Cell *notcons();
+
+  Cell() : val(ConsPair{&Nil, &Nil}) {}
+  Cell(const char *unique_name) : val(UniqueVal{unique_name}) {}
+
+  inline intptr_t e_skip() const { return std::get<SymbolVal>(val).e_skip; }
+  inline intptr_t b_skip() const { return std::get<SymbolVal>(val).b_skip; }
+  void set_lexaddr(intptr_t e_skip, intptr_t b_skip) {
+    auto &s = std::get<SymbolVal>(val);
+    s.e_skip = e_skip;
+    s.b_skip = b_skip;
+    flag(QUICK, true);
+    if (e_skip == GLOBAL_ENV)
+      flag(GLOBAL, true);
+  }
+
+  static const unsigned int IGNORE =
+      (unsigned int)(QUICK | GLOBAL | (~0u << 16));
+  static const unsigned int IGN_MASK = ~IGNORE;
+  static const char *typeName[NUM_TYPES];
+  static int typeCount[NUM_TYPES];
+
+  void set_type(Type t) {
+    ++typeCount[t];
+    switch (t) {
+    case Int:
+      val = intptr_t{0};
+      break;
+    case Symbol:
+      val = SymbolVal{};
+      break;
+    case Unique:
+      val = UniqueVal{};
+      break;
+    case String:
+      val = std::string{};
+      break;
+    case Real:
+      val = double{0.0};
+      break;
+    case Subr:
+      val = SubrVal{};
+      break;
+    case Lambda:
+      val = LambdaVal{};
+      break;
+    case Vec:
+      val = VecVal{};
+      break;
+    case Char:
+      val = char{0};
+      break;
+    case Iport:
+      val = IportVal{};
+      break;
+    case Oport:
+      val = OportVal{};
+      break;
+    case Promise:
+      val = PromiseVal{};
+      break;
+    case Cont:
+      val = ContVal{};
+      break;
+    case Builtin:
+      val = BuiltinVal{};
+      break;
+    case Magic:
+      val = (MagicBox *)nullptr;
+      break;
+    case Insn:
+      val = InsnVal{};
+      break;
+    case Cproc:
+      val = CprocVal{};
+      break;
+    case Cpromise:
+      val = CpromiseVal{};
+      break;
+    case Free:
+      val = FreeVal{nullptr};
+      break;
+    case Cons:
+      val = ConsPair{&Nil, &Nil};
+      break;
+    default:
+      val = FreeVal{nullptr};
+      break;
+    }
+  }
+
+  void flag(unsigned int f, bool b) {
+    if (b)
+      m_flags |= f;
+    else
+      m_flags &= ~f;
+  }
+  bool flag(unsigned int f) const { return (m_flags & f) != 0; }
+
+  void dump(FILE *);
+
+  // Cons accessors
+  Cell *unsafe_car() const { return std::get<ConsPair>(val).car; }
+  void set_unsafe_car(Cell *c) { std::get<ConsPair>(val).car = c; }
+  Cell *unsafe_cdr() const { return std::get<ConsPair>(val).cdr; }
+  void set_unsafe_cdr(Cell *c) { std::get<ConsPair>(val).cdr = c; }
+  Cell *next_free() const { return std::get<FreeVal>(val).next; }
 
   static void setcar(Cell *c, Cell *car) {
-    atomic(c) ? notcons() : (c->ca.p = car);
+    if (atomic(c))
+      notcons();
+    else
+      std::get<ConsPair>(c->val).car = car;
   }
   static void setcdr(Cell *c, Cell *cdr) {
-    atomic(c) ? notcons() : (c->cd.p = cdr);
+    if (atomic(c))
+      notcons();
+    else
+      std::get<ConsPair>(c->val).cdr = cdr;
   }
-  static Cell *car(const Cell *c) { return atomic(c) ? notcons() : c->ca.p; }
-  static Cell *cdr(const Cell *c) { return atomic(c) ? notcons() : c->cd.p; }
+  static Cell *car(const Cell *c) {
+    return atomic(c) ? notcons() : std::get<ConsPair>(c->val).car;
+  }
+  static Cell *cdr(const Cell *c) {
+    return atomic(c) ? notcons() : std::get<ConsPair>(c->val).cdr;
+  }
+
   static Cell *caar(const Cell *c);
   static Cell *cadr(const Cell *c);
   static Cell *cdar(const Cell *c);
@@ -363,41 +650,13 @@ public:
   static Cell *cdddar(const Cell *c);
   static Cell *cddddr(const Cell *c);
 
-  // "Boxes" to hold things related to atoms that won't fit in a cell.
-  // We need one of these whenever the atom has two words or more of
-  // data.  They are allocated from the heap and are freed when a gc'd
-  // atom is finalized.
-
-  struct SubrBox {
-    subr_f subr;
-    const char *name;
-  };
-
-  struct MagicBox {
-    void *key;
-    magic_set_f set_f;
-    magic_get_f get_f;
-  };
-
-  // We store length with strings.  When these are allocated we
-  // preallocate the string space; freeing this object discards
-  // both box and string.
-
-  struct StringBox {
-    size_t length;
-    char s[1];
-  };
-
-  // Value extractors
-
   intptr_t IntValue() const;
   char CharValue() const;
-  SubrBox *SubrValue() const;
+  const SubrVal *SubrValue() const;
   char *StringValue() const;
   size_t StringLength() const;
   FILE *IportValue() const;
   FILE *OportValue() const;
-  void *ContValue() const;
   cellvector *VectorValue() const;
   cellvector *CProcValue() const;
   Cell *PromiseValue() const;
@@ -408,67 +667,63 @@ public:
   double RealValue() const;
   const char *name() const;
   void free_contents();
+  const InsnVal *InsnValue() const;
+  InsnVal *InsnValue();
 
-  bool is_marked() const { return m_gc_mark; }
-  void set_marked(bool marked) { m_gc_mark = marked; }
-  
-  bool is_traversing_cdr() const { return m_gc_traverse_cdr; }
-  void set_traversing_cdr(bool traversing) { m_gc_traverse_cdr = traversing; }
+  void init_int(intptr_t i) { val = i; }
+  void init_char(char c) { val = c; }
+  void init_real(double d) { val = d; }
+  void init_string(const std::string &s) { val = s; }
+  void init_subr(subr_f f, const char *n) { val = SubrVal{f, n}; }
+  void init_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
+    val = new MagicBox{key, set_f, get_f};
+  }
+  void init_symbol(psymbol y) { val = SymbolVal{y, -2, -2}; }
+  void init_builtin(psymbol y) { val = BuiltinVal{y}; }
+  void init_iport(FILE *ip) { val = IportVal{ip}; }
+  void init_oport(FILE *op) { val = OportVal{op}; }
 
-  void init_int(intptr_t i) { cd.i = i; }
-  void init_char(char c) { cd.c = c; }
-  void init_real(double *d) { cd.d = d; }
-  void init_string(StringBox *s) { cd.s = s; }
-  void init_subr(SubrBox *f) { cd.f = f; }
-  void init_magic(MagicBox *m) { cd.m = m; }
-  void init_symbol(psymbol y) { cd.y = y; }
-  void init_vector(cellvector *cv) { cd.cv = cv; }
-  void init_iport(FILE *ip) { cd.ip = ip; }
-  void init_oport(FILE *op) { cd.op = op; }
-  void init_cont(void *j) { cd.j = j; }
+  void init_insn(unsigned int opcode) { val = InsnVal{opcode, 0, {0}}; }
 
-  // unsafe accessors: use when you have prior knowledge that the
-  // cell contains an atom of the proper type.
-
-  cellvector *unsafe_vector_value() const { return cd.cv; }
-  MagicBox *unsafe_magic_box() const { return cd.m; }
-  void *unsafe_magic_vp() const { return cd.vp; }
+  cellvector *unsafe_vector_value() const {
+    switch (val.index()) {
+    case Vec:
+      return std::get<VecVal>(val).cv;
+    case Lambda:
+      return std::get<LambdaVal>(val).cv;
+    case Cproc:
+      return std::get<CprocVal>(val).cv;
+    case Promise:
+      return std::get<PromiseVal>(val).cv;
+    case Cpromise:
+      return std::get<CpromiseVal>(val).cv;
+    case Cont:
+      return std::get<ContVal>(val).cv;
+    default:
+      return nullptr;
+    }
+  }
+  MagicBox *unsafe_magic_box() const { return std::get<MagicBox *>(val); }
+  void *unsafe_magic_vp() const { return std::get<MagicBox *>(val)->key; }
 
   static void real_to_string(double, char *, int);
-
   double asReal() const {
-    if (type() == Cell::Int)
-      return (double)IntValue();
-    else
-      return RealValue();
+    return (type() == Cell::Int) ? (double)IntValue() : RealValue();
   }
-
-  // In scheme, the only two values of type `boolean' are #t and
-  // #f.  However, from the point of view of truth valuation,
-  // anything other than #f is considered `true'.  We follow the
-  // Scheme standard strictly, and so do not consider nil to have
-  // a false connotation as it would in other dialects of Lisp.
-
   bool isBoolean() { return this == &Bool_T || this == &Bool_F; }
   bool istrue() { return this != &Bool_F; }
   bool ispair();
+  static Cell *untagged(Cell *c) { return c; }
 
-  static Cell *untagged(Cell *);
-
-  // Utilities
   int length() {
     int i = 0;
-
-    FOR_EACH(p, this)
-    ++i;
-
+    FOR_EACH(p, this)++ i;
     return i;
   }
 
   class List {
   public:
     List() : h(&Nil), t(&Nil) {}
-
     void append(Cell *c) {
       if (t == &Nil)
         h = t = c;
@@ -477,7 +732,6 @@ public:
         t = c;
       }
     }
-
     void append_list(Cell *list_head, Cell *list_tail) {
       if (h == &Nil) {
         h = list_head;
@@ -487,19 +741,17 @@ public:
         t = list_tail;
       }
     }
-
     Cell *head() { return h; }
     Cell *tail() { return t; }
 
   private:
-    Cell *h; // head
-    Cell *t; // tail
+    Cell *h, *t;
   };
 
   void list_append(Cell *&head, Cell *&tail) {
-    if (tail == &Nil) {
+    if (tail == &Nil)
       head = tail = this;
-    } else {
+    else {
       setcdr(tail, this);
       tail = this;
     }
@@ -507,197 +759,8 @@ public:
 
   static void stats();
   static void sanity_check();
-
-  enum Type {
-    //------------
-    Int = 0, // The Atoms...
-    Symbol = 1,
-    Unique = 2,
-    String = 3,
-    Real = 4,
-    Subr = 5,
-    Lambda = 6,
-    Vec = 7,
-    Char = 8,
-    Iport = 9,
-    Oport = 10,
-    Promise = 11,
-    Cont = 12,
-    Builtin = 13,
-    Magic = 14,
-    Insn = 15,
-    Cproc = 16,
-    Cpromise = 17,
-
-    NUM_ATOMS = 18,
-    //------------
-    Cons = NUM_ATOMS, // A cell.
-    NUM_TYPES = Cons + 1
-    //------------
-  };
-
-  // If the ATOM bit is clear, it's a cons.  Otherwise, the type
-  // is stored in the TYPEBITS field, unless it's a short integer.
-
-  Type type() const {
-    if (short_atom(this))
-      return Int;
-    return (Type)(((ca.i & (ATOM | SHORT)) == ATOM)
-                      ? ((ca.i >> TAGBITS) & TYPEMASK)
-                      : Cons);
-  }
-
-  void typecheck(Type t) const {
-    if (type() != t)
-      typefail(type(), t);
-  }
-
-  bool macro() const { return flag(MACRO); }
-
-public:
-  static inline bool short_atom(const Cell *c) {
-    return (reinterpret_cast<uintptr_t>(c) & (ATOM | SHORT)) == (ATOM | SHORT);
-  }
-  static inline bool long_atom(const Cell *c) {
-    return (reinterpret_cast<uintptr_t>(c) & (ATOM | SHORT)) == ATOM;
-  }
-  static inline bool atomic(const Cell *c) {
-    return short_atom(c) || ((c->ca.i & (ATOM | SHORT)) == ATOM);
-  }
-
-  // gc_set_car and gc_set_cdr moved to public
-  static Cell *notcons();
-
-  Cell() { ca.p = cd.p = &Nil; }
-
-  Cell(const char *unique_name) {
-    ca.i = 0;
-    set_type(Unique);
-    cd.u = unique_name;
-  }
-
-  void typefail(Type t1, Type t2) const;
-
-  // The lowest order three bits of a pointer are called the
-  // tagbits.  They are always free for our use, since a cell
-  // consists of two words, each at least 32 bits, with the
-  // natural alignment (8 bytes for a 32-bit machine).
-
-  static const uintptr_t TAGBITS = 3;
-  static const uintptr_t ATOM = 0x1;
-  static const uintptr_t MARK = 0x2;
-  static const uintptr_t SHORT = 0x4;
-
-  static const uintptr_t TYPEBITS = 5;
-  static const uintptr_t TYPEMASK = (1 << TYPEBITS) - 1;
-  static const uintptr_t TAGMASK = (1 << TAGBITS) - 1;
-  // Make sure flag bits are disjoint from TYPE and TAG bits.
-  static const uintptr_t FLAGBASE = 1 << (TYPEBITS + TAGBITS);
-  static const uintptr_t FORCED = FLAGBASE;
-  static const uintptr_t QUICK = FLAGBASE << 1;
-  static const uintptr_t GLOBAL = FLAGBASE << 2;
-  static const uintptr_t MACRO = FLAGBASE << 3;
-  static const uintptr_t VREF = FLAGBASE << 4;
-  static const uintptr_t FREE = FLAGBASE << 5;
-  static const uintptr_t FLAGBITS = 6;
-
-  static const int GLOBAL_ENV = -1;
-
-  // Warning! The virtual machine instructions use the upper
-  // 16 bits of the car for the opcode, and count field,
-  // so space for types, tags, and flags is limited to 16 bits.
-
-#if TAGBITS + TYPEBITS + FLAGBITS > 16
-#error too many atom bits used
-#endif
-
-  inline intptr_t e_skip() {
-    // If global symbol, return -1.  Else number of environments
-    // to skip is in highest-order byte
-    return (ca.i & GLOBAL) ? GLOBAL_ENV
-                           : (int)((ca.i >> (8 * (sizeof(ca.i) - 1))) & 0xff);
-  }
-
-  inline intptr_t b_skip() {
-    // If global symbol, number of bindings to skip is in upper 16
-    // bits; else, it's in 2nd-highest-order byte
-    return (ca.i & GLOBAL) ? (ca.i >> (8 * (sizeof(ca.i) - 2)) & 0xffff)
-                           : ((ca.i >> (8 * (sizeof(ca.i) - 2))) & 0xff);
-  }
-
-  void set_lexaddr(intptr_t e_skip, intptr_t b_skip) {
-    // If global, set flag and store b_skip in upper 16 bits.
-    // Else set e_skip in upper 8 bits, and set b_skip in
-    // next 8 bits.
-    const intptr_t start_bit = 8 * (sizeof(ca.i) - 2);
-    const intptr_t two_bytes = (1 << 16) - 1;
-    ca.i &= ~(two_bytes << start_bit);
-    if (e_skip == -1)
-      ca.i |= (b_skip << start_bit) | GLOBAL | QUICK;
-    else
-      ca.i |= ((e_skip << 8 | b_skip) << start_bit) | QUICK;
-  }
-
-  // The set of bits which should be ignored when
-  // comparing two cells in the sense of "eq?".  We ignore the
-  // pieces having to do with lexical addresses.
-
-  static const unsigned int IGNORE =
-      (unsigned int)(QUICK | GLOBAL | (~0u << 16));
-  static const unsigned int IGN_MASK = ~IGNORE;
-
-  static const char *typeName[NUM_TYPES];
-  static int typeCount[NUM_TYPES];
-
-  void flag(unsigned int f, bool b) {
-    if (b)
-      ca.i |= f;
-    else
-      ca.i &= ~f;
-  }
-
-  void dump(FILE *);
-  bool flag(unsigned int f) const {
-    // only non-short atoms can have flags.  All requested bits must be set
-    return (ca.i & (f | SHORT | ATOM)) == (f | ATOM);
-  }
-
-  void set_type(Type t) {
-    if (t != Cons)
-      ca.i |= (t << TAGBITS) | ATOM;
-    ++typeCount[t];
-  }
-
-  bool m_gc_mark = false;
-  bool m_gc_traverse_cdr = false;
-
-private:
-  // The actual data for an Atom/Cell is here.
-
-  union _car {
-    uintptr_t i;
-    Cell *p;
-  } ca;
-  union _cdr {
-    uintptr_t i;
-    double *d;
-    Cell *p;
-    const char *u;
-    SubrBox *f;
-    MagicBox *m;
-    StringBox *s;
-    psymbol y;
-    Cell *e;
-    cellvector *cv;
-    FILE *ip;
-    FILE *op;
-    char c;
-    void *vp;
-    void *j;
-  } cd;
 };
 
-//----------------------------------------------------------------------
 // class Environment
 //
 // At the simplest level, an Environment is a mapping from symbols
@@ -1152,7 +1215,7 @@ struct vm_insn {
   byte opcode;
   byte count;
   const void *operand;
-} PACKED;
+};
 
 struct vm_cproc {
   vm_insn *insns;

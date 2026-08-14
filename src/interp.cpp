@@ -1447,7 +1447,7 @@ Cell *Context::make_procedure(Cell *e, Cell *body, Cell *arglist) {
   // XXX cellvector * cv = new cellvector (3);
   cellvector *cv = cellvector::alloc(3);
 
-  c->init_vector(cv);
+  c->val = Cell::LambdaVal{cv};
   c->flag(Cell::VREF, true);
   cv->set(0, e);
   cv->set(1, body);
@@ -1474,7 +1474,7 @@ Cell *Context::make_promise(Cell *e, Cell *body) {
   // compute the promise or that procedure's memoized value, we must
   // store that thing in a unit vector.
 
-  c->init_vector(cv);
+  c->val = Cell::PromiseVal{cv};
   c->flag(Cell::VREF, true);
   gc_protect(c);
   cv->set(0, make_procedure(e, body, nil));
@@ -1501,7 +1501,7 @@ Cell *Context::make_continuation() {
   int msize = m_stack.size();
   cellvector *cv = cellvector::alloc(msize);
   c->flag(Cell::VREF, true);
-  c->init_vector(cv);
+  c->val = Cell::ContVal{cv};
 
   for (int ix = 0; ix < msize; ++ix)
     cv->set(ix, m_stack[ix]);
