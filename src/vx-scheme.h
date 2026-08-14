@@ -409,6 +409,12 @@ public:
   const char *name() const;
   void free_contents();
 
+  bool is_marked() const { return m_gc_mark; }
+  void set_marked(bool marked) { m_gc_mark = marked; }
+  
+  bool is_traversing_cdr() const { return m_gc_traverse_cdr; }
+  void set_traversing_cdr(bool traversing) { m_gc_traverse_cdr = traversing; }
+
   void init_int(intptr_t i) { cd.i = i; }
   void init_char(char c) { cd.c = c; }
   void init_real(double *d) { cd.d = d; }
@@ -661,6 +667,9 @@ public:
       ca.i |= (t << TAGBITS) | ATOM;
     ++typeCount[t];
   }
+
+  bool m_gc_mark = false;
+  bool m_gc_traverse_cdr = false;
 
 private:
   // The actual data for an Atom/Cell is here.

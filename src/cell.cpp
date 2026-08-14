@@ -389,7 +389,7 @@ void Cell::dump(FILE *out) {
   if (ca.i == (FREE | ATOM))
     fputs("free ", out);
   else {
-    if (ca.i & MARK)
+    if (m_gc_mark)
       fputs("mark ", out);
     if (short_atom(ca.p)) {
       printf("short %" PRIdPTR " ", ca.p->IntValue());
@@ -733,7 +733,7 @@ inline void Cell::gc_set_cdr(Cell *src) {
 
 void Context::mark(Cell *P) {
   bool traceall = debug_flag(TRACE_GC_ALL);
-  if (P == nil || P == 0 || Cell::short_atom(P) || P->get_car_word() & Cell::MARK)
+  if (P == nil || P == 0 || Cell::short_atom(P) || P->is_marked())
     return;
 
   // In Knuth's presentation, a NODE contains two pointers
@@ -760,7 +760,7 @@ void Context::mark(Cell *P) {
   Cell *Q = nil;
 
 E2:
-  P->set_car_word(P->get_car_word() | Cell::MARK);
+  P->set_marked(true);
   if (traceall) {
     printf("m ");
     P->dump(stdout);
@@ -818,11 +818,11 @@ E2:
 
   if (!Cell::short_atom(P->unsafe_car())) {
     Q = Cell::untagged(P->unsafe_car()); // E4
-    if (Q != nil && !(Q->get_car_word() & Cell::MARK)) {
+    if (Q != nil && !(Q->is_marked())) {
       // if (!Cell::short_atom(P->unsafe_cdr()))
       // {
       // P->set_cdr_word(P->get_cdr_word() | Cell::ATOM);
-      P->set_cdr_word(P->get_cdr_word() | Cell::MARK);
+      P->set_traversing_cdr(true);
       // END
       P->gc_set_car(T);
       T = P;
@@ -835,7 +835,7 @@ E2:
 E5:
   if (!Cell::short_atom(P->unsafe_cdr())) {
     Q = Cell::untagged(P->unsafe_cdr());
-    if (Q != nil && !(Q->get_car_word() & Cell::MARK)) {
+    if (Q != nil && !(Q->is_marked())) {
       P->gc_set_cdr(T);
       T = P;
       P = Q;
@@ -878,7 +878,7 @@ E6:
         goto next_element;
 
       // Otherwise we mark, if not marked already.
-      if (P->get_car_word() & Cell::MARK)
+      if (P->is_marked())
         goto next_element;
 
       P = Cell::untagged(P);
@@ -902,7 +902,7 @@ E6:
       goto E6;
     } else {
       P = ps->plist->get(i);
-      if (P->get_car_word() & Cell::MARK)
+      if (P->is_marked())
         goto next_property;
       P = Cell::untagged(P);
       if (P == nil)
@@ -912,9 +912,9 @@ E6:
   }
 
   //    if (Q->get_cdr_word() & Cell::ATOM)
-  if (Q->get_cdr_word() & Cell::MARK) {
+  if (Q->is_traversing_cdr()) {
     //    Q->set_cdr_word(Q->get_cdr_word() & ~Cell::ATOM);
-    Q->set_cdr_word(Q->get_cdr_word() & ~Cell::MARK);
+    Q->set_traversing_cdr(false);
     T = Cell::untagged(Q->unsafe_car());
     Q->gc_set_car(P);
     P = Q;
@@ -933,8 +933,8 @@ void Slab::sweep(Context *ctx) {
   for (Cell *p = start; p < next; ++p) {
     unsigned int word = p->get_car_word();
 
-    if (p->get_car_word() & Cell::MARK) {
-      p->set_car_word(p->get_car_word() & ~Cell::MARK);
+    if (p->is_marked()) {
+      p->set_marked(false);
     } else if (word != (Cell::FREE | Cell::ATOM)) {
       // FINALIZATION
       //
