@@ -175,11 +175,8 @@ Cell *Context::vm_evaluator(Cell *form) {
   }
   if (eval_cproc) {
     r_tmp = form;
-    r_exp = cons(form, nil);
-    //    save(r_envt);
-    //    r_envt = root_envt;
-    return execute(eval_cproc, r_exp);
-    //    restore(r_envt);
+    Cell *args = cons(form, nil);
+    return execute(eval_cproc, args);
   }
   error("can't find eval");
   return make_boolean(false);
@@ -467,13 +464,13 @@ XEQ:
     insn->InsnValue()->payload = static_cast<intptr_t>(count);
   /* FALL THROUGH */
   case 24: // apply
-    r_exp = m_stack.pop();
     {
-      if (r_exp->is<Cell::Cproc>()) {
+      Cell *proc = m_stack.pop();
+      if (proc->is<Cell::Cproc>()) {
         n_args = insn->InsnValue()->int_val();
-        r_cproc = r_exp;
+        r_cproc = proc;
         goto PROC;
-      } else if (auto *s = r_exp->get_if<Cell::Subr>()) {
+      } else if (auto *s = proc->get_if<Cell::Subr>()) {
         r_val = pop_list(insn->InsnValue()->int_val());
         save(r_envt);
         save(r_cproc);
@@ -481,8 +478,16 @@ XEQ:
         restore(r_cproc);
         restore(r_envt);
         goto RETURN;
+      } else if (proc->is<Cell::Lambda>()) {
+        Cell *args = pop_list(insn->InsnValue()->int_val());
+        save(r_envt);
+        save(r_cproc);
+        r_val = eval(cons(proc, args));
+        restore(r_cproc);
+        restore(r_envt);
+        goto RETURN;
       } else {
-        r_exp->write(stderr);
+        proc->write(stderr);
         error("vm: inapplicable");
       }
     }

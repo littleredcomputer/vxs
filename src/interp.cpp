@@ -186,7 +186,7 @@ enum {
 // These are the above states in string form.  This is only used
 // for debugging, to dump the evaluator's state transitions.
 
-static const char *state_name[] = {
+[[maybe_unused]] static const char *state_name[] = {
     "eval_dispatch",
     "eval_complete",
     "ev_application",
@@ -292,7 +292,19 @@ static const char *state_name[] = {
 // For these reasons, eval should not be recursed into by anyone,
 // including itself.
 
-Step Context::eval_coro(Cell *form) {
+Step Context::eval_coro(Fiber &f) {
+  Cell *&r_exp = f.r_exp;
+  Cell *&r_env = f.r_env;
+  Cell *&r_unev = f.r_unev;
+  Cell &r_argl = f.r_argl;
+  Cell &r_varl = f.r_varl;
+  Cell *&r_proc = f.r_proc;
+  Cell *&r_val = f.r_val;
+  Cell *&r_tmp = f.r_tmp;
+  int &r_qq = f.r_qq;
+  intptr_t &r_cont = f.r_cont;
+  int &state = f.state;
+
   psymbol s;
   Cell::Procedure lambda;
   intptr_t flag = 0;
@@ -300,11 +312,6 @@ Step Context::eval_coro(Cell *form) {
   bool trace;
   psymbol p;
   sstring read_sstr;
-  init_machine();
-  state = eval_dispatch;
-  r_cont = eval_complete;
-  r_exp = form;
-  r_qq = 0;
   trace = debug_flag(DebugFlag::TraceEval);
 
 #define GOTO(x)                                                                \
@@ -331,7 +338,7 @@ Step Context::eval_coro(Cell *form) {
 #define RETURN_VALUE(v)                                                        \
   do {                                                                         \
     r_val = (v);                                                               \
-    restore_i(r_cont);                                                         \
+    r_cont = f.pop_i();                                                        \
     GOTO(r_cont);                                                              \
   } while (0)
 
@@ -347,22 +354,22 @@ Step Context::eval_coro(Cell *form) {
     r_val = r_exp;                                                             \
     goto label##__2;                                                           \
   } else {                                                                     \
-    save(r_env);                                                               \
-    save(r_unev);                                                              \
+    f.push(r_env);                                                             \
+    f.push(r_unev);                                                            \
     r_cont = label;                                                            \
     GOTO(eval_dispatch);                                                       \
   }                                                                            \
   case label:                                                                  \
-    restore(r_unev);                                                           \
-    restore(r_env);                                                            \
+    r_unev = f.pop();                                                          \
+    r_env = f.pop();                                                           \
   label##__2:
 
 TOP:
 
-  if (trace)
-    print_vm_state();
-
-  co_yield true;
+  if (trace) {
+    f.print_vm_state();
+    co_yield true;
+  }
 
   switch (state) {
   case eval_dispatch:
@@ -386,7 +393,7 @@ TOP:
     co_return;
 
   case ev_application:
-    save_i(r_cont);
+    f.push_i(r_cont);
     r_unev = cdr(r_exp);
     r_exp = car(r_exp);
     CALL_EVAL(ev_application2);
@@ -398,21 +405,21 @@ TOP:
       // It's not a special form: evaluate all the arguments
       // in unev and collect them into r_argl.
 
-      clear(r_argl);
-      save(r_proc);
+      f.clear(r_argl);
+      f.push(r_proc);
 
     case ev_args1:
       if (r_unev == nil) {
-        restore(r_proc);
+        r_proc = f.pop();
         GOTO(apply_dispatch2);
       }
 
-      save(r_argl);
+      f.push_pair(r_argl);
       r_exp = car(r_unev);
       r_unev = cdr(r_unev);
       CALL_EVAL(ev_args2);
-      restore(r_argl);
-      l_append(r_argl, r_val);
+      f.pop_pair(r_argl);
+      f.l_append(r_argl, r_val);
       GOTO(ev_args1);
     }
 
@@ -492,7 +499,7 @@ TOP:
         GOTO(apply_dispatch2);
       } else if (s == s_callcc) {
         r_proc = Cell::caar(&r_argl);
-        r_tmp = make_continuation();
+        r_tmp = f.make_continuation();
         r_tmp = cons(r_tmp, nil);
         Cell::setcar(&r_argl, r_tmp);
         GOTO(apply_dispatch2);
@@ -504,11 +511,11 @@ TOP:
       lambda = r_proc->LambdaValue();
 
       if (r_proc->flag(Cell::Flag::Macro)) {
-        save(r_env);
+        f.push(r_env);
 
         r_env = extend(lambda.envt);
         bind_arguments(r_env, lambda.arglist, r_unev);
-        save_i(macro_subst); // continuation
+        f.push_i(macro_subst); // continuation
       } else {
         r_env = extend(lambda.envt);
         bind_arguments(r_env, lambda.arglist, Cell::car(&r_argl));
@@ -518,17 +525,17 @@ TOP:
       GOTO(ev_sequence);
     } else if (r_proc->is<Cell::Cont>()) {
       r_val = Cell::caar(&r_argl);
-      load_continuation(r_proc);
+      f.load_continuation(r_proc);
     } else if (r_proc->is<Cell::Cproc>()) {
       if (vm_execute) {
-        (this->*vm_execute)(r_proc, Cell::car(&r_argl));
+        r_val = (this->*vm_execute)(r_proc, Cell::car(&r_argl));
       } else {
         error("no virtual machine executor");
       }
     } else {
       error("bad procedure in apply");
     }
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_eval:
@@ -536,10 +543,10 @@ TOP:
     // we take care of it here in the VM).
 
     r_exp = Cell::caar(&r_argl);
-    save(r_env);
+    f.push(r_env);
     r_env = root_envt;
     CALL_EVAL(ev_eval1);
-    restore(r_env);
+    r_env = f.pop();
     RETURN_VALUE(r_val);
 
   case ev_time:
@@ -549,15 +556,15 @@ TOP:
 
     r_proc = Cell::caar(&r_argl);
 
-    clear(r_argl);
-    save(make_real(vx_get_time()));
-    save_i(ev_time1); // cont
+    f.clear(r_argl);
+    f.push(make_real(vx_get_time()));
+    f.push_i(ev_time1); // cont
     GOTO(apply_dispatch2);
 
   case ev_time1:
 
     t1 = vx_get_time();
-    restore(r_tmp);
+    r_tmp = f.pop();
     r_tmp = make_real(t1 - r_tmp->RealValue());
     RETURN_VALUE(cons(r_tmp, r_val));
 
@@ -568,7 +575,7 @@ TOP:
       RETURN_VALUE(unspecified);
 
     if (cdr(r_unev) == nil) {
-      restore_i(r_cont);
+      r_cont = f.pop_i();
       EVAL_DISPATCH();
     }
 
@@ -595,7 +602,7 @@ TOP:
     r_unev = cdr(r_unev);
     CALL_EVAL(ev_if_decide);
 
-    restore_i(r_cont);
+    r_cont = f.pop_i();
 
     if (r_val->istrue()) {
       r_exp = car(r_unev);
@@ -614,8 +621,8 @@ TOP:
     r_tmp = car(r_unev);
 
     if (r_tmp->is<Cell::Symbol>()) {
-      save(r_env);
-      save(r_unev);
+      f.push(r_env);
+      f.push(r_unev);
       r_exp = cadr(r_unev);
       r_cont = ev_define_1;
       EVAL_DISPATCH();
@@ -626,8 +633,8 @@ TOP:
     }
 
   case ev_define_1:
-    restore(r_unev);
-    restore(r_env);
+    r_unev = f.pop();
+    r_env = f.pop();
     bind(r_env, car(r_unev), r_val);
     RETURN_VALUE(unspecified);
 
@@ -640,7 +647,7 @@ TOP:
 
   case ev_or:
     if (r_unev == nil || r_val->istrue()) {
-      restore_i(r_cont);
+      r_cont = f.pop_i();
       GOTO(r_cont);
     }
 
@@ -651,7 +658,7 @@ TOP:
 
   case ev_and:
     if (r_unev == nil || !r_val->istrue()) {
-      restore_i(r_cont);
+      r_cont = f.pop_i();
       GOTO(r_cont);
     }
 
@@ -665,8 +672,8 @@ TOP:
     // The macro has been expanded.  One more trip through
     // eval, please.
 
-    restore(r_env);
-    restore_i(r_cont);
+    r_env = f.pop();
+    r_cont = f.pop_i();
     r_exp = r_val;
     EVAL_DISPATCH();
 
@@ -681,8 +688,8 @@ TOP:
     } else
       r_proc = nil;
 
-    clear(r_argl);
-    clear(r_varl);
+    f.clear(r_argl);
+    f.clear(r_varl);
 
     if (car(r_unev) == nil) {
       r_unev = cdr(r_unev); // (let () x...)
@@ -690,26 +697,26 @@ TOP:
       goto let_noargs;
     }
 
-    save(r_proc);
-    save(cdr(r_unev));
+    f.push(r_proc);
+    f.push(cdr(r_unev));
     r_unev = car(r_unev); // fall through
 
   case ev_let_init:
-    save(r_argl);
-    save(r_varl);
+    f.push_pair(r_argl);
+    f.push_pair(r_varl);
     r_exp = cadar(r_unev);
 
     CALL_EVAL(let_accumulate_binding);
 
-    restore(r_varl);
-    restore(r_argl);
+    f.pop_pair(r_varl);
+    f.pop_pair(r_argl);
 
-    l_append(r_varl, caar(r_unev));
-    l_append(r_argl, r_val);
+    f.l_append(r_varl, caar(r_unev));
+    f.l_append(r_argl, r_val);
     r_unev = cdr(r_unev);
     if (r_unev == nil) {
-      restore(r_unev);
-      restore(r_proc);
+      r_unev = f.pop();
+      r_proc = f.pop();
     let_noargs:
       if (r_proc != nil) {
         r_env = extend(r_env);
@@ -733,26 +740,26 @@ TOP:
       GOTO(ev_sequence);
     }
 
-    save(cdr(r_unev));
+    f.push(cdr(r_unev));
     r_unev = car(r_unev);
 
   /* fall thru */
 
   case ev_letstar_init:
-    save(r_env);
-    save(r_unev);
+    f.push(r_env);
+    f.push(r_unev);
     r_exp = cadar(r_unev);
     r_cont = ev_letstar_bind;
     EVAL_DISPATCH();
 
   case ev_letstar_bind:
-    restore(r_unev);
-    restore(r_env);
+    r_unev = f.pop();
+    r_env = f.pop();
     r_env = extend(r_env);
     bind(r_env, caar(r_unev), r_val);
     r_unev = cdr(r_unev);
     if (r_unev == nil) {
-      restore(r_unev);
+      r_unev = f.pop();
       GOTO(ev_sequence);
     }
 
@@ -760,32 +767,32 @@ TOP:
 
   case ev_letrec:
     // we have: (((v1 i1) (v2 i2)...) x1 x2...)
-    clear(r_varl);
-    clear(r_argl);
-    save(cdr(r_unev));
+    f.clear(r_varl);
+    f.clear(r_argl);
+    f.push(cdr(r_unev));
 
     r_env = extend(r_env);
     for (r_exp = car(r_unev); r_exp != nil; r_exp = cdr(r_exp)) {
-      l_append(r_varl, caar(r_exp));
+      f.l_append(r_varl, caar(r_exp));
       bind(r_env, caar(r_exp), &Cell::Error);
     }
 
-    save(r_varl);
+    f.push_pair(r_varl);
     r_unev = car(r_unev);
 
   case ev_letrec1:
     if (r_unev != nil) {
       r_exp = cadar(r_unev);
-      save(r_argl);
+      f.push_pair(r_argl);
       CALL_EVAL(ev_letrec2);
-      restore(r_argl);
-      l_append(r_argl, r_val);
+      f.pop_pair(r_argl);
+      f.l_append(r_argl, r_val);
       r_unev = cdr(r_unev);
       GOTO(ev_letrec1);
     }
 
-    restore(r_varl);
-    restore(r_unev);
+    f.pop_pair(r_varl);
+    r_unev = f.pop();
     bind_arguments(r_env, Cell::car(&r_varl), Cell::car(&r_argl));
     GOTO(ev_sequence);
 
@@ -794,36 +801,36 @@ TOP:
     // Like let, accumulate variables (v) and
     // initializers (i) into r_varl and r_argl.
 
-    save(r_unev);         // (((var init step)...) (test x...) y...)
+    f.push(r_unev);         // (((var init step)...) (test x...) y...)
     r_unev = car(r_unev); // ((var init step)...)
-    clear(r_argl);
-    clear(r_varl);
+    f.clear(r_argl);
+    f.clear(r_varl);
   /* fall through */
 
   case ev_do_init:
-    save(r_argl);
-    save(r_varl);
-    save(r_env);
-    save(r_unev);
+    f.push_pair(r_argl);
+    f.push_pair(r_varl);
+    f.push(r_env);
+    f.push(r_unev);
     r_exp = cadar(r_unev);
     r_cont = ev_do_bind;
     EVAL_DISPATCH();
 
   case ev_do_bind:
-    restore(r_unev);
-    restore(r_env);
-    restore(r_varl);
-    restore(r_argl);
+    r_unev = f.pop();
+    r_env = f.pop();
+    f.pop_pair(r_varl);
+    f.pop_pair(r_argl);
 
-    l_append(r_varl, caar(r_unev));
-    l_append(r_argl, r_val);
+    f.l_append(r_varl, caar(r_unev));
+    f.l_append(r_argl, r_val);
     r_unev = cdr(r_unev);
 
     if (r_unev == nil) {
       // All done with inits. Create environment and start testing.
       r_env = extend(r_env);
       bind_arguments(r_env, Cell::car(&r_varl), Cell::car(&r_argl));
-      restore(r_unev); // (((var init step)...) (test x...) y...)
+      r_unev = f.pop(); // (((var init step)...) (test x...) y...)
       GOTO(ev_do_test);
     }
 
@@ -851,24 +858,24 @@ TOP:
     if (cddr(r_unev) == nil)
       GOTO(ev_do_step_2);
 
-    save(r_unev);
-    save(r_env);
+    f.push(r_unev);
+    f.push(r_env);
     r_unev = cddr(r_unev);
-    save_i(ev_do_step);
+    f.push_i(ev_do_step);
     GOTO(ev_sequence);
 
   case ev_do_step:
     // then use the step expressions (if any) to rebind the
     // variables, and retest.
 
-    restore(r_env);
-    restore(r_unev); // (((var init step)...) (test x...) y...)
+    r_env = f.pop();
+    r_unev = f.pop(); // (((var init step)...) (test x...) y...)
 
   case ev_do_step_2:
-    save(r_unev);
+    f.push(r_unev);
     r_unev = car(r_unev); // ((var init step) ...)
-    clear(r_argl);
-    clear(r_varl);
+    f.clear(r_argl);
+    f.clear(r_varl);
   /* fall through */
 
   case ev_step_1:
@@ -884,22 +891,22 @@ TOP:
       GOTO(ev_step_1);
     }
 
-    save(r_argl);
-    save(r_varl);
+    f.push_pair(r_argl);
+    f.push_pair(r_varl);
     r_exp = caddar(r_unev);
     CALL_EVAL(ev_step_bind);
 
-    restore(r_varl);
-    restore(r_argl);
+    f.pop_pair(r_varl);
+    f.pop_pair(r_argl);
 
-    l_append(r_varl, caar(r_unev));
-    l_append(r_argl, r_val);
+    f.l_append(r_varl, caar(r_unev));
+    f.l_append(r_argl, r_val);
     r_unev = cdr(r_unev);
     GOTO(ev_step_1);
 
   case ev_step_finish:
     bind_arguments(r_env, Cell::car(&r_varl), Cell::car(&r_argl));
-    restore(r_unev);
+    r_unev = f.pop();
     GOTO(ev_do_test);
 
   case ev_cond:
@@ -923,14 +930,14 @@ TOP:
         // We already have the argument.  Now, evaluate
         // r_proc, so we can apply it.
 
-        save(r_val);
+        f.push(r_val);
         r_unev = cdr(r_unev);
         r_exp = car(r_unev);
 
         CALL_EVAL(ev_cond_passto);
 
         r_proc = r_val;
-        restore(r_val);
+        r_val = f.pop();
         Cell::setcar(&r_argl, cons(r_val, nil));
         GOTO(apply_dispatch2);
       }
@@ -947,13 +954,13 @@ TOP:
 
     r_proc = Cell::caar(&r_argl); // peel off r_proc
     r_tmp = Cell::cdar(&r_argl);
-    clear(r_argl);
+    f.clear(r_argl);
 
     for (; r_tmp != nil; r_tmp = cdr(r_tmp))
       if (cdr(r_tmp) == nil) // fold the list
-        l_appendtail(r_argl, car(r_tmp));
+        f.l_appendtail(r_argl, car(r_tmp));
       else
-        l_append(r_argl, car(r_tmp));
+        f.l_append(r_argl, car(r_tmp));
 
     GOTO(apply_dispatch2);
 
@@ -964,12 +971,12 @@ TOP:
     ++r_qq;
 
     if (r_unev->is<Cell::Vec>()) {
-      save_i(1);
+      f.push_i(1);
       r_unev = vector_to_list(this, cons(r_unev, nil)); // yyy
     } else
-      save_i(0);
+      f.push_i(0);
 
-    save_i(ev_qq_finish);
+    f.push_i(ev_qq_finish);
     r_val = nil;
 
   case ev_qq0:
@@ -989,13 +996,13 @@ TOP:
             ++r_qq;
           } else {
             r_tmp = make_symbol(s_unquote);
-            save(r_tmp);
+            f.push(r_tmp);
             GOTO(ev_qq_decrease);
           }
         } else if (p == s_quasiquote) // increase QQ level.
         {
           r_unev = cdr(r_unev);
-          save_i(ev_qq1);
+          f.push_i(ev_qq1);
           GOTO(ev_quasiquote);
         case ev_qq1:
           r_tmp = make_symbol(s_quasiquote);
@@ -1025,49 +1032,49 @@ TOP:
           Cell::setcar(&r_argl, r_val);
           Cell::setcdr(&r_argl, r_tmp);
 
-          save(r_argl);
+          f.push_pair(r_argl);
           r_exp = r_unev;
-          save_i(ev_unq_spl2);
+          f.push_i(ev_unq_spl2);
           GOTO(ev_qq0);
         } else {
           r_tmp = make_symbol(s_unquote_splicing);
-          save(r_tmp);
+          f.push(r_tmp);
           GOTO(ev_qq_decrease);
         }
 
       case ev_unq_spl2:
-        restore(r_argl);
-        l_appendtail(r_argl, r_val);
+        f.pop_pair(r_argl);
+        f.l_appendtail(r_argl, r_val);
         r_val = Cell::car(&r_argl);
       } else if (r_unev == nil)
         r_val = nil;
       else {
-      QQCONS:              // "move quasiquotation inward"
-        save(cdr(r_unev)); // cons (qq (car), qq (cdr))
-        save_i(ev_qq2);    // new continuation
+      QQCONS:                // "move quasiquotation inward"
+        f.push(cdr(r_unev)); // cons (qq (car), qq (cdr))
+        f.push_i(ev_qq2);    // new continuation
         r_unev = r_exp;
         GOTO(ev_qq0);
       case ev_qq2:
-        restore(r_unev);
-        save(r_val);
-        save_i(ev_qq3);
+        r_unev = f.pop();
+        f.push(r_val);
+        f.push_i(ev_qq3);
         GOTO(ev_qq0);
       case ev_qq3:
-        restore(r_exp);
+        r_exp = f.pop();
         r_val = cons(r_exp, r_val);
       }
     } else
       r_val = r_unev; // atoms are self-evaluating
 
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_qq_finish: // finished.  reconvert to
-    restore_i(flag); // vector form if necessary.
+    flag = f.pop_i(); // vector form if necessary.
     if (flag)
       r_val = vector_from_list(this, r_val);
     --r_qq;
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_qq_decrease:
@@ -1078,10 +1085,10 @@ TOP:
 
     --r_qq;
     r_unev = cdr(r_unev);
-    save_i(ev_qqd_1);
+    f.push_i(ev_qqd_1);
     GOTO(ev_qq0);
   case ev_qqd_1:
-    restore(r_exp); // recover head symbol
+    r_exp = f.pop(); // recover head symbol
     ++r_qq;
     RETURN_VALUE(cons(r_exp, r_val));
 
@@ -1119,47 +1126,47 @@ TOP:
     if (car(r_unev) == nil)
       RETURN_VALUE(unspecified);
 
-    clear(r_argl);
+    f.clear(r_argl);
     for (r_tmp = r_unev; r_tmp != nil; r_tmp = cdr(r_tmp)) {
-      l_append(r_argl, caar(r_tmp));
+      f.l_append(r_argl, caar(r_tmp));
       Cell::setcar(r_tmp, cdar(r_tmp));
     }
 
-    save(r_unev);
-    save(r_proc);
-    save_i(ev_foreach2);
+    f.push(r_unev);
+    f.push(r_proc);
+    f.push_i(ev_foreach2);
     GOTO(apply_dispatch2);
   case ev_foreach2:
-    restore(r_proc);
-    restore(r_unev);
+    r_proc = f.pop();
+    r_unev = f.pop();
     GOTO(ev_foreach1);
 
   case ev_map:
     r_proc = Cell::caar(&r_argl);
     // copy r_argl to r_unev (less the first elt., which was the r_proc)
     r_unev = Cell::cdar(&r_argl);
-    clear(r_varl);
+    f.clear(r_varl);
 
   case ev_map1:
     if (car(r_unev) == nil) // no more arguments
       GOTO(ev_map3);
 
-    clear(r_argl);
+    f.clear(r_argl);
     for (r_tmp = r_unev; r_tmp != nil; r_tmp = cdr(r_tmp)) {
-      l_append(r_argl, caar(r_tmp));
+      f.l_append(r_argl, caar(r_tmp));
       Cell::setcar(r_tmp, cdar(r_tmp));
     }
 
-    save(r_varl);
-    save(r_unev);
-    save(r_proc);
-    save_i(ev_map2);
+    f.push_pair(r_varl);
+    f.push(r_unev);
+    f.push(r_proc);
+    f.push_i(ev_map2);
     GOTO(apply_dispatch2);
   case ev_map2:
-    restore(r_proc);
-    restore(r_unev);
-    restore(r_varl);
-    l_append(r_varl, r_val);
+    r_proc = f.pop();
+    r_unev = f.pop();
+    f.pop_pair(r_varl);
+    f.l_append(r_varl, r_val);
     GOTO(ev_map1);
 
   case ev_map3:
@@ -1175,10 +1182,10 @@ TOP:
       // procedure we must evaluate to get the value, which
       // we then memoize.
 
-      clear(r_argl);
+      f.clear(r_argl);
       r_proc = r_exp->unsafe_vector_value()->get(0);
-      save(r_exp);
-      save_i(ev_force2);
+      f.push(r_exp);
+      f.push_i(ev_force2);
       GOTO(apply_dispatch2);
     case ev_force2:
       // Now, it can happen that the procedure we're
@@ -1188,7 +1195,7 @@ TOP:
       // computation (we are "higher" on the evaluation
       // stack)...
 
-      restore(r_exp);
+      r_exp = f.pop();
       if (r_exp->flag(Cell::Flag::Forced))
         r_val = r_exp->unsafe_vector_value()->get(0);
       else {
@@ -1197,7 +1204,7 @@ TOP:
       }
     }
 
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_withinput:
@@ -1205,39 +1212,39 @@ TOP:
 
     with_input(Cell::caar(&r_argl)->StringValue());
     r_proc = Cell::cadar(&r_argl);
-    clear(r_argl);
-    save_i(ev_withinput2); // continuation
+    f.clear(r_argl);
+    f.push_i(ev_withinput2); // continuation
     GOTO(apply_dispatch2);
 
   case ev_withinput2:
     without_input();
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_withoutput:
     with_output(Cell::caar(&r_argl)->StringValue());
     r_proc = Cell::cadar(&r_argl);
-    clear(r_argl);
-    save_i(ev_withoutput2); // continuation
+    f.clear(r_argl);
+    f.push_i(ev_withoutput2); // continuation
     GOTO(apply_dispatch2);
 
   case ev_withoutput2:
     without_output();
-    restore_i(r_cont);
+    r_cont = f.pop_i();
     GOTO(r_cont);
 
   case ev_load:
     r_unev = make_iport(Cell::caar(&r_argl)->StringValue());
-    save(r_unev); // let r_unev hold input stream
-    save(r_env);
+    f.push(r_unev); // let r_unev hold input stream
+    f.push(r_env);
 
   case ev_load2:
-    restore(r_env);
-    restore(r_unev);
+    r_env = f.pop();
+    r_unev = f.pop();
     r_exp = read(r_unev->IportValue());
     if (r_exp) {
-      save(r_unev);
-      save(r_env);
+      f.push(r_unev);
+      f.push(r_env);
       r_env = root_envt; // read files into global scope
       r_cont = ev_load2; // loop
       EVAL_DISPATCH();
@@ -1249,12 +1256,12 @@ TOP:
     r_proc = Cell::cadar(&r_argl);
     r_unev = make_oport(Cell::caar(&r_argl)->StringValue());
     Cell::setcar(&r_argl, cons(r_unev, nil));
-    save(r_unev);
-    save_i(ev_callwof2); // cont
+    f.push(r_unev);
+    f.push_i(ev_callwof2); // cont
     GOTO(apply_dispatch2);
 
   case ev_callwof2:
-    restore(r_unev);
+    r_unev = f.pop();
     fflush(r_unev->OportValue());
     RETURN_VALUE(r_val);
 
@@ -1266,33 +1273,16 @@ TOP:
   co_return;
 }
 
+#undef GOTO
+#undef EVAL_DISPATCH
+#undef RETURN_VALUE
+#undef CALL_EVAL
+
 Cell *Context::interp_evaluator(Cell *form) {
-  auto coro = eval_coro(form);
-  while (coro.next())
+  Fiber fiber(*this, form);
+  while (fiber.next())
     ;
-  return r_val;
-}
-
-void Context::print_vm_state() {
-  printf("%d %s exp=", m_stack.size(), state_name[state]);
-  r_exp->write(stdout);
-  printf(" unev=");
-  r_unev->write(stdout);
-  printf(" proc=");
-  r_proc->write(stdout);
-  printf(" val=");
-  r_val->write(stdout);
-  printf(" argl=");
-  Cell::car(&r_argl)->write(stdout);
-  printf(" varl=");
-  Cell::car(&r_varl)->write(stdout);
-  printf(" env=");
-  if (r_env == root_envt)
-    printf("#<root>");
-  else
-    Cell::car(r_env)->write(stdout);
-
-  printf(" cont=%s q%d\n", state_name[r_cont], r_qq);
+  return fiber.r_val;
 }
 
 void Context::bind_arguments(Cell *env, Cell *variables, Cell *values) {
@@ -1458,26 +1448,6 @@ Cell *Context::make_list2(Cell *e1, Cell *e2) {
 
 Cell *Context::make_list3(Cell *e1, Cell *e2, Cell *e3) {
   return cons(e1, make_list2(e2, e3));
-}
-
-Cell *Context::make_continuation() {
-  int msize = m_stack.size();
-  cellvector *cv = cellvector::alloc(msize);
-  for (int ix = 0; ix < msize; ++ix)
-    cv->set(ix, m_stack[ix]);
-  Cell *c = alloc<Cell::Cont>(cv);
-  c->flag(Cell::Flag::VRef, true);
-
-  return c;
-}
-
-void Context::load_continuation(Cell *cont) {
-  cellvector *cv = cont->unsafe_vector_value();
-  int msize = cv->size();
-
-  m_stack.clear();
-  for (int ix = 0; ix < msize; ++ix)
-    save(cv->get(ix));
 }
 
 class InterpreterExt : SchemeExtension {

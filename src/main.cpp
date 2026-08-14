@@ -81,8 +81,8 @@ int main(int argc, char **argv) {
     while (1) {
       try {
         interact(&ctx);
-      } catch (const std::runtime_error& e) {
-        fprintf(stderr, "caught: %s\n", e.what());
+      } catch (const std::exception &e) {
+        fprintf(stderr, "caught exception: %s\n", e.what());
       }
     }
   }

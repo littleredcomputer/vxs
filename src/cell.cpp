@@ -648,38 +648,30 @@ void Context::gc() {
   //
   // MARK PHASE
   //
-  // We have to mark everything reachable from the "register machine"
-  // registers.
+  // We mark everything reachable from global state and active fibers.
 
   mark(root_envt);
-  mark(r_env);
-  mark(Cell::car(&r_argl));
-  mark(Cell::cdr(&r_argl));
-  mark(Cell::car(&r_varl));
-  mark(Cell::cdr(&r_varl));
-  mark(r_proc);
-  mark(r_exp);
-  mark(r_unev);
-  mark(r_val);
-  mark(r_tmp);
-  mark(r_elt);
-  mark(r_nu);
   mark(cc_procedure);
   mark(empty_vector);
 
-  // Mark the things is the compiler VM.
-  //
-
+  // Mark the things in the compiler VM and parser.
   mark(r_cproc);
   mark(r_envt);
-
-  // Mark everything reachable from the machine stack.  Watch out
-  // for integers hiding in the machine stack, though!  They are
-  // marked with the ATOM flag.
+  mark(r_val);
+  mark(r_tmp);
+  mark(r_proc);
+  mark(r_nu);
+  mark(r_elt);
+  mark(Cell::car(&r_argl));
+  mark(Cell::cdr(&r_argl));
 
   for (int ix = 0; ix < m_stack.size(); ++ix)
     if ((reinterpret_cast<intptr_t>((p = m_stack[ix])) & Cell::ATOM) == 0)
       mark(p);
+
+  // Mark all active fibers
+  for (Fiber *f : active_fibers)
+    f->mark_roots(this);
 
   // Mark the I/O ports referenced in this environment stack.
 

@@ -14,11 +14,14 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <algorithm>
 #include <coroutine>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unistd.h>
 #include <variant>
+#include <vector>
 
 template <class... Ts> struct overloaded : Ts... {
   using Ts::operator()...;
@@ -27,6 +30,7 @@ template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
 struct Step {
   struct promise_type {
+    std::exception_ptr exception;
     Step get_return_object() {
       return Step{std::coroutine_handle<promise_type>::from_promise(*this)};
     }
@@ -34,7 +38,7 @@ struct Step {
     std::suspend_always final_suspend() noexcept { return {}; }
     std::suspend_always yield_value(bool) noexcept { return {}; }
     void return_void() noexcept {}
-    void unhandled_exception() { std::terminate(); }
+    void unhandled_exception() { exception = std::current_exception(); }
   };
 
   std::coroutine_handle<promise_type> handle = nullptr;
@@ -43,6 +47,8 @@ struct Step {
   bool next() {
     if (handle && !handle.done()) {
       handle.resume();
+      if (handle.promise().exception)
+        std::rethrow_exception(handle.promise().exception);
       return !handle.done();
     }
     return false;
@@ -71,6 +77,7 @@ class OS;
 class Cell;
 class Slab;
 class Context;
+struct Fiber;
 
 // Execution / Debug flags
 
@@ -520,9 +527,19 @@ public:
     return std::holds_alternative<T>(val);
   }
 
-  template <typename T> const T &as() const { return std::get<T>(val); }
+  template <typename T> const T &as() const {
+    if (const T *p = get_if<T>())
+      return *p;
+    error("type error: unexpected cell variant access on ", name());
+    return std::get<T>(val);
+  }
 
-  template <typename T> T &as() { return std::get<T>(val); }
+  template <typename T> T &as() {
+    if (T *p = get_if<T>())
+      return *p;
+    error("type error: unexpected cell variant access on ", name());
+    return std::get<T>(val);
+  }
 
   template <typename T> const T *get_if() const {
     if (short_atom(this))
@@ -684,10 +701,10 @@ public:
                                  [](const Promise &p) { return p.cv; },
                                  [](const Cpromise &cp) { return cp.cv; },
                                  [](const Cont &k) { return k.cv; },
-                                 [](const auto &) -> cellvector * {
-                                   error("expecting a vector-backed cell");
-                                   return nullptr;
-                                 }},
+                                 [this](const auto &) -> cellvector * {
+                     error("expecting a vector-backed cell on ", this->name());
+                     return nullptr;
+                   }},
                       val);
   }
   cellvector *unsafe_vector_value() const { return vector_payload(); }
@@ -774,6 +791,7 @@ public:
   friend class Cell;
   friend class Slab;
   friend class VmLibExtension;
+  friend struct Fiber;
 
   Context();
 
@@ -836,9 +854,14 @@ public:
   // Returns true if we are using the bytecode VM.
   bool using_vm() const;
 
+  // Fiber management and execution
+  void register_fiber(Fiber *f) { active_fibers.push_back(f); }
+  void unregister_fiber(Fiber *f);
+  std::unique_ptr<Fiber> spawn_fiber(Cell *form);
+
   // Interpreting evaluator
 
-  Step eval_coro(Cell *form);
+  Step eval_coro(Fiber &f);
   Cell *interp_evaluator(Cell *form);
   Cell *(Context::*interp_eval)(Cell *form);
 
@@ -906,8 +929,6 @@ public:
                                 int start);
   Cell *make_compiled_promise(Cell *procedure);
   Cell *force_compiled_promise(Cell *promise);
-  Cell *make_continuation();
-  void load_continuation(Cell *cont);
   void print_insn(int pc, const Cell *insn);
   Cell *write_compiled_procedure(Cell *arglist);
   Cell *load_compiled_procedure(struct vm_cproc *);
@@ -953,14 +974,11 @@ private:
   void print_vm_state();
   void *xmalloc(size_t);
 
-  // ===========================
-  // Machine Stack Operations
+  std::vector<Fiber *> active_fibers;
 
-  // The machine stack is just a cellvector, with one difference:
-  // it can hold integers (marked with the ATOM flag) as well as
-  // cell pointers.  (There are thus only 31 bits in these integers,
-  // but that's way more than enough to hold the virtual machine
-  // state.
+  // ===========================
+  // BYTECODE VM STATE & STACK
+  // ===========================
 
   void save(Cell *c) { m_stack.push(c); }
   void save(Cell &rc) {
@@ -981,46 +999,6 @@ private:
         1;
   }
 
-  // ===========================
-  // REGISTER MACHINE
-  // ===========================
-
-  Cell *r_exp;        // expression to evaluate
-  Cell *r_env;        // evaluation environment
-  Cell *r_unev;       // args awaiting evaluation
-  Cell r_argl;        // (head,tail) of argument list
-  Cell r_varl;        // (head,tail) of binding list
-  Cell *r_proc;       // procedure to apply
-  Cell *r_val;        // value resulting from evaluation
-  Cell *r_tmp;        // temporary values
-  Cell *r_elt;        // elements assembled into lists
-  Cell *r_nu;         // reference to objects being created
-  int r_qq;           // quasiquotation depth
-  cellvector r_gcp;   // extra cells protected from GC
-  intptr_t r_cont;    // current continuation
-  cellvector m_stack; // recursion/evaluation stack
-  int state;          // current machine state
-
-  // We added a different set of registers for the compiler VM.
-  // this avoids GC collisions when the interpreter is invoking
-  // compiled procedures.  In the event vx-scheme is configured
-  // to use only one of the interpreter or compiler, there are
-  // some slots here that will be unused, but only one per execution
-  // context.
-
-  Cell *r_envt;  // environment
-  Cell *r_cproc; // current compiled procedure.
-
-  // The assembled instructions to resume a saved continuation
-  Cell *cc_procedure;
-  Cell *empty_vector;
-
-  // ===========================
-
-  // routines to append elements to lists (used with r_argl and r_varl).
-  // Note: r_argl and r_varl MUST be maintained as correctly-formed
-  // lists, since we use unsafe car/cdr to traverse them.
-
   void l_appendtail(Cell &l, Cell *t) {
     if (l.unsafe_car() == nil) {
       l.set_unsafe_car(t);
@@ -1037,9 +1015,24 @@ private:
   }
 
   void clear(Cell &c) {
-    c.set_unsafe_car(nil);
-    c.set_unsafe_cdr(nil);
+    c.val = Cell::Cons{nil, nil};
   }
+
+  Cell *r_envt;  // environment
+  Cell *r_cproc; // current compiled procedure.
+  Cell *r_val;
+  Cell *r_tmp;
+  Cell *r_proc;
+  Cell *r_nu;
+  Cell *r_elt;
+  Cell r_argl;
+  cellvector m_stack;
+
+  // The assembled instructions to resume a saved continuation
+  Cell *cc_procedure;
+  Cell *empty_vector;
+
+  // ===========================
 
   Cell *envt;
   Cell *root_envt;
@@ -1047,6 +1040,7 @@ private:
 
   cellvector istack; // stack of input ports (with-input...)
   cellvector ostack; // stack of output ports (with-output...)
+  cellvector r_gcp;  // extra cells protected from GC
 
   struct Memory {
     cellvector active; // list of allocated Slabs
@@ -1165,7 +1159,81 @@ extern psymbol s_cond;
 extern psymbol s_case;
 extern psymbol s_callcc;
 
-// Typedefs for compiled procedures in C form.  It's possible to serialize
+struct Fiber {
+  Context &ctx;
+
+  Cell *r_exp = nullptr;
+  Cell *r_env = nullptr;
+  Cell *r_unev = nullptr;
+  Cell r_argl;
+  Cell r_varl;
+  Cell *r_proc = nullptr;
+  Cell *r_val = nullptr;
+  Cell *r_tmp = nullptr;
+  Cell *r_elt = nullptr;
+  Cell *r_nu = nullptr;
+  int r_qq = 0;
+  intptr_t r_cont = 0;
+  cellvector m_stack;
+  int state = 0;
+
+  Step step;
+
+  Fiber(Context &c, Cell *form);
+  ~Fiber();
+
+  Fiber(const Fiber &) = delete;
+  Fiber &operator=(const Fiber &) = delete;
+
+  bool next() { return step.next(); }
+  bool done() const { return step.done(); }
+
+  static Cell *tag_int(intptr_t i) {
+    return reinterpret_cast<Cell *>((i << 1) | Cell::ATOM);
+  }
+  static intptr_t untag_int(Cell *c) {
+    return (reinterpret_cast<intptr_t>(c) & static_cast<intptr_t>(~Cell::ATOM)) >> 1;
+  }
+
+  void push(Cell *c) { m_stack.push(c); }
+  void push_pair(const Cell &rc) {
+    m_stack.push(rc.unsafe_car());
+    m_stack.push(rc.unsafe_cdr());
+  }
+  void push_i(intptr_t i) {
+    m_stack.push(tag_int(i));
+  }
+
+  [[nodiscard]] Cell *pop() { return m_stack.pop(); }
+  void pop_pair(Cell &rc) {
+    rc.set_unsafe_cdr(m_stack.pop());
+    rc.set_unsafe_car(m_stack.pop());
+  }
+  [[nodiscard]] intptr_t pop_i() {
+    return untag_int(m_stack.pop());
+  }
+
+  void l_appendtail(Cell &l, Cell *t) {
+    if (l.unsafe_car() == nil) {
+      l.set_unsafe_car(t);
+      l.set_unsafe_cdr(t);
+    } else {
+      l.unsafe_cdr()->set_unsafe_cdr(t);
+      l.set_unsafe_cdr(t);
+    }
+  }
+
+  void l_append(Cell &l, Cell *t);
+
+  void clear(Cell &c) {
+    c.val = Cell::Cons{nil, nil};
+  }
+
+  void mark_roots(Context *gc);
+  void print_vm_state() const;
+  Cell *make_continuation();
+  void load_continuation(Cell *cont);
+};
 // a compiled procedure into a C data structure that can be used to load
 // the bytecode.
 

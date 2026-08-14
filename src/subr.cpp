@@ -50,8 +50,12 @@ static bool exact_list(Cell *arglist) {
 inline static double asReal(Cell *c) {
   if (c->is<intptr_t>())
     return (double)c->IntValue();
-  else
+  else if (c->is<double>())
     return c->RealValue();
+  else {
+    error("expected a number");
+    return 0.0;
+  }
 }
 
 //---------------------------------------------------------------------

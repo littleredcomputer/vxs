@@ -67,20 +67,105 @@ Context::Context() {
 
   root_envt = envt = extend(envt);
 
+  r_cproc = r_envt = r_val = r_tmp = r_proc = r_nu = r_elt = nil;
+  clear(r_argl);
   provision();
-  init_machine();
   ok_to_gc = true;
 }
 
-void Context::init_machine() {
-  // Initialize machine registers
+void Context::unregister_fiber(Fiber *f) {
+  auto it = std::find(active_fibers.begin(), active_fibers.end(), f);
+  if (it != active_fibers.end())
+    active_fibers.erase(it);
+}
 
-  r_exp = r_val = r_proc = r_unev = r_elt = r_nu = r_tmp = nil;
-  r_env = envt;
-  r_cproc = r_envt = nil;
-  m_stack.clear();
+std::unique_ptr<Fiber> Context::spawn_fiber(Cell *form) {
+  return std::make_unique<Fiber>(*this, form);
+}
+
+Fiber::Fiber(Context &c, Cell *form) : ctx(c) {
+  r_exp = form;
+  r_env = c.root();
+  r_val = r_proc = r_unev = r_elt = r_nu = r_tmp = nil;
+  r_qq = 0;
+  r_cont = 1;
+  state = 0;
   clear(r_argl);
   clear(r_varl);
+  c.register_fiber(this);
+  step = c.eval_coro(*this);
+}
+
+Fiber::~Fiber() { ctx.unregister_fiber(this); }
+
+void Fiber::l_append(Cell &l, Cell *t) {
+  r_elt = ctx.make(t);
+  l_appendtail(l, r_elt);
+}
+
+void Fiber::mark_roots(Context *gc) {
+  gc->mark(r_env);
+  gc->mark(Cell::car(&r_argl));
+  gc->mark(Cell::cdr(&r_argl));
+  gc->mark(Cell::car(&r_varl));
+  gc->mark(Cell::cdr(&r_varl));
+  gc->mark(r_proc);
+  gc->mark(r_exp);
+  gc->mark(r_unev);
+  gc->mark(r_val);
+  gc->mark(r_tmp);
+  gc->mark(r_elt);
+  gc->mark(r_nu);
+
+  for (int ix = 0; ix < m_stack.size(); ++ix) {
+    Cell *p = m_stack[ix];
+    if ((reinterpret_cast<intptr_t>(p) & Cell::ATOM) == 0)
+      gc->mark(p);
+  }
+}
+
+void Fiber::print_vm_state() const {
+  printf("%d state=%d exp=", m_stack.size(), state);
+  r_exp->write(stdout);
+  printf(" unev=");
+  r_unev->write(stdout);
+  printf(" proc=");
+  r_proc->write(stdout);
+  printf(" val=");
+  r_val->write(stdout);
+  printf(" argl=");
+  Cell::car(&r_argl)->write(stdout);
+  printf(" varl=");
+  Cell::car(&r_varl)->write(stdout);
+  printf(" env=");
+  if (r_env == ctx.root())
+    printf("#<root>");
+  else
+    Cell::car(r_env)->write(stdout);
+  printf(" cont=%ld q%d\n", r_cont, r_qq);
+}
+
+Cell *Fiber::make_continuation() {
+  int msize = m_stack.size();
+  cellvector *cv = cellvector::alloc(msize);
+  for (int ix = 0; ix < msize; ++ix)
+    cv->set(ix, m_stack[ix]);
+  Cell *c = ctx.alloc<Cell::Cont>(cv);
+  c->flag(Cell::Flag::VRef, true);
+  return c;
+}
+
+void Fiber::load_continuation(Cell *cont) {
+  cellvector *cv = cont->unsafe_vector_value();
+  int msize = cv->size();
+
+  m_stack.clear();
+  for (int ix = 0; ix < msize; ++ix)
+    push(cv->get(ix));
+}
+
+__attribute__((weak)) Step Context::eval_coro(Fiber &f) {
+  co_return;
 }
 
 #include <stdexcept>
