@@ -8,6 +8,7 @@
 // io.cpp : reading and printing S-expressions.
 
 #include "vx-scheme.h"
+#include <charconv>
 #include <errno.h>
 
 // --------------------------------------------------------------------------
@@ -329,12 +330,17 @@ Cell *Context::read(FILE *fp) {
 
 std::string Cell::real_to_string(double d) {
   char buf[64];
-  int n = snprintf(buf, sizeof(buf), "%.15g", d);
-  if (n > 0 && !strpbrk(buf, ".eE")) {
-    buf[n] = '.';
-    buf[n + 1] = '\0';
+  auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
+  if (ec != std::errc())
+    return "0.0";
+
+  std::string_view sv(buf, ptr - buf);
+  if (sv.find_first_of(".eE") == std::string_view::npos) {
+    std::string s(sv);
+    s += ".0";
+    return s;
   }
-  return std::string(buf);
+  return std::string(sv);
 }
 
 void Cell::write(FILE *out) const {
