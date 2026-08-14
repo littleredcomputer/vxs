@@ -11,6 +11,7 @@
 #include <cmath>
 #include <errno.h>
 #include <float.h>
+#include <functional>
 #include <limits>
 
 //---------------------------------------------------------------------
@@ -209,17 +210,18 @@ Cell *skabs(Context *ctx, Cell *arglist) {
 // non numeric types (i.e., those that do not participate
 // in coercion).
 
-#define BINOP(name, OP, ctype, stype)                                          \
-  Cell *name(Context *ctx, Cell *args) {                                       \
-    for (Cell *a = args; a != nil; a = Cell::cdr(a))                           \
-      if (Cell::cdr(a) != nil) {                                               \
-        const auto &ia = Cell::car(a)->stype##Value();                         \
-        const auto &ib = Cell::cadr(a)->stype##Value();                        \
-        if (!OP(ia, ib))                                                       \
-          return &Cell::Bool_F;                                                \
-      }                                                                        \
-    return &Cell::Bool_T;                                                      \
+template <typename ValueExtractor, typename Op>
+static Cell *typed_compare(Context *ctx, Cell *args, ValueExtractor extract, Op op) {
+  for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
+    if (Cell::cdr(a) != nil) {
+      const auto &ia = extract(Cell::car(a));
+      const auto &ib = extract(Cell::cadr(a));
+      if (!op(ia, ib))
+        return &Cell::Bool_F;
+    }
   }
+  return &Cell::Bool_T;
+}
 
 static int strcmp_ci(const std::string &s, const std::string &t) {
   size_t min_len = std::min(s.length(), t.length());
@@ -236,83 +238,109 @@ static int strcmp_ci(const std::string &s, const std::string &t) {
   return 0;
 }
 
-#define EQ(a, b) ((a) == (b))
-#define LE(a, b) ((a) <= (b))
-#define LT(a, b) ((a) < (b))
-#define GE(a, b) ((a) >= (b))
-#define GT(a, b) ((a) > (b))
-#define strEQci(a, b) (strcmp_ci(a, b) == 0)
-#define strLEci(a, b) (strcmp_ci(a, b) <= 0)
-#define strLTci(a, b) (strcmp_ci(a, b) < 0)
-#define strGEci(a, b) (strcmp_ci(a, b) >= 0)
-#define strGTci(a, b) (strcmp_ci(a, b) > 0)
-#define chrEQci(a, b) (tolower(a) == tolower(b))
-#define chrLEci(a, b) (tolower(a) <= tolower(b))
-#define chrLTci(a, b) (tolower(a) < tolower(b))
-#define chrGEci(a, b) (tolower(a) >= tolower(b))
-#define chrGTci(a, b) (tolower(a) > tolower(b))
+struct CharCiEqual {
+  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) == tolower(static_cast<unsigned char>(b)); }
+};
+struct CharCiLess {
+  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) < tolower(static_cast<unsigned char>(b)); }
+};
+struct CharCiLessEqual {
+  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) <= tolower(static_cast<unsigned char>(b)); }
+};
+struct CharCiGreater {
+  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) > tolower(static_cast<unsigned char>(b)); }
+};
+struct CharCiGreaterEqual {
+  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) >= tolower(static_cast<unsigned char>(b)); }
+};
 
-BINOP(char_eq, EQ, char, Char)
-BINOP(char_le, LE, char, Char)
-BINOP(char_lt, LT, char, Char)
-BINOP(char_ge, GE, char, Char)
-BINOP(char_gt, GT, char, Char)
-BINOP(string_eq, EQ, const std::string &, String)
-BINOP(string_le, LE, const std::string &, String)
-BINOP(string_lt, LT, const std::string &, String)
-BINOP(string_ge, GE, const std::string &, String)
-BINOP(string_gt, GT, const std::string &, String)
-BINOP(string_eq_ci, strEQci, const std::string &, String)
-BINOP(string_le_ci, strLEci, const std::string &, String)
-BINOP(string_lt_ci, strLTci, const std::string &, String)
-BINOP(string_ge_ci, strGEci, const std::string &, String)
-BINOP(string_gt_ci, strGTci, const std::string &, String)
-BINOP(char_eq_ci, chrEQci, char, Char)
-BINOP(char_le_ci, chrLEci, char, Char)
-BINOP(char_lt_ci, chrLTci, char, Char)
-BINOP(char_ge_ci, chrGEci, char, Char)
-BINOP(char_gt_ci, chrGTci, char, Char)
+template <typename Op>
+static Cell *char_compare(Context *ctx, Cell *args) {
+  return typed_compare(ctx, args, [](const Cell *c) { return c->CharValue(); }, Op{});
+}
 
-#define NBINOP(name, OP)                                                       \
-  Cell *name(Context *ctx, Cell *args) {                                       \
-    bool exact = exact_list(args);                                             \
-    for (Cell *a = args; a != nil; a = Cell::cdr(a)) {                         \
-      if (cdr(a) != nil) {                                                     \
-        if (exact) {                                                           \
-          intptr_t ia = car(a)->IntValue();                                    \
-          intptr_t ib = cadr(a)->IntValue();                                   \
-          if (!OP(ia, ib)) {                                                   \
-            return &Cell::Bool_F;                                              \
-          }                                                                    \
-        } else {                                                               \
-          double da = asReal(car(a));                                          \
-          double db = asReal(cadr(a));                                         \
-          if (!OP(da, db)) {                                                   \
-            return &Cell::Bool_F;                                              \
-          }                                                                    \
-        }                                                                      \
-      }                                                                        \
-    }                                                                          \
-    return &Cell::Bool_T;                                                      \
+static constexpr subr_f char_eq    = char_compare<std::equal_to<>>;
+static constexpr subr_f char_le    = char_compare<std::less_equal<>>;
+static constexpr subr_f char_lt    = char_compare<std::less<>>;
+static constexpr subr_f char_ge    = char_compare<std::greater_equal<>>;
+static constexpr subr_f char_gt    = char_compare<std::greater<>>;
+static constexpr subr_f char_eq_ci = char_compare<CharCiEqual>;
+static constexpr subr_f char_le_ci = char_compare<CharCiLessEqual>;
+static constexpr subr_f char_lt_ci = char_compare<CharCiLess>;
+static constexpr subr_f char_ge_ci = char_compare<CharCiGreaterEqual>;
+static constexpr subr_f char_gt_ci = char_compare<CharCiGreater>;
+
+struct StringCiEqual {
+  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) == 0; }
+};
+struct StringCiLess {
+  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) < 0; }
+};
+struct StringCiLessEqual {
+  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) <= 0; }
+};
+struct StringCiGreater {
+  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) > 0; }
+};
+struct StringCiGreaterEqual {
+  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) >= 0; }
+};
+
+template <typename Op>
+static Cell *string_compare(Context *ctx, Cell *args) {
+  return typed_compare(ctx, args, [](const Cell *c) -> const std::string & { return c->StringValue(); }, Op{});
+}
+
+static constexpr subr_f string_eq    = string_compare<std::equal_to<>>;
+static constexpr subr_f string_le    = string_compare<std::less_equal<>>;
+static constexpr subr_f string_lt    = string_compare<std::less<>>;
+static constexpr subr_f string_ge    = string_compare<std::greater_equal<>>;
+static constexpr subr_f string_gt    = string_compare<std::greater<>>;
+static constexpr subr_f string_eq_ci = string_compare<StringCiEqual>;
+static constexpr subr_f string_le_ci = string_compare<StringCiLessEqual>;
+static constexpr subr_f string_lt_ci = string_compare<StringCiLess>;
+static constexpr subr_f string_ge_ci = string_compare<StringCiGreaterEqual>;
+static constexpr subr_f string_gt_ci = string_compare<StringCiGreater>;
+
+template <typename Op>
+static Cell *numeric_compare(Context *ctx, Cell *args) {
+  Op op;
+  bool exact = exact_list(args);
+  for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
+    if (Cell::cdr(a) != nil) {
+      if (exact) {
+        intptr_t ia = Cell::car(a)->IntValue();
+        intptr_t ib = Cell::cadr(a)->IntValue();
+        if (!op(ia, ib))
+          return &Cell::Bool_F;
+      } else {
+        double da = asReal(Cell::car(a));
+        double db = asReal(Cell::cadr(a));
+        if (!op(da, db))
+          return &Cell::Bool_F;
+      }
+    }
   }
+  return &Cell::Bool_T;
+}
 
-NBINOP(number_equal, EQ)
-NBINOP(le, LE)
-NBINOP(lt, LT)
-NBINOP(ge, GE)
-NBINOP(gt, GT)
+static constexpr subr_f number_equal = numeric_compare<std::equal_to<>>;
+static constexpr subr_f le           = numeric_compare<std::less_equal<>>;
+static constexpr subr_f lt           = numeric_compare<std::less<>>;
+static constexpr subr_f ge           = numeric_compare<std::greater_equal<>>;
+static constexpr subr_f gt           = numeric_compare<std::greater<>>;
 
-#define CHAR_CLASS(sname, cname)                                               \
-  Cell *sname(Context *ctx, Cell *args) {                                      \
-    Cell *charptr = Cell::car(args);                                           \
-    return ctx->make_boolean(cname(charptr->CharValue()) != 0);                \
-  }
+template <int (*Predicate)(int)>
+static Cell *char_class(Context *ctx, Cell *args) {
+  Cell *charptr = Cell::car(args);
+  return ctx->make_boolean(Predicate(charptr->CharValue()) != 0);
+}
 
-CHAR_CLASS(alphabetic_p, isalpha)
-CHAR_CLASS(lower_case_p, islower)
-CHAR_CLASS(upper_case_p, isupper)
-CHAR_CLASS(numeric_p, isdigit)
-CHAR_CLASS(whitespace_p, isspace)
+static constexpr subr_f alphabetic_p = char_class<isalpha>;
+static constexpr subr_f lower_case_p = char_class<islower>;
+static constexpr subr_f upper_case_p = char_class<isupper>;
+static constexpr subr_f numeric_p = char_class<isdigit>;
+static constexpr subr_f whitespace_p = char_class<isspace>;
 
 Cell *negative_p(Context *ctx, Cell *arglist) {
   return ctx->make_boolean(car(arglist)->IntValue() < 0);
@@ -603,65 +631,34 @@ Cell *zero_p(Context *ctx, Cell *arglist) {
 
 Cell *skfalse(Context *ctx, Cell *arglist) { return ctx->make_boolean(false); }
 
-#define ACCESSOR(ac)                                                           \
-  Cell *ac(Context *ctx, Cell *a) { return Cell::ac(Cell::car(a)); }
+template <Cell *(*Accessor)(const Cell *)>
+static Cell *cons_accessor(Context *ctx, Cell *a) {
+  return Accessor(Cell::car(a));
+}
 
-ACCESSOR(car)
-ACCESSOR(cdr)
-ACCESSOR(caar)
-ACCESSOR(cadr)
-ACCESSOR(cdar)
-ACCESSOR(cddr)
-ACCESSOR(caaar)
-ACCESSOR(caadr)
-ACCESSOR(cadar)
-ACCESSOR(caddr)
-ACCESSOR(cdaar)
-ACCESSOR(cdadr)
-ACCESSOR(cddar)
-ACCESSOR(cdddr)
-ACCESSOR(caaaar)
-ACCESSOR(caaadr)
-ACCESSOR(caadar)
-ACCESSOR(caaddr)
-ACCESSOR(cadaar)
-ACCESSOR(cadadr)
-ACCESSOR(caddar)
-ACCESSOR(cadddr)
-ACCESSOR(cdaaar)
-ACCESSOR(cdaadr)
-ACCESSOR(cdadar)
-ACCESSOR(cdaddr)
-ACCESSOR(cddaar)
-ACCESSOR(cddadr)
-ACCESSOR(cdddar)
-ACCESSOR(cddddr)
+template <Cell::Type T>
+static Cell *type_predicate(Context *ctx, Cell *a) {
+  return ctx->make_boolean(Cell::car(a)->type() == T);
+}
 
-#define TYPE_PREDICATE(n, t)                                                   \
-  Cell *n(Context *ctx, Cell *a) {                                             \
-    return ctx->make_boolean(Cell::car(a)->type() == Cell::Type::t);          \
-  }
+static constexpr subr_f string_p  = type_predicate<Cell::Type::String>;
+static constexpr subr_f symbol_p  = type_predicate<Cell::Type::Symbol>;
+static constexpr subr_f vector_p  = type_predicate<Cell::Type::Vec>;
+static constexpr subr_f char_p    = type_predicate<Cell::Type::Char>;
+static constexpr subr_f input_p   = type_predicate<Cell::Type::Iport>;
+static constexpr subr_f output_p  = type_predicate<Cell::Type::Oport>;
+static constexpr subr_f integer_p = type_predicate<Cell::Type::Int>;
+static constexpr subr_f exact_p   = type_predicate<Cell::Type::Int>;
+static constexpr subr_f inexact_p = type_predicate<Cell::Type::Real>;
 
-TYPE_PREDICATE(string_p, String);
-TYPE_PREDICATE(symbol_p, Symbol);
-TYPE_PREDICATE(vector_p, Vec);
-TYPE_PREDICATE(char_p, Char);
-TYPE_PREDICATE(input_p, Iport);
-TYPE_PREDICATE(output_p, Oport);
-TYPE_PREDICATE(integer_p, Int);
-TYPE_PREDICATE(exact_p, Int);
-TYPE_PREDICATE(inexact_p, Real);
+static Cell *number_p(Context *ctx, Cell *a) {
+  Cell::Type t = Cell::car(a)->type();
+  return ctx->make_boolean(t == Cell::Type::Int || t == Cell::Type::Real);
+}
 
-#define IS_NUMERIC(n)                                                          \
-  Cell *n(Context *ctx, Cell *a) {                                             \
-    Cell::Type t = car(a)->type();                                             \
-    return ctx->make_boolean(t == Cell::Type::Int || t == Cell::Type::Real);   \
-  }
-
-IS_NUMERIC(number_p);
-IS_NUMERIC(rational_p);
-IS_NUMERIC(real_p);
-IS_NUMERIC(complex_p);
+static constexpr subr_f rational_p = number_p;
+static constexpr subr_f real_p     = number_p;
+static constexpr subr_f complex_p  = number_p;
 
 Cell *pair_p(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
@@ -1155,29 +1152,29 @@ double sktrunc(double d) {
 // The subr-function name chosen is made different from the C
 // library function to avoid name collisions.
 
-#define REAL_F1(sname, cname)                                                  \
-  Cell *sname(Context *ctx, Cell *arglist) {                                   \
-    return ctx->make_real(cname(asReal(car(arglist))));                        \
-  }
+template <double (*Func)(double)>
+static Cell *real_f1(Context *ctx, Cell *arglist) {
+  return ctx->make_real(Func(asReal(car(arglist))));
+}
 
-#define REAL_F2(sname, cname)                                                  \
-  Cell *sname(Context *ctx, Cell *arglist) {                                   \
-    return ctx->make_real(cname(asReal(car(arglist)), asReal(cadr(arglist)))); \
-  }
+template <double (*Func)(double, double)>
+static Cell *real_f2(Context *ctx, Cell *arglist) {
+  return ctx->make_real(Func(asReal(car(arglist)), asReal(cadr(arglist))));
+}
 
-REAL_F1(round, _round)
-REAL_F1(sklog, log)
-REAL_F1(sksqrt, sqrt)
-REAL_F1(skexp, exp)
-REAL_F1(sksin, sin)
-REAL_F1(skcos, cos)
-REAL_F1(sktan, tan)
-REAL_F1(skasin, asin)
-REAL_F1(skacos, acos)
-REAL_F2(inexact_expt, pow)
-REAL_F1(skfloor, floor)
-REAL_F1(skceiling, ceil)
-REAL_F1(sktruncate, sktrunc)
+static constexpr subr_f skround      = real_f1<_round>;
+static constexpr subr_f sklog        = real_f1<log>;
+static constexpr subr_f sksqrt       = real_f1<sqrt>;
+static constexpr subr_f skexp        = real_f1<exp>;
+static constexpr subr_f sksin        = real_f1<sin>;
+static constexpr subr_f skcos        = real_f1<cos>;
+static constexpr subr_f sktan        = real_f1<tan>;
+static constexpr subr_f skasin       = real_f1<asin>;
+static constexpr subr_f skacos       = real_f1<acos>;
+static constexpr subr_f inexact_expt = real_f2<pow>;
+static constexpr subr_f skfloor      = real_f1<floor>;
+static constexpr subr_f skceiling    = real_f1<ceil>;
+static constexpr subr_f sktruncate   = real_f1<sktrunc>;
 
 static Cell *expt(Context *ctx, Cell *arglist) {
   // Scheme requires expt to return an exact result, if
@@ -1436,36 +1433,36 @@ void Context::provision() {
       {"assv", assv},
       {"atan", skatan},
       {"boolean?", boolean_p},
-      {"caaaar", caaaar},
-      {"caaadr", caaadr},
-      {"caaar", caaar},
-      {"caadar", caadar},
-      {"caaddr", caaddr},
-      {"caadr", caadr},
-      {"caar", caar},
-      {"cadaar", cadaar},
-      {"cadadr", cadadr},
-      {"cadar", cadar},
-      {"caddar", caddar},
-      {"cadddr", cadddr},
-      {"caddr", caddr},
-      {"cadr", cadr},
-      {"car", car},
-      {"cdaaar", cdaaar},
-      {"cdaadr", cdaadr},
-      {"cdaar", cdaar},
-      {"cdadar", cdadar},
-      {"cdaddr", cdaddr},
-      {"cdadr", cdadr},
-      {"cdar", cdar},
-      {"cddaar", cddaar},
-      {"cddadr", cddadr},
-      {"cddar", cddar},
-      {"cdddar", cdddar},
-      {"cddddr", cddddr},
-      {"cdddr", cdddr},
-      {"cddr", cddr},
-      {"cdr", cdr},
+      {"caaaar", cons_accessor<Cell::caaaar>},
+      {"caaadr", cons_accessor<Cell::caaadr>},
+      {"caaar", cons_accessor<Cell::caaar>},
+      {"caadar", cons_accessor<Cell::caadar>},
+      {"caaddr", cons_accessor<Cell::caaddr>},
+      {"caadr", cons_accessor<Cell::caadr>},
+      {"caar", cons_accessor<Cell::caar>},
+      {"cadaar", cons_accessor<Cell::cadaar>},
+      {"cadadr", cons_accessor<Cell::cadadr>},
+      {"cadar", cons_accessor<Cell::cadar>},
+      {"caddar", cons_accessor<Cell::caddar>},
+      {"cadddr", cons_accessor<Cell::cadddr>},
+      {"caddr", cons_accessor<Cell::caddr>},
+      {"cadr", cons_accessor<Cell::cadr>},
+      {"car", cons_accessor<Cell::car>},
+      {"cdaaar", cons_accessor<Cell::cdaaar>},
+      {"cdaadr", cons_accessor<Cell::cdaadr>},
+      {"cdaar", cons_accessor<Cell::cdaar>},
+      {"cdadar", cons_accessor<Cell::cdadar>},
+      {"cdaddr", cons_accessor<Cell::cdaddr>},
+      {"cdadr", cons_accessor<Cell::cdadr>},
+      {"cdar", cons_accessor<Cell::cdar>},
+      {"cddaar", cons_accessor<Cell::cddaar>},
+      {"cddadr", cons_accessor<Cell::cddadr>},
+      {"cddar", cons_accessor<Cell::cddar>},
+      {"cdddar", cons_accessor<Cell::cdddar>},
+      {"cddddr", cons_accessor<Cell::cddddr>},
+      {"cdddr", cons_accessor<Cell::cdddr>},
+      {"cddr", cons_accessor<Cell::cddr>},
+      {"cdr", cons_accessor<Cell::cdr>},
       {"ceiling", skceiling},
       {"char->integer", char_to_integer},
       {"char-alphabetic?", alphabetic_p},
@@ -1553,7 +1550,7 @@ void Context::provision() {
       {"real?", real_p},
       {"remainder", remainder},
       {"reverse", reverse},
-      {"round", round},
+      {"round", skround},
       {"set-car!", set_car},
       {"set-cdr!", set_cdr},
       {"sin", sksin},
@@ -1630,11 +1627,9 @@ void Context::provision() {
   // boolean values instead of #t and #f as suggested by RxRS.
   // We add these symbol-bindings here.
 
-#define BIND_VARIABLE(var, val) set_var(envt, intern(var), val)
-
-  BIND_VARIABLE("true", make_boolean(true));
-  BIND_VARIABLE("false", make_boolean(false));
-  BIND_VARIABLE("*version*", make_string(VERSION_STRING));
+  set_var(envt, intern("true"), make_boolean(true));
+  set_var(envt, intern("false"), make_boolean(false));
+  set_var(envt, intern("*version*"), make_string(VERSION_STRING));
 
   // Load extension bindings.
 

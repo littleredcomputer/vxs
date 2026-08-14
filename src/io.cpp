@@ -34,27 +34,29 @@ TOP:
   goto TOP;
 }
 
-#define READ_RETURN(value)                                                     \
-  do {                                                                         \
-    retval = value;                                                            \
-    goto FINISH;                                                               \
-  } while (0)
-
 // --------------------------------------------------------------------------
 // read: convert source text to internal form
 //
 
 Cell *Context::read(sio &in) {
-  char c;
-  Cell *retval = unimplemented;
+  struct ReadGuard {
+    Context &ctx;
+    ReadGuard(Context &c) : ctx(c) {
+      ctx.save(ctx.r_nu);
+      ctx.save(ctx.r_tmp);
+    }
+    ~ReadGuard() {
+      ctx.restore(ctx.r_tmp);
+      ctx.restore(ctx.r_nu);
+    }
+  } guard(*this);
 
-  save(r_nu);
-  save(r_tmp);
+  char c;
 
 TOP:
   c = in.get();
   if (c == EOF)
-    READ_RETURN(0);
+    return 0;
   if (isspace(c))
     goto TOP;
   if (c == ';') {
@@ -63,7 +65,7 @@ TOP:
     while (c != '\n') {
       c = in.get();
       if (c == EOF)
-        READ_RETURN(0);
+        return 0;
     }
     goto TOP;
   }
@@ -85,7 +87,7 @@ TOP:
     r_nu = read(in);
     restore(r_argl);
     if (r_nu == NULL)
-      READ_RETURN(Cell::car(&r_argl));
+      return Cell::car(&r_argl);
     if (dotmode == 1) {
       l_appendtail(r_argl, r_nu);
       dotmode = 2; // expecting: )
@@ -99,13 +101,13 @@ TOP:
 
     goto LISTLOOP;
   } else if (c == ')') {
-    READ_RETURN(0);
+    return 0;
   } else if (c == '\'') {
     r_nu = read(in);
     if (r_nu) {
       r_nu = make(r_nu);
       r_tmp = make_symbol(s_quote);
-      READ_RETURN(cons(r_tmp, r_nu));
+      return cons(r_tmp, r_nu);
     }
 
     error("unexpected eof");
@@ -113,7 +115,7 @@ TOP:
     if ((r_nu = read(in)) != NULL) {
       r_tmp = make_symbol(s_quasiquote);
       r_nu = make(r_nu);
-      READ_RETURN(cons(r_tmp, r_nu));
+      return cons(r_tmp, r_nu);
     }
 
     error("unexpected eof");
@@ -128,7 +130,7 @@ TOP:
     if ((r_nu = read(in)) != NULL) {
       r_nu = make(r_nu);
       r_tmp = make_symbol(wrap);
-      READ_RETURN(cons(r_tmp, r_nu));
+      return cons(r_tmp, r_nu);
     }
 
     error("unexpected eof");
@@ -151,7 +153,7 @@ TOP:
         int ix = 0;
         for (Cell *elt = Cell::car(&r_argl); elt != nil; elt = Cell::cdr(elt))
           vec->set(ix++, Cell::car(elt));
-        READ_RETURN(r_nu);
+        return r_nu;
       }
       l_append(r_argl, r_nu);
       ++vl;
@@ -162,20 +164,20 @@ TOP:
     token(in, lexeme);
 
     if (lexeme == "t")
-      READ_RETURN(make_boolean(true));
+      return make_boolean(true);
     else if (lexeme == "f")
-      READ_RETURN(make_boolean(false));
+      return make_boolean(false);
     else if (lexeme[0] == '\\') {
       // This is #\a syntax for characters.  But
       // we must also be careful to recognize
       // #\space and #\newline.
 
       if (lexeme == "\\newline")
-        READ_RETURN(make_char('\n'));
+        return make_char('\n');
       if (lexeme == "\\space" || lexeme == "\\Space")
-        READ_RETURN(make_char(' '));
+        return make_char(' ');
       if (lexeme.length() == 2)
-        READ_RETURN(make_char(lexeme[1]));
+        return make_char(lexeme[1]);
 
       error("indecipherable #\\ constant: ", lexeme.str());
     } else if (lexeme[0] == 'x' || lexeme[0] == 'X') {
@@ -185,7 +187,7 @@ TOP:
       uintptr_t ul = strtoul(lexeme.str() + 1, &endptr, 16);
 
       if (*endptr == '\0')
-        READ_RETURN(make_int(ul));
+        return make_int(ul);
 
       error("indecipherable #x constant");
     } else if (lexeme[0] == 'o' || lexeme[0] == 'O') {
@@ -195,7 +197,7 @@ TOP:
       unsigned long ul = strtoul(lexeme.str() + 1, &endptr, 8);
 
       if (*endptr == '\0')
-        READ_RETURN(make_int(ul));
+        return make_int(ul);
       error("indecipherable #o constant");
     }
 
@@ -240,7 +242,7 @@ TOP:
       }
     }
 
-    READ_RETURN(make_string(ss.str()));
+    return make_string(ss.str());
   } else {
     // At this point it is either a number or an identifier.
     // Scheme's syntax for identifiers is _very_ loose
@@ -267,7 +269,7 @@ TOP:
     //  (4)     X      4      X      5     Have .; read digits or 'e'
     //   5      6      6      X      X     Have e, read a digit or sign
     //  (6)     X      6      X      X     Have e, read digits
-
+    //
     static const unsigned char tmatrix[][4] = {
         {1, 3, 2, 0}, {0, 3, 2, 0}, {0, 4, 0, 0}, {0, 3, 4, 5},
         {0, 4, 0, 5}, {6, 6, 0, 0}, {0, 6, 0, 0},
@@ -300,28 +302,24 @@ TOP:
     // if so, we have a number.
     if (accept[state]) {
       if (inexact) {
-        READ_RETURN(make_real(strtod(lexeme.str(), 0)));
+        return make_real(strtod(lexeme.str(), 0));
       } else {
         errno = 0;
         // TODO : fixme
         long l = strtol(lexeme.str(), 0, 0);
         if (errno == ERANGE)
-          READ_RETURN(make_real(strtod(lexeme.str(), 0)));
-        READ_RETURN(make_int(l));
+          return make_real(strtod(lexeme.str(), 0));
+        return make_int(l);
       }
     }
 
     // If the machine lands in a non-accepting state,
     // then we have an identifier.
 
-    READ_RETURN(make_symbol(intern(lexeme.str())));
+    return make_symbol(intern(lexeme.str()));
   }
 
-FINISH:
-
-  restore(r_tmp);
-  restore(r_nu);
-  return retval;
+  return nullptr;
 }
 
 Cell *Context::read(FILE *fp) {
