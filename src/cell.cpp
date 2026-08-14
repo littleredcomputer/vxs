@@ -13,7 +13,8 @@ static const char *nomem_error = "out of memory";
 
 Cell *Context::make() {
   Cell *c = alloc(Cell::Cons);
-  c->ca.p = c->cd.p = &Cell::Nil;
+  c->set_unsafe_car(&Cell::Nil);
+  c->set_unsafe_cdr(&Cell::Nil);
   return c;
 }
 
@@ -28,14 +29,14 @@ Cell *Context::make_int(intptr_t i) {
   }
 #endif
   Cell *c = alloc(Cell::Int);
-  c->cd.i = i;
+  c->init_int(i);
 
   return c;
 }
 
 Cell *Context::make_char(char ch) {
   Cell *c = alloc(Cell::Char);
-  c->cd.c = ch;
+  c->init_char(ch);
   return c;
 }
 
@@ -43,7 +44,7 @@ Cell *Context::make_real(double d) {
   Cell *c = alloc(Cell::Real);
   double *pd = (double *)malloc(sizeof(double));
   *pd = d;
-  c->cd.d = pd;
+  c->init_real(pd);
   return c;
 }
 
@@ -55,14 +56,14 @@ Cell *Context::make_string(size_t len) {
   size_t boxsize = sizeof(Cell::StringBox) + len + 1;
   Cell::StringBox *pbox = (Cell::StringBox *)xmalloc(boxsize);
   pbox->length = len;
-  c->cd.s = pbox;
+  c->init_string(pbox);
   return c;
 }
 
 Cell *Context::make_string(int len, char ch) {
   Cell *c = make_string(len);
-  memset(c->cd.s->s, ch, len);
-  c->cd.s->s[len] = '\0';
+  memset(c->StringValue(), ch, len);
+  c->StringValue()[len] = '\0';
   return c;
 }
 
@@ -70,8 +71,8 @@ Cell *Context::make_string(const char *s) { return make_string(s, strlen(s)); }
 
 Cell *Context::make_string(const char *s, size_t len) {
   Cell *c = make_string(len);
-  strncpy(c->cd.s->s, s, len);
-  c->cd.s->s[len] = '\0';
+  strncpy(c->StringValue(), s, len);
+  c->StringValue()[len] = '\0';
   return c;
 }
 
@@ -80,19 +81,19 @@ Cell *Context::make_subr(subr_f s, const char *name) {
   Cell::SubrBox *psubr = new Cell::SubrBox();
   psubr->subr = s;
   psubr->name = name;
-  c->cd.f = psubr;
+  c->init_subr(psubr);
   return c;
 }
 
 Cell *Context::make_builtin(psymbol y) {
   Cell *c = alloc(Cell::Builtin);
-  c->cd.y = y;
+  c->init_symbol(y);
   return c;
 }
 
 Cell *Context::make_symbol(psymbol y) {
   Cell *c = alloc(Cell::Symbol);
-  c->cd.y = y;
+  c->init_symbol(y);
 
   return c;
 }
@@ -103,11 +104,11 @@ Cell *Context::make_boolean(bool b) {
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   Cell *c = alloc(Cell::Vec);
-  c->cd.cv = cellvector::alloc(n);
+  c->init_vector(cellvector::alloc(n));
   c->flag(Cell::VREF, true);
 
   for (int ix = 0; ix < n; ++ix)
-    c->cd.cv->set(ix, init);
+    c->unsafe_vector_value()->set(ix, init);
 
   return c;
 }
@@ -123,7 +124,7 @@ Cell *Context::make_iport(const char *fname) {
 
 Cell *Context::make_iport(FILE *ip) {
   Cell *c = alloc(Cell::Iport);
-  c->cd.ip = ip;
+  c->init_iport(ip);
 
   return c;
 }
@@ -139,15 +140,15 @@ Cell *Context::make_oport(const char *fname) {
 
 Cell *Context::make_oport(FILE *op) {
   Cell *c = alloc(Cell::Oport);
-  c->cd.op = op;
+  c->init_oport(op);
 
   return c;
 }
 
 Cell *Context::make(Cell *ca, Cell *cd /* = &Nil*/) {
   Cell *c = alloc(Cell::Cons);
-  c->ca.p = ca;
-  c->cd.p = cd;
+  c->set_unsafe_car(ca);
+  c->set_unsafe_cdr(cd);
   return c;
 }
 
@@ -196,14 +197,14 @@ void Cell::sanity_check() {
     exit(bad);
 };
 
-bool Cell::eq(Cell *that) {
+bool Cell::eq(const Cell *that) const {
   if (this == that) // the easy case
     return true;
   if (short_atom(this) || short_atom(that))
     return false; // then the above case would have detected equality
-  if (long_atom(ca.p) && long_atom(that->ca.p)) {
-    bool part1 =
-        (ca.i & IGN_MASK) == (that->ca.i & IGN_MASK) && cd.i == that->cd.i;
+  if (long_atom(ca.p) && long_atom(that->unsafe_car())) {
+    bool part1 = (ca.i & IGN_MASK) == (that->get_car_word() & IGN_MASK) &&
+                 cd.i == that->get_cdr_word();
 
     return part1;
   }
@@ -212,14 +213,14 @@ bool Cell::eq(Cell *that) {
   return false;
 }
 
-bool Cell::equal(Cell *c) {
+bool Cell::equal(const Cell *c) const {
   Type t0 = type();
   Type t1 = c->type();
 
   if (this == &Nil && c == &Nil)
     return true;
   else if (t0 == Cons && t1 == Cons)
-    return ca.p->equal(c->ca.p) && cd.p->equal(c->cd.p);
+    return ca.p->equal(c->unsafe_car()) && cd.p->equal(c->unsafe_cdr());
   else if (t0 == Vec && t1 == Vec) {
     cellvector *cv = VectorValue();
     cellvector *ocv = c->VectorValue();
@@ -248,34 +249,34 @@ bool Cell::equal(Cell *c) {
 // step, using "assert_cons", which throws a C++ exception if this is
 // not found to be true.
 
-Cell *Cell::caar(Cell *c) { return Cell::car(Cell::car(c)); }
-Cell *Cell::cadr(Cell *c) { return Cell::car(Cell::cdr(c)); }
-Cell *Cell::cdar(Cell *c) { return Cell::cdr(Cell::car(c)); }
-Cell *Cell::cddr(Cell *c) { return Cell::cdr(Cell::cdr(c)); }
-Cell *Cell::caaar(Cell *c) { return Cell::car(Cell::caar(c)); }
-Cell *Cell::caadr(Cell *c) { return Cell::car(Cell::cadr(c)); }
-Cell *Cell::cadar(Cell *c) { return Cell::car(Cell::cdar(c)); }
-Cell *Cell::caddr(Cell *c) { return Cell::car(Cell::cddr(c)); }
-Cell *Cell::cdaar(Cell *c) { return Cell::cdr(Cell::caar(c)); }
-Cell *Cell::cdadr(Cell *c) { return Cell::cdr(Cell::cadr(c)); }
-Cell *Cell::cddar(Cell *c) { return Cell::cdr(Cell::cdar(c)); }
-Cell *Cell::cdddr(Cell *c) { return Cell::cdr(Cell::cddr(c)); }
-Cell *Cell::caaaar(Cell *c) { return Cell::car(Cell::caaar(c)); }
-Cell *Cell::caaadr(Cell *c) { return Cell::car(Cell::caadr(c)); }
-Cell *Cell::caadar(Cell *c) { return Cell::car(Cell::cadar(c)); }
-Cell *Cell::caaddr(Cell *c) { return Cell::car(Cell::caddr(c)); }
-Cell *Cell::cadaar(Cell *c) { return Cell::car(Cell::cdaar(c)); }
-Cell *Cell::cadadr(Cell *c) { return Cell::car(Cell::cdadr(c)); }
-Cell *Cell::caddar(Cell *c) { return Cell::car(Cell::cddar(c)); }
-Cell *Cell::cadddr(Cell *c) { return Cell::car(Cell::cdddr(c)); }
-Cell *Cell::cdaaar(Cell *c) { return Cell::cdr(Cell::caaar(c)); }
-Cell *Cell::cdaadr(Cell *c) { return Cell::cdr(Cell::caadr(c)); }
-Cell *Cell::cdadar(Cell *c) { return Cell::cdr(Cell::cadar(c)); }
-Cell *Cell::cdaddr(Cell *c) { return Cell::cdr(Cell::caddr(c)); }
-Cell *Cell::cddaar(Cell *c) { return Cell::cdr(Cell::cdaar(c)); }
-Cell *Cell::cddadr(Cell *c) { return Cell::cdr(Cell::cdadr(c)); }
-Cell *Cell::cdddar(Cell *c) { return Cell::cdr(Cell::cddar(c)); }
-Cell *Cell::cddddr(Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
+Cell *Cell::caar(const Cell *c) { return Cell::car(Cell::car(c)); }
+Cell *Cell::cadr(const Cell *c) { return Cell::car(Cell::cdr(c)); }
+Cell *Cell::cdar(const Cell *c) { return Cell::cdr(Cell::car(c)); }
+Cell *Cell::cddr(const Cell *c) { return Cell::cdr(Cell::cdr(c)); }
+Cell *Cell::caaar(const Cell *c) { return Cell::car(Cell::caar(c)); }
+Cell *Cell::caadr(const Cell *c) { return Cell::car(Cell::cadr(c)); }
+Cell *Cell::cadar(const Cell *c) { return Cell::car(Cell::cdar(c)); }
+Cell *Cell::caddr(const Cell *c) { return Cell::car(Cell::cddr(c)); }
+Cell *Cell::cdaar(const Cell *c) { return Cell::cdr(Cell::caar(c)); }
+Cell *Cell::cdadr(const Cell *c) { return Cell::cdr(Cell::cadr(c)); }
+Cell *Cell::cddar(const Cell *c) { return Cell::cdr(Cell::cdar(c)); }
+Cell *Cell::cdddr(const Cell *c) { return Cell::cdr(Cell::cddr(c)); }
+Cell *Cell::caaaar(const Cell *c) { return Cell::car(Cell::caaar(c)); }
+Cell *Cell::caaadr(const Cell *c) { return Cell::car(Cell::caadr(c)); }
+Cell *Cell::caadar(const Cell *c) { return Cell::car(Cell::cadar(c)); }
+Cell *Cell::caaddr(const Cell *c) { return Cell::car(Cell::caddr(c)); }
+Cell *Cell::cadaar(const Cell *c) { return Cell::car(Cell::cdaar(c)); }
+Cell *Cell::cadadr(const Cell *c) { return Cell::car(Cell::cdadr(c)); }
+Cell *Cell::caddar(const Cell *c) { return Cell::car(Cell::cddar(c)); }
+Cell *Cell::cadddr(const Cell *c) { return Cell::car(Cell::cdddr(c)); }
+Cell *Cell::cdaaar(const Cell *c) { return Cell::cdr(Cell::caaar(c)); }
+Cell *Cell::cdaadr(const Cell *c) { return Cell::cdr(Cell::caadr(c)); }
+Cell *Cell::cdadar(const Cell *c) { return Cell::cdr(Cell::cadar(c)); }
+Cell *Cell::cdaddr(const Cell *c) { return Cell::cdr(Cell::caddr(c)); }
+Cell *Cell::cddaar(const Cell *c) { return Cell::cdr(Cell::cdaar(c)); }
+Cell *Cell::cddadr(const Cell *c) { return Cell::cdr(Cell::cdadr(c)); }
+Cell *Cell::cdddar(const Cell *c) { return Cell::cdr(Cell::cddar(c)); }
+Cell *Cell::cddddr(const Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
 
 psymbol Cell::SymbolValue() const {
   typecheck(Symbol);
@@ -377,7 +378,8 @@ const char *Cell::name() const { return typeName[type()]; }
 
 void Cell::typefail(Type t1, Type t2) const {
   char buf[256];
-  snprintf(buf, sizeof(buf), "type check failure: wanted %s, got %s", typeName[t2], typeName[t1]);
+  snprintf(buf, sizeof(buf), "type check failure: wanted %s, got %s",
+           typeName[t2], typeName[t1]);
   error(buf);
 }
 
@@ -511,7 +513,7 @@ void cellvector::unshift(Cell *val) {
   v[0] = val;
 }
 
-void cellvector::vref_error() { error("vector reference out of bounds"); }
+void cellvector::vref_error() const { error("vector reference out of bounds"); }
 
 void cellvector::clear() { sz = 0; }
 
@@ -638,13 +640,14 @@ Cell *Context::alloc(Cell::Type t) {
   Cell *a;
 
   mem.last_alloc_gc = false;
-// Select a cell from the free list if one is available.
+  // Select a cell from the free list if one is available.
 
 TOP:
   if ((a = mem.free)) {
     ++cellsAlloc;
-    mem.free = a->cd.p;
-    a->ca.i = a->cd.i = 0;
+    mem.free = a->unsafe_cdr();
+    a->set_car_word(0);
+    a->set_cdr_word(0);
     a->set_type(t);
     --mem.c_free;
     return a;
@@ -672,7 +675,7 @@ TOP:
 
   if ((a = mem.current()->alloc())) {
     ++cellsAlloc;
-    a->cd.i = 0;
+    a->set_cdr_word(0);
     a->set_type(t);
     return a;
   }
@@ -730,7 +733,7 @@ inline void Cell::gc_set_cdr(Cell *src) {
 
 void Context::mark(Cell *P) {
   bool traceall = debug_flag(TRACE_GC_ALL);
-  if (P == nil || P == 0 || Cell::short_atom(P) || P->ca.i & Cell::MARK)
+  if (P == nil || P == 0 || Cell::short_atom(P) || P->get_car_word() & Cell::MARK)
     return;
 
   // In Knuth's presentation, a NODE contains two pointers
@@ -757,7 +760,7 @@ void Context::mark(Cell *P) {
   Cell *Q = nil;
 
 E2:
-  P->ca.i |= Cell::MARK;
+  P->set_car_word(P->get_car_word() | Cell::MARK);
   if (traceall) {
     printf("m ");
     P->dump(stdout);
@@ -791,9 +794,9 @@ E2:
       // starting the mark counter.  The rest of the iteration will
       // be handled in the "up" step below.
 
-      if (P->cd.cv->size() > 0) {
-        P->cd.cv->gc_uplink = T;
-        P->cd.cv->gc_index = 0;
+      if (P->unsafe_vector_value()->size() > 0) {
+        P->unsafe_vector_value()->gc_uplink = T;
+        P->unsafe_vector_value()->gc_index = 0;
         T = P;
       }
     } else if (P->type() == Cell::Symbol) {
@@ -813,13 +816,13 @@ E2:
     goto E6; // E3
   }
 
-  if (!Cell::short_atom(P->ca.p)) {
-    Q = Cell::untagged(P->ca.p); // E4
-    if (Q != nil && !(Q->ca.i & Cell::MARK)) {
-      // if (!Cell::short_atom(P->cd.p))
+  if (!Cell::short_atom(P->unsafe_car())) {
+    Q = Cell::untagged(P->unsafe_car()); // E4
+    if (Q != nil && !(Q->get_car_word() & Cell::MARK)) {
+      // if (!Cell::short_atom(P->unsafe_cdr()))
       // {
-      // P->cd.i |= Cell::ATOM;
-      P->cd.i |= Cell::MARK;
+      // P->set_cdr_word(P->get_cdr_word() | Cell::ATOM);
+      P->set_cdr_word(P->get_cdr_word() | Cell::MARK);
       // END
       P->gc_set_car(T);
       T = P;
@@ -830,9 +833,9 @@ E2:
   }
 
 E5:
-  if (!Cell::short_atom(P->cd.p)) {
-    Q = Cell::untagged(P->cd.p);
-    if (Q != nil && !(Q->ca.i & Cell::MARK)) {
+  if (!Cell::short_atom(P->unsafe_cdr())) {
+    Q = Cell::untagged(P->unsafe_cdr());
+    if (Q != nil && !(Q->get_car_word() & Cell::MARK)) {
       P->gc_set_cdr(T);
       T = P;
       P = Q;
@@ -848,23 +851,23 @@ E6:
   Q = T;
 
   if (Q->flag(Cell::VREF)) {
-  // We are popping a vector cell from the GC stack.
-  // If there are more cells to mark within it, keep
-  // going.
+    // We are popping a vector cell from the GC stack.
+    // If there are more cells to mark within it, keep
+    // going.
 
   next_element:
 
-    int i = Q->cd.cv->gc_index++;
+    int i = Q->unsafe_vector_value()->gc_index++;
 
-    if (i >= Q->cd.cv->size()) // all done?
+    if (i >= Q->unsafe_vector_value()->size()) // all done?
     {
-      T = Q->cd.cv->gc_uplink;
-      Q->cd.cv->gc_index = 0; // reset for next time
+      T = Q->unsafe_vector_value()->gc_uplink;
+      Q->unsafe_vector_value()->gc_index = 0; // reset for next time
       P = Q;
       goto E6;
     } else // resume iteration
     {
-      P = Q->cd.cv->get(i); // with next element
+      P = Q->unsafe_vector_value()->get(i); // with next element
 
       // One wrinkle: captured continuations are implemented
       // as vectors, and like the machine stack, these vectors
@@ -875,7 +878,7 @@ E6:
         goto next_element;
 
       // Otherwise we mark, if not marked already.
-      if (P->ca.i & Cell::MARK)
+      if (P->get_car_word() & Cell::MARK)
         goto next_element;
 
       P = Cell::untagged(P);
@@ -899,7 +902,7 @@ E6:
       goto E6;
     } else {
       P = ps->plist->get(i);
-      if (P->ca.i & Cell::MARK)
+      if (P->get_car_word() & Cell::MARK)
         goto next_property;
       P = Cell::untagged(P);
       if (P == nil)
@@ -908,16 +911,16 @@ E6:
     }
   }
 
-  //    if (Q->cd.i & Cell::ATOM)
-  if (Q->cd.i & Cell::MARK) {
-    //    Q->cd.i &= ~Cell::ATOM;
-    Q->cd.i &= ~Cell::MARK;
-    T = Cell::untagged(Q->ca.p);
+  //    if (Q->get_cdr_word() & Cell::ATOM)
+  if (Q->get_cdr_word() & Cell::MARK) {
+    //    Q->set_cdr_word(Q->get_cdr_word() & ~Cell::ATOM);
+    Q->set_cdr_word(Q->get_cdr_word() & ~Cell::MARK);
+    T = Cell::untagged(Q->unsafe_car());
     Q->gc_set_car(P);
     P = Q;
     goto E5;
   } else {
-    T = Cell::untagged(Q->cd.p);
+    T = Cell::untagged(Q->unsafe_cdr());
     Q->gc_set_cdr(P);
     P = Q;
     goto E6;
@@ -928,10 +931,10 @@ void Slab::sweep(Context *ctx) {
   bool traceall = debug_flag(TRACE_GC_ALL);
 
   for (Cell *p = start; p < next; ++p) {
-    unsigned int word = p->ca.i;
+    unsigned int word = p->get_car_word();
 
-    if (word & Cell::MARK) {
-      p->ca.i &= ~Cell::MARK;
+    if (p->get_car_word() & Cell::MARK) {
+      p->set_car_word(p->get_car_word() & ~Cell::MARK);
     } else if (word != (Cell::FREE | Cell::ATOM)) {
       // FINALIZATION
       //
@@ -941,51 +944,11 @@ void Slab::sweep(Context *ctx) {
         p->dump(stdout);
         putchar('\n');
       }
-      Cell::Type t = p->type();
-
-      switch (t) {
-      case Cell::Cont:
-      case Cell::Promise:
-      case Cell::Cproc:
-      case Cell::Cpromise:
-      case Cell::Lambda:
-      case Cell::Vec: // Free the vector of cell pointers.
-        p->cd.cv->free();
-        // XXX delete p->cd.cv;
-        p->cd.cv = 0;
-        break;
-
-      case Cell::Iport: // Ports hold streams
-        fclose(p->cd.ip);
-        break;
-
-      case Cell::Oport: // Ports hold streams
-        fclose(p->cd.op);
-        break;
-
-      case Cell::Real: // Reals hold a malloc'd double
-        free(p->cd.d);
-        break;
-
-      case Cell::Subr: // Subrs hold a SubrBox
-        free(p->cd.f);
-        break;
-
-      case Cell::Magic: // Magic cells hold a MagicBox
-        free(p->cd.m);
-        break;
-
-      case Cell::String: // Strings hold StringBoxes
-        free(p->cd.s);
-        break;
-
-      default: // Ordinarily cells hold no other storage.
-               ;
-      }
+      p->free_contents();
 
       --ctx->cellsAlloc;
-      p->ca.i = Cell::FREE | Cell::ATOM;
-      p->cd.p = ctx->mem.free;
+      p->set_car_word(Cell::FREE | Cell::ATOM);
+      p->set_unsafe_cdr(ctx->mem.free);
       ctx->mem.free = p;
       ++ctx->mem.c_free;
     }
@@ -997,9 +960,10 @@ void Context::gc() {
   Cell *p;
 
   if (!ok_to_gc) {
-    fprintf(stderr, "initial memory budget insufficient to set up VM\n"
-                    "Try setting the environment variable SLABSIZE to\n"
-                    "something greater than %d\n",
+    fprintf(stderr,
+            "initial memory budget insufficient to set up VM\n"
+            "Try setting the environment variable SLABSIZE to\n"
+            "something greater than %d\n",
             Slab::slabsize);
     exit(1);
   }
@@ -1084,6 +1048,41 @@ void Context::gc_if_needed() {
 
 void Context::print_mem_stats(FILE *out) {
   fprintf(out, "; mem %d/%d\n", cellsAlloc, cellsTotal);
+}
+
+void Cell::free_contents() {
+  switch (type()) {
+  case Cell::Promise:
+  case Cell::Cproc:
+  case Cell::Cpromise:
+  case Cell::Lambda:
+  case Cell::Vec:
+    unsafe_vector_value()->free();
+    init_vector(0);
+    break;
+  case Cell::Iport:
+    if (cd.ip)
+      fclose(cd.ip);
+    break;
+  case Cell::Oport:
+    if (cd.op)
+      fclose(cd.op);
+    break;
+  case Cell::Real:
+    free(cd.d);
+    break;
+  case Cell::Subr:
+    free(cd.f);
+    break;
+  case Cell::Magic:
+    free(cd.m);
+    break;
+  case Cell::String:
+    free(cd.s);
+    break;
+  default:
+    break;
+  }
 }
 
 void *Context::xmalloc(size_t sz) {

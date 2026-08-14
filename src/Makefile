@@ -67,11 +67,6 @@ clean:
 		find .. -name '.#*' -print | xargs rm -f 
 		rm -rf $(TC)/*.out $(TC)/tmp[123]
 		rm -rf *.core *.stackdump $(TC)/*.core $(TC)/*.stackdump
-		rm -rf ../tornado/target-shell/default/*
-		rm -f  ../tornado/target-shell/Makefile
-		rm -rf ../tornado/vx-scheme/SIMNTgnu/*
-		rm -rf ../tornado/vx-scheme/SIMNTgnu/.*.swp
-		rm -f  ../tornado/vx-scheme/Makefile
 		rm -f ../lib/slib_* ../lib/slibcat
 		rm -f core core.*
 

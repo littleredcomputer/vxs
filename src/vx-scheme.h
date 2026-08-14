@@ -7,11 +7,11 @@
 //
 // vx-scheme.h : class definitions
 
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <ctype.h>
 #include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
@@ -26,7 +26,6 @@
 #else
 #error "must have a way of aligning Cells to 8-byte boundary"
 #endif
-
 
 class OS;
 class Cell;
@@ -54,7 +53,7 @@ void error(const char *, const char * = 0);
 // to each node in the list.
 
 #define FOR_EACH(var, list)                                                    \
-  for (Cell *var = list; var != nil; var = Cell::cdr(var))
+  for (const Cell *var = list; var != nil; var = Cell::cdr(var))
 
 #define INTERN_SYM(sym, symname) psymbol sym = intern(symname);
 
@@ -70,7 +69,7 @@ public:
   cellvector(int size, int alloc);
   ~cellvector();
 
-  Cell *get(int ix) {
+  Cell *get(int ix) const {
     if (ix < 0 || ix >= sz)
       vref_error();
     return v[ix];
@@ -100,7 +99,7 @@ public:
   Cell *shift();
   void unshift(Cell *);
 
-  int size() { return sz; }
+  int size() const { return sz; }
   void discard(int n = 1) {
     if (n < 0 || n > sz)
       vref_error();
@@ -112,7 +111,7 @@ public:
 private:
   void make_cv(int size, int alloc);
   void expand();
-  void vref_error();
+  void vref_error() const;
   int sz;
   int allocated;
   friend class Context; // Context::gc needs to see our gc_* members
@@ -187,7 +186,7 @@ public:
 
 class file_sio : public sio {
 public:
-  file_sio(FILE *_fp) : fp(_fp), lastch(-1){};
+  file_sio(FILE *_fp) : fp(_fp), lastch(-1) {};
 
   virtual int get() { return lastch = fgetc(fp); }
   virtual int peek() {
@@ -271,19 +270,29 @@ private:
 // information.
 
 class Cell {
-  friend class Context;
-  friend class Slab;
-  friend class InterpreterExt;
+public:
+  Cell *unsafe_car() const { return ca.p; }
+  void set_unsafe_car(Cell *c) { ca.p = (Cell *)c; }
+  Cell *unsafe_cdr() const { return cd.p; }
+  void set_unsafe_cdr(Cell *c) { cd.p = (Cell *)c; }
+
+  uintptr_t get_car_word() const { return ca.i; }
+  void set_car_word(uintptr_t w) { ca.i = w; }
+  uintptr_t get_cdr_word() const { return cd.i; }
+  void set_cdr_word(uintptr_t w) { cd.i = w; }
+
+  void gc_set_car(Cell *);
+  void gc_set_cdr(Cell *);
 
 public:
   void display(FILE *);
   void write(FILE *) const;
   void write(sstring &) const;
 
-  bool eq(Cell *c);
-  bool eqv(Cell *c) { return eq(c); }
+  bool eq(const Cell *c) const;
+  bool eqv(const Cell *c) const { return eq(c); }
 
-  bool equal(Cell *c);
+  bool equal(const Cell *c) const;
   bool is_symbol(psymbol s) {
     return type() == Cell::Symbol && SymbolValue() == s;
   }
@@ -325,34 +334,34 @@ public:
   }
   static Cell *car(const Cell *c) { return atomic(c) ? notcons() : c->ca.p; }
   static Cell *cdr(const Cell *c) { return atomic(c) ? notcons() : c->cd.p; }
-  static Cell *caar(Cell *c);
-  static Cell *cadr(Cell *c);
-  static Cell *cdar(Cell *c);
-  static Cell *cddr(Cell *c);
-  static Cell *caaar(Cell *c);
-  static Cell *caadr(Cell *c);
-  static Cell *cadar(Cell *c);
-  static Cell *caddr(Cell *c);
-  static Cell *cdaar(Cell *c);
-  static Cell *cdadr(Cell *c);
-  static Cell *cddar(Cell *c);
-  static Cell *cdddr(Cell *c);
-  static Cell *caaaar(Cell *c);
-  static Cell *caaadr(Cell *c);
-  static Cell *caadar(Cell *c);
-  static Cell *caaddr(Cell *c);
-  static Cell *cadaar(Cell *c);
-  static Cell *cadadr(Cell *c);
-  static Cell *caddar(Cell *c);
-  static Cell *cadddr(Cell *c);
-  static Cell *cdaaar(Cell *c);
-  static Cell *cdaadr(Cell *c);
-  static Cell *cdadar(Cell *c);
-  static Cell *cdaddr(Cell *c);
-  static Cell *cddaar(Cell *c);
-  static Cell *cddadr(Cell *c);
-  static Cell *cdddar(Cell *c);
-  static Cell *cddddr(Cell *c);
+  static Cell *caar(const Cell *c);
+  static Cell *cadr(const Cell *c);
+  static Cell *cdar(const Cell *c);
+  static Cell *cddr(const Cell *c);
+  static Cell *caaar(const Cell *c);
+  static Cell *caadr(const Cell *c);
+  static Cell *cadar(const Cell *c);
+  static Cell *caddr(const Cell *c);
+  static Cell *cdaar(const Cell *c);
+  static Cell *cdadr(const Cell *c);
+  static Cell *cddar(const Cell *c);
+  static Cell *cdddr(const Cell *c);
+  static Cell *caaaar(const Cell *c);
+  static Cell *caaadr(const Cell *c);
+  static Cell *caadar(const Cell *c);
+  static Cell *caaddr(const Cell *c);
+  static Cell *cadaar(const Cell *c);
+  static Cell *cadadr(const Cell *c);
+  static Cell *caddar(const Cell *c);
+  static Cell *cadddr(const Cell *c);
+  static Cell *cdaaar(const Cell *c);
+  static Cell *cdaadr(const Cell *c);
+  static Cell *cdadar(const Cell *c);
+  static Cell *cdaddr(const Cell *c);
+  static Cell *cddaar(const Cell *c);
+  static Cell *cddadr(const Cell *c);
+  static Cell *cdddar(const Cell *c);
+  static Cell *cddddr(const Cell *c);
 
   // "Boxes" to hold things related to atoms that won't fit in a cell.
   // We need one of these whenever the atom has two words or more of
@@ -398,11 +407,26 @@ public:
   Procedure LambdaValue() const;
   double RealValue() const;
   const char *name() const;
+  void free_contents();
+
+  void init_int(intptr_t i) { cd.i = i; }
+  void init_char(char c) { cd.c = c; }
+  void init_real(double *d) { cd.d = d; }
+  void init_string(StringBox *s) { cd.s = s; }
+  void init_subr(SubrBox *f) { cd.f = f; }
+  void init_magic(MagicBox *m) { cd.m = m; }
+  void init_symbol(psymbol y) { cd.y = y; }
+  void init_vector(cellvector *cv) { cd.cv = cv; }
+  void init_iport(FILE *ip) { cd.ip = ip; }
+  void init_oport(FILE *op) { cd.op = op; }
+  void init_cont(void *j) { cd.j = j; }
 
   // unsafe accessors: use when you have prior knowledge that the
   // cell contains an atom of the proper type.
 
   cellvector *unsafe_vector_value() const { return cd.cv; }
+  MagicBox *unsafe_magic_box() const { return cd.m; }
+  void *unsafe_magic_vp() const { return cd.vp; }
 
   static void real_to_string(double, char *, int);
 
@@ -524,7 +548,7 @@ public:
 
   bool macro() const { return flag(MACRO); }
 
-private:
+public:
   static inline bool short_atom(const Cell *c) {
     return (reinterpret_cast<uintptr_t>(c) & (ATOM | SHORT)) == (ATOM | SHORT);
   }
@@ -535,8 +559,7 @@ private:
     return short_atom(c) || ((c->ca.i & (ATOM | SHORT)) == ATOM);
   }
 
-  void gc_set_car(Cell *);
-  void gc_set_cdr(Cell *);
+  // gc_set_car and gc_set_cdr moved to public
   static Cell *notcons();
 
   Cell() { ca.p = cd.p = &Nil; }
@@ -574,9 +597,9 @@ private:
 
   static const int GLOBAL_ENV = -1;
 
-// Warning! The virtual machine instructions use the upper
-// 16 bits of the car for the opcode, and count field,
-// so space for types, tags, and flags is limited to 16 bits.
+  // Warning! The virtual machine instructions use the upper
+  // 16 bits of the car for the opcode, and count field,
+  // so space for types, tags, and flags is limited to 16 bits.
 
 #if TAGBITS + TYPEBITS + FLAGBITS > 16
 #error too many atom bits used
@@ -639,6 +662,7 @@ private:
     ++typeCount[t];
   }
 
+private:
   // The actual data for an Atom/Cell is here.
 
   union _car {
@@ -833,7 +857,7 @@ public:
   Cell *force_compiled_promise(Cell *promise);
   Cell *make_continuation();
   void load_continuation(Cell *cont);
-  void print_insn(int pc, Cell *insn);
+  void print_insn(int pc, const Cell *insn);
   Cell *write_compiled_procedure(Cell *arglist);
   Cell *load_compiled_procedure(struct vm_cproc *);
   Cell *load_instructions(vm_cproc *);
@@ -893,16 +917,16 @@ private:
 
   void save(Cell *c) { m_stack.push(c); }
   void save(Cell &rc) {
-    m_stack.push(rc.ca.p);
-    m_stack.push(rc.cd.p);
+    m_stack.push(rc.unsafe_car());
+    m_stack.push(rc.unsafe_cdr());
   }
   void save_i(intptr_t i) {
     m_stack.push(reinterpret_cast<Cell *>((i << 1) | Cell::ATOM));
   }
   void restore(Cell *&c) { c = m_stack.pop(); }
   void restore(Cell &rc) {
-    rc.cd.p = m_stack.pop();
-    rc.ca.p = m_stack.pop();
+    rc.set_unsafe_cdr(m_stack.pop());
+    rc.set_unsafe_car(m_stack.pop());
   }
   void restore_i(intptr_t &i) {
     i = (reinterpret_cast<intptr_t>(m_stack.pop()) &
@@ -951,11 +975,12 @@ private:
   // lists, since we use unsafe car/cdr to traverse them.
 
   void l_appendtail(Cell &l, Cell *t) {
-    if (l.ca.p == nil)
-      l.ca.p = l.cd.p = t;
-    else {
-      l.cd.p->cd.p = t; // l.cd.p->setcdr (t);
-      l.cd.p = t;
+    if (l.unsafe_car() == nil) {
+      l.set_unsafe_car(t);
+      l.set_unsafe_cdr(t);
+    } else {
+      l.unsafe_cdr()->set_unsafe_cdr(t);
+      l.set_unsafe_cdr(t);
     }
   }
 
@@ -964,7 +989,10 @@ private:
     l_appendtail(l, r_elt);
   }
 
-  void clear(Cell &c) { c.ca.p = c.cd.p = nil; }
+  void clear(Cell &c) {
+    c.set_unsafe_car(nil);
+    c.set_unsafe_cdr(nil);
+  }
 
   Cell *envt;
   Cell *root_envt;
@@ -1029,19 +1057,19 @@ private:
 // Simple accessors to avoid the Cell:: scope, which we don't
 // really need for simple things like 'car'.
 
-inline Cell *car(Cell *c) { return Cell::car(c); }
-inline Cell *caar(Cell *c) { return Cell::caar(c); }
-inline Cell *cdr(Cell *c) { return Cell::cdr(c); }
-inline Cell *cdar(Cell *c) { return Cell::cdar(c); }
-inline Cell *cadr(Cell *c) { return Cell::cadr(c); }
-inline Cell *cddr(Cell *c) { return Cell::cddr(c); }
-inline Cell *cadar(Cell *c) { return Cell::cadar(c); }
-inline Cell *caddr(Cell *c) { return Cell::caddr(c); }
-inline Cell *caadr(Cell *c) { return Cell::caadr(c); }
-inline Cell *cdadr(Cell *c) { return Cell::cdadr(c); }
-inline Cell *cddar(Cell *c) { return Cell::cddar(c); }
-inline Cell *caddar(Cell *c) { return Cell::caddar(c); }
-inline Cell *cadaar(Cell *c) { return Cell::cadaar(c); }
+inline Cell *car(const Cell *c) { return Cell::car(c); }
+inline Cell *caar(const Cell *c) { return Cell::caar(c); }
+inline Cell *cdr(const Cell *c) { return Cell::cdr(c); }
+inline Cell *cdar(const Cell *c) { return Cell::cdar(c); }
+inline Cell *cadr(const Cell *c) { return Cell::cadr(c); }
+inline Cell *cddr(const Cell *c) { return Cell::cddr(c); }
+inline Cell *cadar(const Cell *c) { return Cell::cadar(c); }
+inline Cell *caddr(const Cell *c) { return Cell::caddr(c); }
+inline Cell *caadr(const Cell *c) { return Cell::caadr(c); }
+inline Cell *cdadr(const Cell *c) { return Cell::cdadr(c); }
+inline Cell *cddar(const Cell *c) { return Cell::cddar(c); }
+inline Cell *caddar(const Cell *c) { return Cell::caddar(c); }
+inline Cell *cadaar(const Cell *c) { return Cell::cadaar(c); }
 
 // Certain syntactic features of Scheme (so-called "syntactic sugar"
 // like the `else' clause in a cond statement, the use of `.' to
@@ -1111,13 +1139,11 @@ extern psymbol s_callcc;
 
 typedef unsigned char byte;
 
-
 struct vm_insn {
   byte opcode;
   byte count;
   const void *operand;
 } PACKED;
-
 
 struct vm_cproc {
   vm_insn *insns;

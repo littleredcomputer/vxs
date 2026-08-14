@@ -14,15 +14,14 @@ enum operand_type { OP_NONE, OP_INT, OP_SYMBOL, OP_SUBR, OP_LEXADDR };
 
 // Extract information from a VM instruction.
 
-#define INSN_OPCODE(_insn) ((_insn)->ca.i >> 24) // ca.i unsigned
+#define INSN_OPCODE(_insn) ((_insn)->get_car_word() >> 24) // ca.i unsigned
 #define SET_OPCODE(_insn, value)                                               \
-  (((_insn)->ca.i = ((_insn)->ca.i & 0xffffff) | (value << 24)))
-#define INSN_COUNT(_insn) (((_insn)->ca.i >> 16) & 0xff)
-#define LEXA_ESKIP(_insn) ((_insn)->cd.i >> 16)
-#define LEXA_BSKIP(_insn) ((_insn)->cd.i & 0xffff)
+  ((_insn)->set_car_word(((_insn)->get_car_word() & 0xffffff) | (value << 24)))
+#define INSN_COUNT(_insn) (((_insn)->get_car_word() >> 16) & 0xff)
+#define LEXA_ESKIP(_insn) ((_insn)->get_cdr_word() >> 16)
+#define LEXA_BSKIP(_insn) ((_insn)->get_cdr_word() & 0xffff)
 
-#define OPCODE(name, operand)                                                  \
-  { intern(name), operand }
+#define OPCODE(name, operand) {intern(name), operand}
 
 typedef struct {
   psymbol opcode;
@@ -151,19 +150,20 @@ int Context::push_list(Cell *list) {
   return count;
 }
 
-void Context::print_insn(int addr, Cell *insn) {
+void Context::print_insn(int addr, const Cell *insn) {
   vm_op *op = optab + INSN_OPCODE(insn);
   printf("%4d:\t%s\t", addr, op->opcode->key);
   switch (op->opnd_type) {
   case OP_INT:
-    printf("%" PRIdPTR, insn->cd.i);
+    printf("%" PRIdPTR, insn->get_cdr_word());
     break;
   case OP_SYMBOL:
-    printf("%s", insn->cd.y->key);
+    printf("%s", insn->SymbolValue()->key);
     break;
   case OP_SUBR:
     printf("%" PRIdPTR ",%s", INSN_COUNT(insn),
-           insn->flag(Cell::QUICK) ? insn->cd.f->name : insn->cd.y->key);
+           insn->flag(Cell::QUICK) ? insn->SubrValue()->name
+                                   : insn->SymbolValue()->key);
     // XXX comment
     break;
   case OP_LEXADDR:
@@ -233,10 +233,11 @@ Cell *Context::execute(Cell *proc, Cell *args) {
 
 PROC:
   r_cproc->typecheck(Cell::Cproc);
-  insns = r_cproc->cd.cv->get(0)->unsafe_vector_value();
-  literals = r_cproc->cd.cv->get(1)->unsafe_vector_value();
-  r_envt = r_cproc->cd.cv->get(2);
-  pc = r_cproc->cd.cv->get(3)->IntValue();
+  const cellvector *const v = r_cproc->unsafe_vector_value();
+  insns = v->get(0)->unsafe_vector_value();
+  literals = v->get(1)->unsafe_vector_value();
+  r_envt = v->get(2);
+  pc = v->get(3)->IntValue();
 
 XEQ:
   Cell *insn = insns->get_unchecked(pc); // trust compiler!
@@ -263,14 +264,14 @@ XEQ:
   }
   switch (opcode) {
   case 0: // consti
-    save_i(insn->cd.i);
+    save_i(insn->get_cdr_word());
     break;
   case 1: // nil
     m_stack.push(nil);
     break;
   case 2: // subr
     if (!insn->flag(Cell::QUICK)) {
-      Cell *subr = find_var(root_envt, insn->cd.y, 0);
+      Cell *subr = find_var(root_envt, insn->SymbolValue(), 0);
       if (!subr)
         error("missing primitive procedure");
       Cell *proc = cdr(subr);
@@ -294,7 +295,7 @@ XEQ:
         r_cproc = proc;
         goto PROC;
       } else if (type == Cell::Subr) {
-        insn->cd.f = cdr(subr)->SubrValue();
+        insn->init_subr(cdr(subr)->SubrValue());
         insn->flag(Cell::QUICK, true);
       } else {
         error("subr invoked on non-procedure");
@@ -304,32 +305,33 @@ XEQ:
     // Subr's can change anything (in particular they can reenter execute).
     save(r_envt);
     save(r_cproc);
-    r_val = insn->cd.f->subr(this, r_val);
+    r_val = insn->SubrValue()->subr(this, r_val);
     restore(r_cproc);
     restore(r_envt);
     m_stack.push(r_val);
     break;
   case 3: { // gref
     unsigned int index;
-    r_val = find_var(root_envt, insn->cd.y, &index);
+    r_val = find_var(root_envt, insn->SymbolValue(), &index);
     if (!r_val) {
-      error("reference to undefined global variable: ", insn->cd.y->key);
+      error("reference to undefined global variable: ",
+            insn->SymbolValue()->key);
     } else {
       if (cdr(r_val) == NULL)
         error("yikes"); // XXX
       // Quicken the instruction.
       SET_OPCODE(insn, 43); // gref.  XXX: magic number (among others)
-      insn->cd.i = index;
+      insn->set_cdr_word(index);
       m_stack.push(cdr(r_val));
     }
     break;
   }
   case 4: { // gset
     unsigned int index;
-    set_var(root_envt, insn->cd.y, m_stack.pop(), &index);
+    set_var(root_envt, insn->SymbolValue(), m_stack.pop(), &index);
     // Quicken the instruction.
     SET_OPCODE(insn, 48); // gset.  XXX: magic number
-    insn->cd.i = index;
+    insn->set_cdr_word(index);
     break;
   }
   case 5: // lref
@@ -338,7 +340,7 @@ XEQ:
     r_tmp = r_envt;
     for (unsigned int ix = 0; ix < e_skip; ++ix)
       r_tmp = cdr(r_tmp);
-    m_stack.push(car(r_tmp)->cd.cv->get(b_skip));
+    m_stack.push(car(r_tmp)->unsafe_vector_value()->get(b_skip));
     break;
   case 6: // lset
     e_skip = LEXA_ESKIP(insn);
@@ -346,32 +348,32 @@ XEQ:
     r_tmp = r_envt;
     for (unsigned int ix = 0; ix < e_skip; ++ix)
       r_tmp = cdr(r_tmp);
-    car(r_tmp)->cd.cv->set(b_skip, m_stack.pop());
+    car(r_tmp)->unsafe_vector_value()->set(b_skip, m_stack.pop());
     break;
   case 7: // goto
-    pc = insn->cd.i;
+    pc = insn->get_cdr_word();
     goto XEQ;
   case 8: // false?p
     if (!m_stack.pop()->istrue()) {
-      pc = insn->cd.i;
+      pc = insn->get_cdr_word();
       goto XEQ;
     }
     break;
   case 9: // false?
     if (!m_stack.top()->istrue()) {
-      pc = insn->cd.i;
+      pc = insn->get_cdr_word();
       goto XEQ;
     }
     break;
   case 10: // true?p
     if (m_stack.pop()->istrue()) {
-      pc = insn->cd.i;
+      pc = insn->get_cdr_word();
       goto XEQ;
     }
     break;
   case 11: // true?
     if (m_stack.top()->istrue()) {
-      pc = insn->cd.i;
+      pc = insn->get_cdr_word();
       goto XEQ;
     }
     break;
@@ -379,15 +381,15 @@ XEQ:
     // pop the starting instruction from the stack and compose it
     // with the current environment.
     restore_i(start);
-    m_stack.push(make_compiled_procedure(r_cproc->cd.cv->get_unchecked(0),
-                                         r_cproc->cd.cv->get_unchecked(1),
-                                         r_envt, start));
+    m_stack.push(make_compiled_procedure(
+        r_cproc->unsafe_vector_value()->get_unchecked(0),
+        r_cproc->unsafe_vector_value()->get_unchecked(1), r_envt, start));
     break;
   case 13: // extend
-    if (n_args < insn->cd.i)
+    if (n_args < insn->get_cdr_word())
       error("vm: not enough arguments to procedure");
-    r_envt = extend_from_vector(r_envt, &m_stack, insn->cd.i);
-    // r_envt = extend (r_envt, gc_protect (pop_list (insn->cd.i)));
+    r_envt = extend_from_vector(r_envt, &m_stack, insn->get_cdr_word());
+    // r_envt = extend (r_envt, gc_protect (pop_list (insn->get_cdr_word())));
     // gc_unprotect ();
     break;
   case 14: // extend!
@@ -395,10 +397,10 @@ XEQ:
     gc_unprotect();
     break;
   case 15: // extend.
-    if (n_args < insn->cd.i)
+    if (n_args < insn->get_cdr_word())
       error("vm: not enough arguments to procedure");
-    r_val = pop_list(n_args - insn->cd.i);
-    r_envt = extend(r_envt, gc_protect(pop_list(insn->cd.i)));
+    r_val = pop_list(n_args - insn->get_cdr_word());
+    r_envt = extend(r_envt, gc_protect(pop_list(insn->get_cdr_word())));
     gc_unprotect();
     adjoin(r_envt, r_val);
     break;
@@ -407,7 +409,7 @@ XEQ:
     // instruction slot in this segment.
     save(r_envt);
     save(r_cproc);
-    save_i(insn->cd.i);
+    save_i(insn->get_cdr_word());
     break;
   case 17:                 // return
     r_val = m_stack.pop(); // value
@@ -416,8 +418,8 @@ XEQ:
     if (pc < 0)
       goto FINISH;
     restore(r_cproc);
-    insns = r_cproc->cd.cv->get(0)->VectorValue();
-    literals = r_cproc->cd.cv->get(1)->VectorValue();
+    insns = r_cproc->unsafe_vector_value()->get(0)->VectorValue();
+    literals = r_cproc->unsafe_vector_value()->get(1)->VectorValue();
     restore(r_envt);
     save(r_val);
     goto XEQ;
@@ -432,7 +434,7 @@ XEQ:
     // (We count from zero).  'take 0' would be a no-op; 'take 1'
     // would swap the top two elements.  We use an unchecked get
     // because we "trust the compiler."
-    intptr_t target = insn->cd.i;
+    intptr_t target = insn->get_cdr_word();
     int last = m_stack.size() - 1;
     r_tmp = m_stack.get_unchecked(last - target);
     for (int ix = last - target; ix < last; ++ix)
@@ -476,17 +478,17 @@ XEQ:
     m_stack.push(r_proc);
     // dummy up the 'real' arument count that the
     // microcode for 'apply' will see below.
-    insn->cd.i = count;
+    insn->set_cdr_word(count);
   /* FALL THROUGH */
   case 24: // apply
     r_exp = m_stack.pop();
     type = r_exp->type();
     if (type == Cell::Cproc) {
-      n_args = insn->cd.i;
+      n_args = insn->get_cdr_word();
       r_cproc = r_exp;
       goto PROC;
     } else if (type == Cell::Subr) {
-      r_val = pop_list(insn->cd.i);
+      r_val = pop_list(insn->get_cdr_word());
       save(r_envt);
       save(r_cproc);
       r_val = r_exp->SubrValue()->subr(this, r_val);
@@ -505,10 +507,10 @@ XEQ:
     m_stack.push(unassigned);
     break;
   case 27: // lit
-    m_stack.push(literals->get(insn->cd.i));
+    m_stack.push(literals->get(insn->get_cdr_word()));
     break;
   case 28: { // vector-set!
-    n_args = insn->cd.i;
+    n_args = insn->get_cdr_word();
     if (n_args != 3)
       error("bad arguments to vector-set!");
     int ix = m_stack.size() - 1;
@@ -519,7 +521,7 @@ XEQ:
     break;
   }
   case 29: { // vector-ref
-    n_args = insn->cd.i;
+    n_args = insn->get_cdr_word();
     if (n_args != 2)
       error("bad arguments to vector-ref!");
     intptr_t ix = m_stack.pop()->IntValue();
@@ -548,7 +550,7 @@ XEQ:
     // get n; see if top n elements are all exact or not; add them
     // accumulating in situ (to avoid consing an argument list),
     // discard those elements and push the result.
-    n_args = insn->cd.i;
+    n_args = insn->get_cdr_word();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t sum = 0;
@@ -567,7 +569,7 @@ XEQ:
   }
   case 34: { // *
     // much like +, above.
-    n_args = insn->cd.i;
+    n_args = insn->get_cdr_word();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t product = 1;
@@ -585,7 +587,7 @@ XEQ:
     break;
   }
   case 35: { // quotient
-    if (insn->cd.i != 2)
+    if (insn->get_cdr_word() != 2)
       error("wrong # args");
     intptr_t d = m_stack.pop()->IntValue();
     intptr_t n = m_stack.pop()->IntValue();
@@ -595,7 +597,7 @@ XEQ:
     break;
   }
   case 36: { // remainder
-    if (insn->cd.i != 2)
+    if (insn->get_cdr_word() != 2)
       error("wrong # args");
     intptr_t d = m_stack.pop()->IntValue();
     intptr_t n = m_stack.pop()->IntValue();
@@ -608,7 +610,7 @@ XEQ:
     // get n; see if top n elements are all exact or not; add them
     // accumulating in situ (to avoid consing an argument list),
     // discard those elements and push the result.
-    n_args = insn->cd.i;
+    n_args = insn->get_cdr_word();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       if (n_args == 1) {
@@ -652,7 +654,7 @@ XEQ:
     m_stack.push(cons(r_elt, r_tmp));
     break;
   case 43: { // gref. (quickened global ref; contains index of target binding)
-    m_stack.push(cdr(root_bindings->get(insn->cd.i)));
+    m_stack.push(cdr(root_bindings->get(insn->get_cdr_word())));
     break;
   }
   case 44: // false
@@ -662,16 +664,17 @@ XEQ:
     m_stack.push(&Cell::Bool_T);
     break;
   case 46: // int
-    m_stack.push(make_int(insn->cd.i));
+    m_stack.push(make_int(insn->get_cdr_word()));
     break;
   case 47: // promise
     restore_i(start);
-    r_tmp = make_compiled_procedure(r_cproc->cd.cv->get(0),
-                                    r_cproc->cd.cv->get(1), r_envt, start);
+    r_tmp = make_compiled_procedure(r_cproc->unsafe_vector_value()->get(0),
+                                    r_cproc->unsafe_vector_value()->get(1),
+                                    r_envt, start);
     m_stack.push(make_compiled_promise(r_tmp));
     break;
   case 48: // gset.
-    Cell::setcdr(root_bindings->get(insn->cd.i), m_stack.pop());
+    Cell::setcdr(root_bindings->get(insn->get_cdr_word()), m_stack.pop());
     break;
   default:
     error("unimplemented opcode_");
@@ -714,7 +717,7 @@ Cell *Context::make_compiled_procedure(Cell *insns, Cell *literals, Cell *envt,
   Cell *c = gc_protect(alloc(Cell::Cproc));
   cellvector *cv = cellvector::alloc(4);
 
-  c->cd.cv = cv;
+  c->init_vector(cv);
   c->flag(Cell::VREF, true);
   cv->set(0, insns);
   cv->set(1, literals);
@@ -728,7 +731,7 @@ Cell *Context::make_compiled_procedure(Cell *insns, Cell *literals, Cell *envt,
 Cell *Context::make_compiled_promise(Cell *procedure) {
   Cell *c = gc_protect(alloc(Cell::Cpromise));
   cellvector *cv = cellvector::alloc(1);
-  c->cd.cv = cv;
+  c->init_vector(cv);
   c->flag(Cell::VREF, true);
   cv->set(0, procedure);
   gc_unprotect();
@@ -738,13 +741,13 @@ Cell *Context::make_compiled_promise(Cell *procedure) {
 Cell *Context::force_compiled_promise(Cell *promise) {
   promise->typecheck(Cell::Cpromise);
   if (promise->flag(Cell::FORCED))
-    return promise->cd.cv->get(0);
-  Cell *val = execute(promise->cd.cv->get(0), nil);
+    return promise->unsafe_vector_value()->get(0);
+  Cell *val = execute(promise->unsafe_vector_value()->get(0), nil);
   // Did the promise become forced as a result of our evaluation?
   // then that value is correct.
   if (promise->flag(Cell::FORCED))
-    return promise->cd.cv->get(0);
-  promise->cd.cv->set(0, val);
+    return promise->unsafe_vector_value()->get(0);
+  promise->unsafe_vector_value()->set(0, val);
   promise->flag(Cell::FORCED, true);
   return val;
 }
@@ -771,24 +774,24 @@ Cell *Context::make_instruction(int opcode, Cell *operands) {
   Cell *opnd = operands == nil ? nil : car(operands);
 
   Cell *c = alloc(Cell::Insn);
-  c->ca.i |= (opcode & 0xff) << 24;
+  c->set_car_word(c->get_car_word() | ((opcode & 0xff) << 24));
 
   switch (optab[opcode].opnd_type) {
   case OP_INT:
-    c->cd.i = opnd->IntValue();
+    c->set_cdr_word(opnd->IntValue());
     break;
   case OP_SYMBOL:
-    c->cd.y = opnd->SymbolValue();
+    c->init_symbol(opnd->SymbolValue());
     break;
   case OP_SUBR: {
     int count = cadr(operands)->IntValue();
     if (count < 0 || count > 255)
       error("count too large to store in instruction field");
-    c->ca.i |= count << 16;
+    c->set_car_word(c->get_car_word() | (count << 16));
     y = opnd->SymbolValue();
     // Store the symbol in the operand field.  The evaluator
     // will "quicken" the reference when the code is run.
-    c->cd.y = y;
+    c->init_symbol(y);
     break;
   }
   case OP_LEXADDR:
@@ -796,7 +799,7 @@ Cell *Context::make_instruction(int opcode, Cell *operands) {
     u2 = cadr(operands)->IntValue();
     if (u1 > 65535 || u2 > 65535)
       error("lexical address too large");
-    c->cd.i = (u1 << 16) | u2;
+    c->set_cdr_word((u1 << 16) | u2);
     break;
   case OP_NONE:
     break;
@@ -917,7 +920,7 @@ Cell *Context::write_compiled_procedure(Cell *arglist) {
   FILE *output = current_output()->OportValue();
   fprintf(output, "static vm_insn %s_insns[] = {\n", name);
   for (int ix = 0; ix < insns->size(); ++ix) {
-    Cell *insn = insns->get(ix);
+    const Cell *insn = insns->get(ix);
     int opcode = INSN_OPCODE(insn);
     // Horrible special cases: 'gref./gset.'.  A "quickened global
     // reference" is an index into a slot in the global environment.
@@ -929,11 +932,13 @@ Cell *Context::write_compiled_procedure(Cell *arglist) {
     if (opcode == 43) {                 // XXX magic number
       fprintf(output, "  { %2d,0,", 3); // XXX magic number
       write_escaped_string(
-          output, car(root_bindings->get(insn->cd.i))->SymbolValue()->key);
+          output,
+          car(root_bindings->get(insn->get_cdr_word()))->SymbolValue()->key);
     } else if (opcode == 48) {
       fprintf(output, "  { %2d,0,", 4); // XXX magic number
       write_escaped_string(
-          output, car(root_bindings->get(insn->cd.i))->SymbolValue()->key);
+          output,
+          car(root_bindings->get(insn->get_cdr_word()))->SymbolValue()->key);
     } else { // not 'gref.'
       vm_op *op = optab + opcode;
       fprintf(output, "  { %2d,", opcode); // XXX magic number
@@ -942,22 +947,22 @@ Cell *Context::write_compiled_procedure(Cell *arglist) {
         fprintf(output, "0,0");
         break;
       case OP_INT:
-        fprintf(output, "0,(void*)%" PRIdPTR, insn->cd.i);
+        fprintf(output, "0,(void*)%" PRIdPTR, insn->get_cdr_word());
         break;
       case OP_SYMBOL:
         fprintf(output, "0,");
-        write_escaped_string(output, insn->cd.y->key);
+        write_escaped_string(output, insn->SymbolValue()->key);
         break;
       case OP_SUBR:
         // XXX write a comment
         fprintf(output, "%" PRIdPTR ",", INSN_COUNT(insn));
         if (insn->flag(Cell::QUICK))
-          write_escaped_string(output, insn->cd.f->name);
+          write_escaped_string(output, insn->SubrValue()->name);
         else
-          write_escaped_string(output, insn->cd.y->key);
+          write_escaped_string(output, insn->SymbolValue()->key);
         break;
       case OP_LEXADDR:
-        fprintf(output, "0,(void*)%#" PRIxPTR, insn->cd.i);
+        fprintf(output, "0,(void*)%#" PRIxPTR, insn->get_cdr_word());
         break;
       }
     }

@@ -8,12 +8,10 @@
 // subr.cpp : C implementations of Scheme primitives.
 
 #include "vx-scheme.h"
-#include <fstream>
-#include <limits>
-#include <float.h>
-#include <math.h>
+#include <cmath>
 #include <errno.h>
-
+#include <float.h>
+#include <limits>
 
 //---------------------------------------------------------------------
 // Utilities
@@ -853,13 +851,13 @@ Cell *nconc(Context *ctx, Cell *arglist) {
 }
 
 static Cell *member_helper(Context *ctx, Cell *arglist,
-                           bool (Cell::*equality)(Cell *)) {
+                           bool (Cell::*equality)(const Cell *) const) {
   Cell *target = car(arglist);
   Cell *list = cadr(arglist);
 
   FOR_EACH(l, list)
   if ((target->*equality)(Cell::car(l)))
-    return l;
+    return const_cast<Cell *>(l);
 
   return ctx->make_boolean(false);
 }
@@ -877,7 +875,7 @@ Cell *member(Context *ctx, Cell *arglist) {
 }
 
 static Cell *assoc_helper(Context *ctx, Cell *arglist,
-                          bool (Cell::*equality)(Cell *)) {
+                          bool (Cell::*equality)(const Cell *) const) {
   Cell *target = car(arglist);
   Cell *list = cadr(arglist);
 
@@ -1165,15 +1163,15 @@ double _round(double d) {
     else
       return int_part;
   else // frac_part < 0.0
-      if (frac_part < -0.5)
-    return int_part - 1.0;
-  else if (frac_part == -0.5)
-    if (fmod(int_part, 2.0) != 0)
+    if (frac_part < -0.5)
       return int_part - 1.0;
+    else if (frac_part == -0.5)
+      if (fmod(int_part, 2.0) != 0)
+        return int_part - 1.0;
+      else
+        return int_part;
     else
       return int_part;
-  else
-    return int_part;
 }
 
 // Trunc: not ANSI, so rather than #ifdef it we just provide a
@@ -1662,9 +1660,9 @@ void Context::provision() {
   for (unsigned int ix = 0; ix < sizeof(subr) / sizeof(*subr); ++ix)
     bind_subr(subr[ix].n, subr[ix].i);
 
-// Source code in SICP uses the symbols `true' and `false' for
-// boolean values instead of #t and #f as suggested by RxRS.
-// We add these symbol-bindings here.
+  // Source code in SICP uses the symbols `true' and `false' for
+  // boolean values instead of #t and #f as suggested by RxRS.
+  // We add these symbol-bindings here.
 
 #define BIND_VARIABLE(var, val) set_var(envt, intern(var), val)
 

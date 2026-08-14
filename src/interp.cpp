@@ -52,8 +52,7 @@ INTERN_SYM(s_withoutput, "with-output-to-file");
 // guarantee that they are applied to conses (and so we only use them
 // on lists that we manage explicitly).
 
-#define CAR(c) ((c)->ca.p)
-#define CDR(c) ((c)->cd.p)
+// Macros CAR and CDR have been removed in favor of unsafe_car() and unsafe_cdr()
 
 void Context::bind(Cell *env, Cell *c, Cell *value) {
   cellvector *vec = car(env)->VectorValue();
@@ -1185,7 +1184,7 @@ TOP:
   case ev_force:
     r_exp = Cell::caar(&r_argl);
     if (r_exp->flag(Cell::FORCED))
-      r_val = r_exp->cd.cv->get(0); // return memoized value
+      r_val = r_exp->unsafe_vector_value()->get(0); // return memoized value
     else {
       // If we haven't forced the promise yet, then the cdr
       // is pointing to a unit vector containing the
@@ -1193,7 +1192,7 @@ TOP:
       // we then memoize.
 
       clear(r_argl);
-      r_proc = r_exp->cd.cv->get(0);
+      r_proc = r_exp->unsafe_vector_value()->get(0);
       save(r_exp);
       save_i(ev_force2);
       GOTO(apply_dispatch2);
@@ -1207,9 +1206,9 @@ TOP:
 
       restore(r_exp);
       if (r_exp->flag(Cell::FORCED))
-        r_val = r_exp->cd.cv->get(0);
+        r_val = r_exp->unsafe_vector_value()->get(0);
       else {
-        r_exp->cd.cv->set(0, r_val);
+        r_exp->unsafe_vector_value()->set(0, r_val);
         r_exp->flag(Cell::FORCED, true);
       }
     }
@@ -1336,13 +1335,13 @@ Cell *Context::get(Cell *env, Cell *c) {
   c->typecheck(Cell::Symbol);
   Cell *pResult = find(env, c);
 
-  if (!pResult || !CDR(pResult))
+  if (!pResult || !pResult->unsafe_cdr())
     error("unbound variable ", c->SymbolValue()->key);
 
-  Cell *res = CDR(pResult);
+  Cell *res = pResult->unsafe_cdr();
 
   if (res->type() == Cell::Magic)
-    return res->cd.m->get_f(this, res->cd.vp);
+    return res->unsafe_magic_box()->get_f(this, res->unsafe_magic_vp());
   else
     return res;
 }
@@ -1356,7 +1355,7 @@ void Context::set(Cell *env, Cell *var, Cell *value) {
     error("unbound variable ", s->key);
 
   if ((d = cdr(target)) && d->type() == Cell::Magic)
-    d->cd.m->set_f(this, d->cd.vp, value);
+    d->unsafe_magic_box()->set_f(this, d->unsafe_magic_vp(), value);
   else
     Cell::setcdr(target, value);
 }
@@ -1379,10 +1378,10 @@ Cell *Context::find(Cell *env, Cell *c) {
     } else {
       // Skip the indicated number of environments.
       for (e_count = 0; (e != nil) && (e_count < e_skip); ++e_count)
-        e = CDR(e);
+        e = e->unsafe_cdr();
     }
 
-    cellvector *v = CAR(e)->VectorValue();
+    cellvector *v = e->unsafe_car()->VectorValue();
 
     if (b_skip < 0 || b_skip >= v->size() || e_skip != e_count) {
       printf("b=%d, e=%d, ec=%d, vs=%d\n", b_skip, e_skip, e_count, v->size());
@@ -1395,12 +1394,12 @@ Cell *Context::find(Cell *env, Cell *c) {
   // Consider each environment in the enclosure chain
   // in turn, counting them as we go.
 
-  for (e_count = 0; e != nil; ++e_count, e = CDR(e)) {
-    cellvector *v = CAR(e)->VectorValue();
+  for (e_count = 0; e != nil; ++e_count, e = e->unsafe_cdr()) {
+    cellvector *v = e->unsafe_car()->VectorValue();
     // Check the current environment.
 
     for (b_count = 0; b_count < v->size(); ++b_count)
-      if (CAR(v->get(b_count))->SymbolValue() == s) {
+      if (v->get(b_count)->unsafe_car()->SymbolValue() == s) {
         if (e == root_envt) {
           // Top-level environment.  Due to nested defines,
           // this turns out to be a special case.
@@ -1448,7 +1447,7 @@ Cell *Context::make_procedure(Cell *e, Cell *body, Cell *arglist) {
   // XXX cellvector * cv = new cellvector (3);
   cellvector *cv = cellvector::alloc(3);
 
-  c->cd.cv = cv;
+  c->init_vector(cv);
   c->flag(Cell::VREF, true);
   cv->set(0, e);
   cv->set(1, body);
@@ -1475,7 +1474,7 @@ Cell *Context::make_promise(Cell *e, Cell *body) {
   // compute the promise or that procedure's memoized value, we must
   // store that thing in a unit vector.
 
-  c->cd.cv = cv;
+  c->init_vector(cv);
   c->flag(Cell::VREF, true);
   gc_protect(c);
   cv->set(0, make_procedure(e, body, nil));
@@ -1502,7 +1501,7 @@ Cell *Context::make_continuation() {
   int msize = m_stack.size();
   cellvector *cv = cellvector::alloc(msize);
   c->flag(Cell::VREF, true);
-  c->cd.cv = cv;
+  c->init_vector(cv);
 
   for (int ix = 0; ix < msize; ++ix)
     cv->set(ix, m_stack[ix]);
@@ -1513,7 +1512,7 @@ Cell *Context::make_continuation() {
 void Context::load_continuation(Cell *cont) {
   cont->typecheck(Cell::Cont);
 
-  cellvector *cv = cont->cd.cv;
+  cellvector *cv = cont->unsafe_vector_value();
   int msize = cv->size();
 
   m_stack.clear();
