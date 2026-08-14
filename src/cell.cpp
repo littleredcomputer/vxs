@@ -12,15 +12,11 @@
 static const char *nomem_error = "out of memory";
 
 Cell *Context::make_int(intptr_t i) {
-// SHORT INTEGER support: if the integer fits in 24 bits,
-// then return a phony pointer with the short flag set and
-// the integer in the upper 24.  This avoids storage allocation
-// and the attendant eventual garbage.
-#if 1
-  if ((i << 8) >> 8 == i) {
-    return reinterpret_cast<Cell *>((i << 8) | Cell::SHORT | Cell::ATOM);
+  // If the integer fits in 63 bits (1-bit tag ATOM = 0x1),
+  // return an unboxed tagged immediate integer pointer.
+  if ((i << 1) >> 1 == i) {
+    return reinterpret_cast<Cell *>((i << 1) | Cell::ATOM);
   }
-#endif
   return alloc<intptr_t>(i);
 }
 
@@ -37,7 +33,7 @@ Cell *Context::make_oport(const std::string &fname) {
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   Cell *c = alloc<Cell::Vec>(cellvector::alloc(n));
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
 
   for (int ix = 0; ix < n; ++ix)
     c->unsafe_vector_value()->set(ix, init);
@@ -173,7 +169,7 @@ void Cell::stats() {
 
 intptr_t Cell::IntValue() const {
   if (short_atom(this))
-    return reinterpret_cast<intptr_t>(this) >> 8;
+    return reinterpret_cast<intptr_t>(this) >> 1;
   typecheck(Type::Int);
   return std::get<intptr_t>(val);
 }
@@ -267,13 +263,13 @@ void Cell::dump(FILE *out) {
   if (m_gc_mark)
     fputs("mark ", out);
 
-  if (flag(FORCED))
+  if (flag(Flag::Forced))
     fputs("forced ", out);
   if (is_quickened())
     fputs("quick ", out);
-  if (flag(MACRO))
+  if (flag(Flag::Macro))
     fputs("macro ", out);
-  if (flag(VREF))
+  if (flag(Flag::VRef))
     fputs("vref ", out);
 
   fputs(typeName[static_cast<size_t>(t)], out);
@@ -603,7 +599,7 @@ E2:
   }
 
   if (Cell::atomic(P)) {
-    if (P->flag(Cell::VREF)) {
+    if (P->flag(Cell::Flag::VRef)) {
       auto cv = P->unsafe_vector_value();
       if (cv->size() > 0) {
         cv->gc_uplink = T;
@@ -649,7 +645,7 @@ E6:
 
   Q = T;
 
-  if (Q->flag(Cell::VREF)) {
+  if (Q->flag(Cell::Flag::VRef)) {
   next_element:
     auto cv = Q->unsafe_vector_value();
     int i = cv->gc_index++;

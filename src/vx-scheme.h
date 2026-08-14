@@ -53,8 +53,6 @@ inline void error(const std::string &s, const char *s2 = 0) {
   error(s.c_str(), s2);
 }
 
-
-
 class cellvector {
 public:
   // Acquire from Freelist
@@ -358,13 +356,12 @@ public:
   };
 
   struct Insn {
-    using Payload = std::variant<
-        std::monostate,       // OP_NONE
-        intptr_t,             // OP_INT
-        psymbol,              // OP_SYMBOL
-        const Subr *,         // OP_SUBR (quickened)
-        LexAddr               // OP_LEXADDR
-    >;
+    using Payload = std::variant<std::monostate, // OP_NONE
+                                 intptr_t,       // OP_INT
+                                 psymbol,        // OP_SYMBOL
+                                 const Subr *,   // OP_SUBR (quickened)
+                                 LexAddr         // OP_LEXADDR
+                                 >;
 
     unsigned int opcode = 0;
     unsigned int count = 0;
@@ -492,8 +489,7 @@ public:
     return static_cast<Type>(val.index());
   }
 
-  template <typename T>
-  bool is() const {
+  template <typename T> bool is() const {
     if constexpr (std::is_same_v<T, intptr_t>) {
       if (short_atom(this))
         return true;
@@ -504,36 +500,17 @@ public:
     return std::holds_alternative<T>(val);
   }
 
-  template <typename T>
-  const T &as() const {
-    return std::get<T>(val);
-  }
+  template <typename T> const T &as() const { return std::get<T>(val); }
 
-  template <typename T>
-  T &as() {
-    return std::get<T>(val);
-  }
+  template <typename T> T &as() { return std::get<T>(val); }
 
-  // The lowest order three bits of a pointer are called the
-  // tagbits.  They are always free for our use, since a cell
-  // consists of two words, each at least 32 bits, with the
-  // natural alignment (8 bytes for a 32-bit machine).
+  enum class Flag : uint8_t {
+    Forced = 1 << 0,
+    Macro = 1 << 1,
+    VRef = 1 << 2,
+  };
 
-  static const uintptr_t TAGBITS = 3;
-  static const uintptr_t ATOM = 0x1;
-  static const uintptr_t MARK = 0x2;
-  static const uintptr_t SHORT = 0x4;
-
-  static const uintptr_t TYPEBITS = 5;
-  static const uintptr_t TYPEMASK = (1 << TYPEBITS) - 1;
-  static const uintptr_t TAGMASK = (1 << TAGBITS) - 1;
-  // Make sure flag bits are disjoint from TYPE and TAG bits.
-  static const uintptr_t FLAGBASE = 1 << (TYPEBITS + TAGBITS);
-  static const uintptr_t FORCED = FLAGBASE;
-  static const uintptr_t MACRO = FLAGBASE << 1;
-  static const uintptr_t VREF = FLAGBASE << 2;
-  static const uintptr_t FREE = FLAGBASE << 3;
-  static const uintptr_t FLAGBITS = 4;
+  static constexpr uintptr_t ATOM = 0x1;
 
   static const int GLOBAL_ENV = -1;
 
@@ -542,16 +519,18 @@ public:
     if (type() != t)
       typefail(type(), t);
   }
-  bool macro() const { return flag(MACRO); }
+  bool macro() const { return flag(Flag::Macro); }
 
   static inline bool short_atom(const Cell *c) {
-    return ((uintptr_t)c & ATOM) != 0;
+    return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0;
   }
   static inline bool long_atom(const Cell *c) {
-    return ((uintptr_t)c & ATOM) == 0 && c->type() != Type::Cons;
+    return (reinterpret_cast<uintptr_t>(c) & ATOM) == 0 &&
+           c->type() != Type::Cons;
   }
   static inline bool atomic(const Cell *c) {
-    return ((uintptr_t)c & ATOM) != 0 || c->type() != Type::Cons;
+    return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0 ||
+           c->type() != Type::Cons;
   }
   static Cell *notcons();
 
@@ -576,13 +555,16 @@ public:
   static const char *typeName[static_cast<size_t>(Type::NUM_TYPES)];
   static int typeCount[static_cast<size_t>(Type::NUM_TYPES)];
 
-  void flag(unsigned int f, bool b) {
+  void flag(Flag f, bool b) {
     if (b)
-      m_flags |= f;
+      m_flags |= static_cast<uint8_t>(f);
     else
-      m_flags &= ~f;
+      m_flags &= ~static_cast<uint8_t>(f);
   }
-  bool flag(unsigned int f) const { return (m_flags & f) != 0; }
+  void set_flag(Flag f, bool b = true) { flag(f, b); }
+  bool flag(Flag f) const {
+    return (m_flags & static_cast<uint8_t>(f)) != 0;
+  }
 
   void dump(FILE *);
 
@@ -876,8 +858,7 @@ public:
 
   Cell *raw_alloc();
 
-  template <typename T, typename... Args>
-  Cell *alloc(Args&&... args) {
+  template <typename T, typename... Args> Cell *alloc(Args &&...args) {
     Cell *c = raw_alloc();
     c->val.emplace<T>(std::forward<Args>(args)...);
     return c;
@@ -889,13 +870,13 @@ public:
     return alloc<Cell::Cons>(ca, cd);
   }
   Cell *make() { return alloc<Cell::Cons>(&Cell::Nil, &Cell::Nil); }
-  Cell *make(Cell *ca, Cell *cd = &Cell::Nil) { return alloc<Cell::Cons>(ca, cd); }
+  Cell *make(Cell *ca, Cell *cd = &Cell::Nil) {
+    return alloc<Cell::Cons>(ca, cd);
+  }
   Cell *make_int(intptr_t i);
   Cell *make_char(char ch) { return alloc<char>(ch); }
   Cell *make_real(double d) { return alloc<double>(d); }
-  Cell *make_string(std::string s) {
-    return alloc<std::string>(std::move(s));
-  }
+  Cell *make_string(std::string s) { return alloc<std::string>(std::move(s)); }
   Cell *make_string(size_t len, char ch = '\0') {
     return alloc<std::string>(len, ch);
   }
@@ -943,9 +924,7 @@ public:
   void with_input(const std::string &fname) { istack.push(make_iport(fname)); }
   void with_input(const char *fname) { istack.push(make_iport(fname)); }
 
-  void with_output(const std::string &fname) {
-    ostack.push(make_oport(fname));
-  }
+  void with_output(const std::string &fname) { ostack.push(make_oport(fname)); }
   void with_output(const char *fname) { ostack.push(make_oport(fname)); }
 
   void without_output() { fflush(ostack.pop()->OportValue()); }

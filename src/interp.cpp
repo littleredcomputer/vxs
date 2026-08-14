@@ -396,7 +396,7 @@ TOP:
 
   case apply_dispatch:
 
-    if (!r_proc->flag(Cell::MACRO)) {
+    if (!r_proc->flag(Cell::Flag::Macro)) {
       // It's not a special form: evaluate all the arguments
       // in unev and collect them into r_argl.
 
@@ -510,7 +510,7 @@ TOP:
     case Cell::Type::Lambda:
       lambda = r_proc->LambdaValue();
 
-      if (r_proc->flag(Cell::MACRO)) {
+      if (r_proc->flag(Cell::Flag::Macro)) {
         save(r_env);
 
         r_env = extend(lambda.envt);
@@ -1183,7 +1183,7 @@ TOP:
 
   case ev_force:
     r_exp = Cell::caar(&r_argl);
-    if (r_exp->flag(Cell::FORCED))
+    if (r_exp->flag(Cell::Flag::Forced))
       r_val = r_exp->unsafe_vector_value()->get(0); // return memoized value
     else {
       // If we haven't forced the promise yet, then the cdr
@@ -1205,11 +1205,11 @@ TOP:
       // stack)...
 
       restore(r_exp);
-      if (r_exp->flag(Cell::FORCED))
+      if (r_exp->flag(Cell::Flag::Forced))
         r_val = r_exp->unsafe_vector_value()->get(0);
       else {
         r_exp->unsafe_vector_value()->set(0, r_val);
-        r_exp->flag(Cell::FORCED, true);
+        r_exp->flag(Cell::Flag::Forced, true);
       }
     }
 
@@ -1448,21 +1448,21 @@ Cell *Context::make_procedure(Cell *e, Cell *body, Cell *arglist) {
   cv->set(1, body);
   cv->set(2, arglist);
   Cell *c = alloc<Cell::Lambda>(cv);
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
 
   return c;
 }
 
 Cell *Context::make_macro(Cell *e, Cell *body, Cell *arglist) {
   Cell *c = make_procedure(e, body, arglist);
-  c->flag(Cell::MACRO, true);
+  c->flag(Cell::Flag::Macro, true);
   return c;
 }
 
 Cell *Context::make_promise(Cell *e, Cell *body) {
   cellvector *cv = cellvector::alloc(1);
   Cell *c = alloc<Cell::Promise>(cv);
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
   gc_protect(c);
   cv->set(0, make_procedure(e, body, nil));
   gc_unprotect();
@@ -1485,7 +1485,7 @@ Cell *Context::make_continuation() {
   for (int ix = 0; ix < msize; ++ix)
     cv->set(ix, m_stack[ix]);
   Cell *c = alloc<Cell::Cont>(cv);
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
 
   return c;
 }
@@ -1550,7 +1550,7 @@ public:
       Cell *b = ctx->make_builtin(ps);
       ctx->set_var(envt, ps, b);
       if (builtin[ix].macro)
-        b->flag(Cell::MACRO, true);
+        b->flag(Cell::Flag::Macro, true);
     }
   }
 };

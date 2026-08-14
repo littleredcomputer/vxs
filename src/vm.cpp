@@ -713,7 +713,7 @@ Cell *Context::make_compiled_procedure(Cell *insns, Cell *literals, Cell *envt,
   cv->set(2, envt);
   cv->set(3, make_int(start));
   Cell *c = gc_protect(alloc<Cell::Cproc>(cv));
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
   gc_unprotect();
 
   return c;
@@ -723,22 +723,22 @@ Cell *Context::make_compiled_promise(Cell *procedure) {
   cellvector *cv = cellvector::alloc(1);
   cv->set(0, procedure);
   Cell *c = gc_protect(alloc<Cell::Cpromise>(cv));
-  c->flag(Cell::VREF, true);
+  c->flag(Cell::Flag::VRef, true);
   gc_unprotect();
   return c;
 }
 
 Cell *Context::force_compiled_promise(Cell *promise) {
   promise->typecheck(Cell::Type::Cpromise);
-  if (promise->flag(Cell::FORCED))
+  if (promise->flag(Cell::Flag::Forced))
     return promise->unsafe_vector_value()->get(0);
   Cell *val = execute(promise->unsafe_vector_value()->get(0), nil);
   // Did the promise become forced as a result of our evaluation?
   // then that value is correct.
-  if (promise->flag(Cell::FORCED))
+  if (promise->flag(Cell::Flag::Forced))
     return promise->unsafe_vector_value()->get(0);
   promise->unsafe_vector_value()->set(0, val);
-  promise->flag(Cell::FORCED, true);
+  promise->flag(Cell::Flag::Forced, true);
   return val;
 }
 

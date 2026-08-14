@@ -441,7 +441,7 @@ void Cell::write(sstring &ss) const {
     }
     case Type::Lambda: {
       Procedure proc = LambdaValue();
-      ss.append(flag(MACRO) ? "#<macro " : "#<lambda ");
+      ss.append(flag(Flag::Macro) ? "#<macro " : "#<lambda ");
       if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
         proc.arglist->write(ss);
         ss.append(' ');
@@ -462,7 +462,7 @@ void Cell::write(sstring &ss) const {
       ss.append("#<compiled-procedure>");
       break;
     case Type::Cpromise:
-      if (flag(FORCED))
+      if (flag(Flag::Forced))
         CPromiseValue()->write(ss);
       else
         ss.append("#<compiled-promise>");
