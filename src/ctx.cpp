@@ -15,15 +15,17 @@
 //
 
 const char *Cell::typeName[] = {
-    "cons", "lambda", "cont", "insn", "vector", "cproc", "cpromise",
-    "promise", "builtin", "magic", "subr", "iport", "oport",
-    "symbol", "string", "real", "int", "char", "unique"};
+    "int",     "symbol", "unique", "string", "real",   "subr",
+    "lambda",  "vec",    "char",   "iport",  "oport",  "promise",
+    "cont",    "builtin", "magic",  "insn",   "cproc",  "cpromise",
+    "free",    "cons"};
+int Cell::typeCount[static_cast<size_t>(Type::NUM_TYPES)] = {0};
 
-INTERN_SYM(s_unquote, "unquote");
-INTERN_SYM(s_unquote_splicing, "unquote-splicing");
-INTERN_SYM(s_dot, ".");
-INTERN_SYM(s_quasiquote, "quasiquote");
-INTERN_SYM(s_quote, "quote");
+psymbol s_unquote = intern("unquote");
+psymbol s_unquote_splicing = intern("unquote-splicing");
+psymbol s_dot = intern(".");
+psymbol s_quasiquote = intern("quasiquote");
+psymbol s_quote = intern("quote");
 
 // --------------------------------------------------------------------------
 // The Universal Cells
@@ -39,7 +41,6 @@ ALIGN8 Cell Cell::Error("#<error>");
 ALIGN8 Cell Cell::Halt("#<halt>");
 ALIGN8 Cell Cell::Unimplemented("#<unimplemented>");
 
-int Cell::typeCount[] = {0};
 Cell *nil = &Cell::Nil;
 Cell *unspecified = &Cell::Unspecified;
 Cell *unassigned = &Cell::Unassigned;

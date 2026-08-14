@@ -58,9 +58,12 @@ psymbol intern(const char *name) {
   return q;
 }
 
+psymbol intern(const std::string &name) { return intern(name.c_str()); }
+
 // intern_stet: place the string in the symbol table exactly as given.
 
 psymbol intern_stet(const char *name) { return symtab_insert(name); }
+psymbol intern_stet(const std::string &name) { return symtab_insert(name.c_str()); }
 
 // An implementation of Knuth's Algorithm 6.2.3A "Balanced Tree Search
 // and Insertion," from [TAoCP (3ed.) vol III p.462].  The insert

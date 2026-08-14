@@ -49,15 +49,11 @@ extern Cell *unassigned;
 extern Cell *unimplemented;
 
 void error(const char *, const char * = 0);
+inline void error(const std::string &s, const char *s2 = 0) {
+  error(s.c_str(), s2);
+}
 
-// FOR_EACH is a macro that can be used to traverse a standard Scheme
-// list.  The variable `var' is bound for the duration of the traversal
-// to each node in the list.
 
-#define FOR_EACH(var, list)                                                    \
-  for (const Cell *var = list; var != nil; var = Cell::cdr(var))
-
-#define INTERN_SYM(sym, symname) psymbol sym = intern(symname);
 
 class cellvector {
 public:
@@ -165,7 +161,9 @@ typedef struct _symbol {
 } symbol, *psymbol;
 
 psymbol intern(const char *name);
+psymbol intern(const std::string &name);
 psymbol intern_stet(const char *name);
+psymbol intern_stet(const std::string &name);
 Cell *vector_from_list(Context *ctx, Cell *);
 Cell *vector_to_list(Context *ctx, Cell *);
 
@@ -310,7 +308,7 @@ public:
   ALIGN8 static Cell Halt;
   ALIGN8 static Cell Unimplemented;
 
-  enum Type {
+  enum class Type : uint8_t {
     Int = 0,
     Symbol = 1,
     Unique = 2,
@@ -335,110 +333,151 @@ public:
     NUM_TYPES = Cons + 1
   };
 
-  struct ConsPair {
-    Cell *car;
-    Cell *cdr;
-    bool operator==(const ConsPair &o) const {
-      return car == o.car && cdr == o.cdr;
-    }
+  struct Cons {
+    Cell *car = nullptr;
+    Cell *cdr = nullptr;
+    bool operator==(const Cons &o) const = default;
   };
-  struct SubrVal {
-    subr_f subr;
-    const char *name;
-    bool operator==(const SubrVal &o) const {
-      return subr == o.subr && name == o.name;
-    }
+  struct Subr {
+    subr_f subr = nullptr;
+    const char *name = nullptr;
+    bool operator==(const Subr &o) const = default;
   };
   struct MagicBox {
-    void *key;
-    magic_set_f set_f;
-    magic_get_f get_f;
+    void *key = nullptr;
+    magic_set_f set_f = nullptr;
+    magic_get_f get_f = nullptr;
   };
-  struct InsnVal {
-    unsigned int opcode;
-    unsigned int count;
-    union {
-      intptr_t i;
-      psymbol y;
-      const SubrVal *f;
-    } payload;
-    bool operator==(const InsnVal &o) const {
-      return opcode == o.opcode && count == o.count && payload.i == o.payload.i;
-    }
-    psymbol Symbol() const { return payload.y; }
+  struct LexAddr {
+    static constexpr int16_t UNQUICKENED = -2;
+    static constexpr int16_t GLOBAL_ENV = -1;
+
+    int16_t e_skip = UNQUICKENED;
+    int16_t b_skip = UNQUICKENED;
+    bool operator==(const LexAddr &o) const = default;
   };
 
-  struct SymbolVal {
-    psymbol s;
-    int16_t e_skip = -2;
-    int16_t b_skip = -2;
-    bool operator==(const SymbolVal &o) const { return s == o.s; }
+  struct Insn {
+    using Payload = std::variant<
+        std::monostate,       // OP_NONE
+        intptr_t,             // OP_INT
+        psymbol,              // OP_SYMBOL
+        const Subr *,         // OP_SUBR (quickened)
+        LexAddr               // OP_LEXADDR
+    >;
+
+    unsigned int opcode = 0;
+    unsigned int count = 0;
+    Payload payload = std::monostate{};
+
+    bool operator==(const Insn &o) const = default;
+
+    psymbol Symbol() const {
+      if (std::holds_alternative<psymbol>(payload))
+        return std::get<psymbol>(payload);
+      return nullptr;
+    }
+
+    intptr_t int_val() const {
+      if (std::holds_alternative<intptr_t>(payload))
+        return std::get<intptr_t>(payload);
+      return 0;
+    }
+
+    LexAddr lex_addr() const {
+      if (std::holds_alternative<LexAddr>(payload))
+        return std::get<LexAddr>(payload);
+      return LexAddr{};
+    }
+
+    const Subr *subr_val() const {
+      if (std::holds_alternative<const Subr *>(payload))
+        return std::get<const Subr *>(payload);
+      return nullptr;
+    }
+
+    bool is_quickened_subr() const {
+      return std::holds_alternative<const Subr *>(payload);
+    }
   };
-  struct BuiltinVal {
-    psymbol s;
-    bool operator==(const BuiltinVal &o) const { return s == o.s; }
+
+  struct Symbol {
+    static constexpr int16_t UNQUICKENED = -2;
+    static constexpr int16_t GLOBAL_ENV = -1;
+
+    psymbol s = nullptr;
+    int16_t e_skip = UNQUICKENED;
+    int16_t b_skip = UNQUICKENED;
+
+    bool is_quickened() const { return e_skip != UNQUICKENED; }
+    bool is_global() const { return e_skip == GLOBAL_ENV; }
+    bool operator==(const Symbol &o) const { return s == o.s; }
   };
-  struct UniqueVal {
-    const char *s;
-    bool operator==(const UniqueVal &o) const { return s == o.s; }
+  struct Builtin {
+    psymbol s = nullptr;
+    bool operator==(const Builtin &o) const { return s == o.s; }
   };
-  struct LambdaVal {
-    cellvector *cv;
-    bool operator==(const LambdaVal &o) const { return cv == o.cv; }
+  struct Unique {
+    const char *s = nullptr;
+    bool operator==(const Unique &o) const { return s == o.s; }
   };
-  struct VecVal {
-    cellvector *cv;
-    bool operator==(const VecVal &o) const { return cv == o.cv; }
+  struct Lambda {
+    cellvector *cv = nullptr;
+    bool operator==(const Lambda &o) const { return cv == o.cv; }
   };
-  struct IportVal {
-    FILE *f;
-    bool operator==(const IportVal &o) const { return f == o.f; }
+  struct Vec {
+    cellvector *cv = nullptr;
+    bool operator==(const Vec &o) const { return cv == o.cv; }
   };
-  struct OportVal {
-    FILE *f;
-    bool operator==(const OportVal &o) const { return f == o.f; }
+  struct Iport {
+    FILE *f = nullptr;
+    bool operator==(const Iport &o) const { return f == o.f; }
   };
-  struct PromiseVal {
-    cellvector *cv;
-    bool operator==(const PromiseVal &o) const { return cv == o.cv; }
+  struct Oport {
+    FILE *f = nullptr;
+    bool operator==(const Oport &o) const { return f == o.f; }
   };
-  struct ContVal {
-    cellvector *cv;
-    bool operator==(const ContVal &o) const { return cv == o.cv; }
+  struct Promise {
+    cellvector *cv = nullptr;
+    bool operator==(const Promise &o) const { return cv == o.cv; }
   };
-  struct CprocVal {
-    cellvector *cv;
-    bool operator==(const CprocVal &o) const { return cv == o.cv; }
+  struct Cont {
+    cellvector *cv = nullptr;
+    bool operator==(const Cont &o) const { return cv == o.cv; }
   };
-  struct CpromiseVal {
-    cellvector *cv;
-    bool operator==(const CpromiseVal &o) const { return cv == o.cv; }
+  struct Cproc {
+    cellvector *cv = nullptr;
+    bool operator==(const Cproc &o) const { return cv == o.cv; }
   };
-  struct FreeVal {
-    Cell *next;
-    bool operator==(const FreeVal &o) const { return next == o.next; }
+  struct Cpromise {
+    cellvector *cv = nullptr;
+    bool operator==(const Cpromise &o) const { return cv == o.cv; }
+  };
+  struct Free {
+    Cell *next = nullptr;
+    bool operator==(const Free &o) const { return next == o.next; }
   };
 
   using CellValue = std::variant<intptr_t,    // 0: Int
-                                 SymbolVal,   // 1: Symbol
-                                 UniqueVal,   // 2: Unique
+                                 Symbol,      // 1: Symbol
+                                 Unique,      // 2: Unique
                                  std::string, // 3: String
                                  double,      // 4: Real
-                                 SubrVal,     // 5: Subr
-                                 LambdaVal,   // 6: Lambda
-                                 VecVal,      // 7: Vec
+                                 Subr,        // 5: Subr
+                                 Lambda,      // 6: Lambda
+                                 Vec,         // 7: Vec
                                  char,        // 8: Char
-                                 IportVal,    // 9: Iport
-                                 OportVal,    // 10: Oport
-                                 PromiseVal,  // 11: Promise
-                                 ContVal,     // 12: Cont
-                                 BuiltinVal,  // 13: Builtin
+                                 Iport,       // 9: Iport
+                                 Oport,       // 10: Oport
+                                 Promise,     // 11: Promise
+                                 Cont,        // 12: Cont
+                                 Builtin,     // 13: Builtin
                                  MagicBox *,  // 14: Magic
-                                 InsnVal,     // 15: Insn
-                                 CprocVal,    // 16: Cproc
-                                 CpromiseVal, // 17: Cpromise
-                                 FreeVal,     // 18: Free
-                                 ConsPair     // 19: Cons
+                                 Insn,        // 15: Insn
+                                 Cproc,       // 16: Cproc
+                                 Cpromise,    // 17: Cpromise
+                                 Free,        // 18: Free
+                                 Cons         // 19: Cons
                                  >;
 
   CellValue val;
@@ -449,8 +488,30 @@ public:
 
   Type type() const {
     if (short_atom(this))
-      return Int;
+      return Type::Int;
     return static_cast<Type>(val.index());
+  }
+
+  template <typename T>
+  bool is() const {
+    if constexpr (std::is_same_v<T, intptr_t>) {
+      if (short_atom(this))
+        return true;
+    } else {
+      if (short_atom(this))
+        return false;
+    }
+    return std::holds_alternative<T>(val);
+  }
+
+  template <typename T>
+  const T &as() const {
+    return std::get<T>(val);
+  }
+
+  template <typename T>
+  T &as() {
+    return std::get<T>(val);
   }
 
   // The lowest order three bits of a pointer are called the
@@ -469,12 +530,10 @@ public:
   // Make sure flag bits are disjoint from TYPE and TAG bits.
   static const uintptr_t FLAGBASE = 1 << (TYPEBITS + TAGBITS);
   static const uintptr_t FORCED = FLAGBASE;
-  static const uintptr_t QUICK = FLAGBASE << 1;
-  static const uintptr_t GLOBAL = FLAGBASE << 2;
-  static const uintptr_t MACRO = FLAGBASE << 3;
-  static const uintptr_t VREF = FLAGBASE << 4;
-  static const uintptr_t FREE = FLAGBASE << 5;
-  static const uintptr_t FLAGBITS = 6;
+  static const uintptr_t MACRO = FLAGBASE << 1;
+  static const uintptr_t VREF = FLAGBASE << 2;
+  static const uintptr_t FREE = FLAGBASE << 3;
+  static const uintptr_t FLAGBITS = 4;
 
   static const int GLOBAL_ENV = -1;
 
@@ -489,101 +548,33 @@ public:
     return ((uintptr_t)c & ATOM) != 0;
   }
   static inline bool long_atom(const Cell *c) {
-    return ((uintptr_t)c & ATOM) == 0 && c->type() != Cons;
+    return ((uintptr_t)c & ATOM) == 0 && c->type() != Type::Cons;
   }
   static inline bool atomic(const Cell *c) {
-    return ((uintptr_t)c & ATOM) != 0 || c->type() != Cons;
+    return ((uintptr_t)c & ATOM) != 0 || c->type() != Type::Cons;
   }
   static Cell *notcons();
 
-  Cell() : val(ConsPair{&Nil, &Nil}) {}
-  Cell(const char *unique_name) : val(UniqueVal{unique_name}) {}
+  Cell() : val(Cons{&Nil, &Nil}) {}
+  Cell(const char *unique_name) : val(Unique{unique_name}) {}
 
-  inline intptr_t e_skip() const { return std::get<SymbolVal>(val).e_skip; }
-  inline intptr_t b_skip() const { return std::get<SymbolVal>(val).b_skip; }
+  inline intptr_t e_skip() const { return std::get<Symbol>(val).e_skip; }
+  inline intptr_t b_skip() const { return std::get<Symbol>(val).b_skip; }
+  inline bool is_quickened() const {
+    if (type() == Type::Symbol)
+      return std::get<Symbol>(val).is_quickened();
+    return false;
+  }
   void set_lexaddr(intptr_t e_skip, intptr_t b_skip) {
-    auto &s = std::get<SymbolVal>(val);
-    s.e_skip = e_skip;
-    s.b_skip = b_skip;
-    flag(QUICK, true);
-    if (e_skip == GLOBAL_ENV)
-      flag(GLOBAL, true);
+    auto &s = std::get<Symbol>(val);
+    s.e_skip = static_cast<int16_t>(e_skip);
+    s.b_skip = static_cast<int16_t>(b_skip);
   }
 
-  static const unsigned int IGNORE =
-      (unsigned int)(QUICK | GLOBAL | (~0u << 16));
+  static const unsigned int IGNORE = (unsigned int)(~0u << 16);
   static const unsigned int IGN_MASK = ~IGNORE;
-  static const char *typeName[NUM_TYPES];
-  static int typeCount[NUM_TYPES];
-
-  void set_type(Type t) {
-    ++typeCount[t];
-    switch (t) {
-    case Int:
-      val = intptr_t{0};
-      break;
-    case Symbol:
-      val = SymbolVal{};
-      break;
-    case Unique:
-      val = UniqueVal{};
-      break;
-    case String:
-      val = std::string{};
-      break;
-    case Real:
-      val = double{0.0};
-      break;
-    case Subr:
-      val = SubrVal{};
-      break;
-    case Lambda:
-      val = LambdaVal{};
-      break;
-    case Vec:
-      val = VecVal{};
-      break;
-    case Char:
-      val = char{0};
-      break;
-    case Iport:
-      val = IportVal{};
-      break;
-    case Oport:
-      val = OportVal{};
-      break;
-    case Promise:
-      val = PromiseVal{};
-      break;
-    case Cont:
-      val = ContVal{};
-      break;
-    case Builtin:
-      val = BuiltinVal{};
-      break;
-    case Magic:
-      val = (MagicBox *)nullptr;
-      break;
-    case Insn:
-      val = InsnVal{};
-      break;
-    case Cproc:
-      val = CprocVal{};
-      break;
-    case Cpromise:
-      val = CpromiseVal{};
-      break;
-    case Free:
-      val = FreeVal{nullptr};
-      break;
-    case Cons:
-      val = ConsPair{&Nil, &Nil};
-      break;
-    default:
-      val = FreeVal{nullptr};
-      break;
-    }
-  }
+  static const char *typeName[static_cast<size_t>(Type::NUM_TYPES)];
+  static int typeCount[static_cast<size_t>(Type::NUM_TYPES)];
 
   void flag(unsigned int f, bool b) {
     if (b)
@@ -596,29 +587,29 @@ public:
   void dump(FILE *);
 
   // Cons accessors
-  Cell *unsafe_car() const { return std::get<ConsPair>(val).car; }
-  void set_unsafe_car(Cell *c) { std::get<ConsPair>(val).car = c; }
-  Cell *unsafe_cdr() const { return std::get<ConsPair>(val).cdr; }
-  void set_unsafe_cdr(Cell *c) { std::get<ConsPair>(val).cdr = c; }
-  Cell *next_free() const { return std::get<FreeVal>(val).next; }
+  Cell *unsafe_car() const { return std::get<Cons>(val).car; }
+  void set_unsafe_car(Cell *c) { std::get<Cons>(val).car = c; }
+  Cell *unsafe_cdr() const { return std::get<Cons>(val).cdr; }
+  void set_unsafe_cdr(Cell *c) { std::get<Cons>(val).cdr = c; }
+  Cell *next_free() const { return std::get<Free>(val).next; }
 
   static void setcar(Cell *c, Cell *car) {
     if (atomic(c))
       notcons();
     else
-      std::get<ConsPair>(c->val).car = car;
+      std::get<Cons>(c->val).car = car;
   }
   static void setcdr(Cell *c, Cell *cdr) {
     if (atomic(c))
       notcons();
     else
-      std::get<ConsPair>(c->val).cdr = cdr;
+      std::get<Cons>(c->val).cdr = cdr;
   }
   static Cell *car(const Cell *c) {
-    return atomic(c) ? notcons() : std::get<ConsPair>(c->val).car;
+    return atomic(c) ? notcons() : std::get<Cons>(c->val).car;
   }
   static Cell *cdr(const Cell *c) {
-    return atomic(c) ? notcons() : std::get<ConsPair>(c->val).cdr;
+    return atomic(c) ? notcons() : std::get<Cons>(c->val).cdr;
   }
 
   static Cell *caar(const Cell *c);
@@ -652,8 +643,9 @@ public:
 
   intptr_t IntValue() const;
   char CharValue() const;
-  const SubrVal *SubrValue() const;
-  char *StringValue() const;
+  const Subr *SubrValue() const;
+  const std::string &StringValue() const;
+  std::string &mutable_string();
   size_t StringLength() const;
   FILE *IportValue() const;
   FILE *OportValue() const;
@@ -667,38 +659,23 @@ public:
   double RealValue() const;
   const char *name() const;
   void free_contents();
-  const InsnVal *InsnValue() const;
-  InsnVal *InsnValue();
-
-  void init_int(intptr_t i) { val = i; }
-  void init_char(char c) { val = c; }
-  void init_real(double d) { val = d; }
-  void init_string(const std::string &s) { val = s; }
-  void init_subr(subr_f f, const char *n) { val = SubrVal{f, n}; }
-  void init_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
-    val = new MagicBox{key, set_f, get_f};
-  }
-  void init_symbol(psymbol y) { val = SymbolVal{y, -2, -2}; }
-  void init_builtin(psymbol y) { val = BuiltinVal{y}; }
-  void init_iport(FILE *ip) { val = IportVal{ip}; }
-  void init_oport(FILE *op) { val = OportVal{op}; }
-
-  void init_insn(unsigned int opcode) { val = InsnVal{opcode, 0, {0}}; }
+  const Insn *InsnValue() const;
+  Insn *InsnValue();
 
   cellvector *unsafe_vector_value() const {
-    switch (val.index()) {
-    case Vec:
-      return std::get<VecVal>(val).cv;
-    case Lambda:
-      return std::get<LambdaVal>(val).cv;
-    case Cproc:
-      return std::get<CprocVal>(val).cv;
-    case Promise:
-      return std::get<PromiseVal>(val).cv;
-    case Cpromise:
-      return std::get<CpromiseVal>(val).cv;
-    case Cont:
-      return std::get<ContVal>(val).cv;
+    switch (type()) {
+    case Type::Vec:
+      return std::get<Vec>(val).cv;
+    case Type::Lambda:
+      return std::get<Lambda>(val).cv;
+    case Type::Cproc:
+      return std::get<Cproc>(val).cv;
+    case Type::Promise:
+      return std::get<Promise>(val).cv;
+    case Type::Cpromise:
+      return std::get<Cpromise>(val).cv;
+    case Type::Cont:
+      return std::get<Cont>(val).cv;
     default:
       return nullptr;
     }
@@ -708,7 +685,7 @@ public:
 
   static void real_to_string(double, char *, int);
   double asReal() const {
-    return (type() == Cell::Int) ? (double)IntValue() : RealValue();
+    return (type() == Type::Int) ? (double)IntValue() : RealValue();
   }
   bool isBoolean() { return this == &Bool_T || this == &Bool_F; }
   bool istrue() { return this != &Bool_F; }
@@ -717,7 +694,8 @@ public:
 
   int length() {
     int i = 0;
-    FOR_EACH(p, this)++ i;
+    for (Cell *p = this; p != nil; p = Cell::cdr(p))
+      ++i;
     return i;
   }
 
@@ -896,28 +874,54 @@ public:
 
   // Manufacture Cells and Atoms
 
-  Cell *make();
+  Cell *raw_alloc();
+
+  template <typename T, typename... Args>
+  Cell *alloc(Args&&... args) {
+    Cell *c = raw_alloc();
+    c->val.emplace<T>(std::forward<Args>(args)...);
+    return c;
+  }
+
+  // Manufacture Cells and Atoms
+
+  Cell *cons(Cell *ca, Cell *cd = &Cell::Nil) {
+    return alloc<Cell::Cons>(ca, cd);
+  }
+  Cell *make() { return alloc<Cell::Cons>(&Cell::Nil, &Cell::Nil); }
+  Cell *make(Cell *ca, Cell *cd = &Cell::Nil) { return alloc<Cell::Cons>(ca, cd); }
   Cell *make_int(intptr_t i);
-  Cell *make_char(char ch);
-  Cell *make_real(double d);
-  Cell *make_string(size_t len);
-  Cell *make_string(int len, char ch);
-  Cell *make_string(const char *s);
-  Cell *make_string(const char *s, size_t len);
-  Cell *make_subr(subr_f s, const char *name);
-  Cell *make_builtin(psymbol y);
-  Cell *make_symbol(psymbol y);
-  Cell *make_boolean(bool b);
+  Cell *make_char(char ch) { return alloc<char>(ch); }
+  Cell *make_real(double d) { return alloc<double>(d); }
+  Cell *make_string(std::string s) {
+    return alloc<std::string>(std::move(s));
+  }
+  Cell *make_string(size_t len, char ch = '\0') {
+    return alloc<std::string>(len, ch);
+  }
+  Cell *make_string(const char *s) { return alloc<std::string>(s); }
+  Cell *make_string(const char *s, size_t len) {
+    return alloc<std::string>(s, len);
+  }
+  Cell *make_subr(subr_f s, const char *name) {
+    return alloc<Cell::Subr>(s, name);
+  }
+  Cell *make_builtin(psymbol y) { return alloc<Cell::Builtin>(y); }
+  Cell *make_symbol(psymbol y) { return alloc<Cell::Symbol>(y); }
+  Cell *make_boolean(bool b) { return b ? &Cell::Bool_T : &Cell::Bool_F; }
   Cell *make_vector(int n, Cell *init = &Cell::Unspecified);
+  Cell *make_iport(const std::string &fname);
   Cell *make_iport(const char *fname);
-  Cell *make_iport(FILE *);
+  Cell *make_iport(FILE *ip) { return alloc<Cell::Iport>(ip); }
+  Cell *make_oport(const std::string &fname);
   Cell *make_oport(const char *fname);
-  Cell *make_oport(FILE *op);
+  Cell *make_oport(FILE *op) { return alloc<Cell::Oport>(op); }
   Cell *make_procedure(Cell *env, Cell *body, Cell *arglist);
   Cell *make_promise(Cell *env, Cell *body);
   Cell *make_macro(Cell *env, Cell *body, Cell *arglist);
-  Cell *make_magic(void *, magic_set_f, magic_get_f);
-  Cell *make(Cell *ca, Cell *cd = &Cell::Nil);
+  Cell *make_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
+    return alloc<Cell::MagicBox *>(new Cell::MagicBox{key, set_f, get_f});
+  }
   Cell *make_list1(Cell *);
   Cell *make_list2(Cell *, Cell *);
   Cell *make_list3(Cell *, Cell *, Cell *);
@@ -934,12 +938,14 @@ public:
   Cell *load_compiled_procedure(struct vm_cproc *);
   Cell *load_instructions(vm_cproc *);
 
-  Cell *cons(Cell *_car, Cell *_cdr) { return make(_car, _cdr); }
-
   // ------------------------------------------------------------
 
+  void with_input(const std::string &fname) { istack.push(make_iport(fname)); }
   void with_input(const char *fname) { istack.push(make_iport(fname)); }
 
+  void with_output(const std::string &fname) {
+    ostack.push(make_oport(fname));
+  }
   void with_output(const char *fname) { ostack.push(make_oport(fname)); }
 
   void without_output() { fflush(ostack.pop()->OportValue()); }
@@ -968,7 +974,6 @@ public:
   Cell *RunMain();
 
 private:
-  Cell *alloc(Cell::Type t);
   void mark(Cell *);
   Cell *find(Cell *env, Cell *s);
   void quicken(Cell *, int, int);

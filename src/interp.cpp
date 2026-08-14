@@ -13,35 +13,35 @@
 // Populate the symbol table with builtins.
 //
 
-INTERN_SYM(s_and, "and");
-INTERN_SYM(s_apply, "apply");
-INTERN_SYM(s_begin, "begin");
-INTERN_SYM(s_callcc, "call-with-current-continuation");
-INTERN_SYM(s_callwif, "call-with-input-file");
-INTERN_SYM(s_callwof, "call-with-output-file");
-INTERN_SYM(s_case, "case");
-INTERN_SYM(s_cond, "cond");
-INTERN_SYM(s_define, "define");
-INTERN_SYM(s_defmacro, "defmacro");
-INTERN_SYM(s_delay, "delay");
-INTERN_SYM(s_do, "do");
-INTERN_SYM(s_else, "else");
-INTERN_SYM(s_eval, "eval");
-INTERN_SYM(s_force, "force");
-INTERN_SYM(s_foreach, "for-each");
-INTERN_SYM(s_if, "if");
-INTERN_SYM(s_lambda, "lambda");
-INTERN_SYM(s_let, "let");
-INTERN_SYM(s_letrec, "letrec");
-INTERN_SYM(s_letstar, "let*");
-INTERN_SYM(s_load, "load");
-INTERN_SYM(s_map, "map");
-INTERN_SYM(s_or, "or");
-INTERN_SYM(s_passto, "=>");
-INTERN_SYM(s_set, "set!");
-INTERN_SYM(s_time, "time");
-INTERN_SYM(s_withinput, "with-input-from-file");
-INTERN_SYM(s_withoutput, "with-output-to-file");
+psymbol s_and = intern("and");
+psymbol s_apply = intern("apply");
+psymbol s_begin = intern("begin");
+psymbol s_callcc = intern("call-with-current-continuation");
+psymbol s_callwif = intern("call-with-input-file");
+psymbol s_callwof = intern("call-with-output-file");
+psymbol s_case = intern("case");
+psymbol s_cond = intern("cond");
+psymbol s_define = intern("define");
+psymbol s_defmacro = intern("defmacro");
+psymbol s_delay = intern("delay");
+psymbol s_do = intern("do");
+psymbol s_else = intern("else");
+psymbol s_eval = intern("eval");
+psymbol s_force = intern("force");
+psymbol s_foreach = intern("for-each");
+psymbol s_if = intern("if");
+psymbol s_lambda = intern("lambda");
+psymbol s_let = intern("let");
+psymbol s_letrec = intern("letrec");
+psymbol s_letstar = intern("let*");
+psymbol s_load = intern("load");
+psymbol s_map = intern("map");
+psymbol s_or = intern("or");
+psymbol s_passto = intern("=>");
+psymbol s_set = intern("set!");
+psymbol s_time = intern("time");
+psymbol s_withinput = intern("with-input-from-file");
+psymbol s_withoutput = intern("with-output-to-file");
 
 // --------------------------------------------------------------------------
 // Unsafe Accessors
@@ -58,7 +58,7 @@ void Context::bind(Cell *env, Cell *c, Cell *value) {
   cellvector *vec = car(env)->VectorValue();
   psymbol s = c->SymbolValue();
 
-  if (c->flag(Cell::QUICK) && c->e_skip() == 0) {
+  if (c->is_quickened() && c->e_skip() == 0) {
     // We have a quick binding, and, as we expect,
     // it's within this frame.  We can establish
     // it without searching.
@@ -321,9 +321,9 @@ Cell *Context::interp_evaluator(Cell *form) {
       GOTO(r_cont);                                                            \
     }                                                                          \
     Cell::Type __t = (r_exp)->type();                                          \
-    if (__t == Cell::Cons)                                                     \
+    if (__t == Cell::Type::Cons)                                               \
       GOTO(ev_application);                                                    \
-    if (__t == Cell::Symbol)                                                   \
+    if (__t == Cell::Type::Symbol)                                             \
       r_val = get(r_env, r_exp);                                               \
     else                                                                       \
       r_val = r_exp;                                                           \
@@ -343,10 +343,10 @@ Cell *Context::interp_evaluator(Cell *form) {
 
 #define CALL_EVAL(label)                                                       \
   t = (r_exp)->type();                                                         \
-  if (t == Cell::Symbol) {                                                     \
+  if (t == Cell::Type::Symbol) {                                               \
     r_val = get(r_env, r_exp);                                                 \
     goto label##__2;                                                           \
-  } else if (t != Cell::Cons) {                                                \
+  } else if (t != Cell::Type::Cons) {                                          \
     r_val = r_exp;                                                             \
     goto label##__2;                                                           \
   } else {                                                                     \
@@ -374,10 +374,10 @@ TOP:
     }
 
     switch (r_exp->type()) {
-    case Cell::Symbol:
+    case Cell::Type::Symbol:
       r_val = get(r_env, r_exp);
       GOTO(r_cont);
-    case Cell::Cons:
+    case Cell::Type::Cons:
       GOTO(ev_application);
     default: // self-evaluating
       r_val = r_exp;
@@ -421,7 +421,7 @@ TOP:
   case apply_dispatch2:
 
     switch (r_proc->type()) {
-    case Cell::Builtin:
+    case Cell::Type::Builtin:
       // =================================================
       //            THE BUILTIN SPECIAL FORMS
       // =================================================
@@ -503,11 +503,11 @@ TOP:
         error("unimplemented builtin ", s->key);
       break;
 
-    case Cell::Subr:
+    case Cell::Type::Subr:
       r_val = r_proc->SubrValue()->subr(this, Cell::car(&r_argl));
       break;
 
-    case Cell::Lambda:
+    case Cell::Type::Lambda:
       lambda = r_proc->LambdaValue();
 
       if (r_proc->flag(Cell::MACRO)) {
@@ -524,12 +524,12 @@ TOP:
       r_unev = lambda.body;
       GOTO(ev_sequence);
 
-    case Cell::Cont:
+    case Cell::Type::Cont:
       r_val = Cell::caar(&r_argl);
       load_continuation(r_proc);
       break;
 
-    case Cell::Cproc:
+    case Cell::Type::Cproc:
       if (vm_execute) {
         (this->*vm_execute)(r_proc, Cell::car(&r_argl));
       } else {
@@ -627,7 +627,7 @@ TOP:
   case ev_define:
     r_tmp = car(r_unev);
 
-    if (r_tmp->type() == Cell::Symbol) {
+    if (r_tmp->type() == Cell::Type::Symbol) {
       save(r_env);
       save(r_unev);
       r_exp = cadr(r_unev);
@@ -689,7 +689,7 @@ TOP:
     // The plan is to accumulate the list of variables (v) in
     // r_varl, and the list of initializers (e) in r_argl.
 
-    if (car(r_unev)->type() == Cell::Symbol) {
+    if (car(r_unev)->type() == Cell::Type::Symbol) {
       r_proc = car(r_unev); // named let: stash in r_proc
       r_unev = cdr(r_unev);
     } else
@@ -978,7 +978,7 @@ TOP:
     ++r_qq;
     t = r_unev->type();
 
-    if (t == Cell::Vec) {
+    if (t == Cell::Type::Vec) {
       save_i(1);
       r_unev = vector_to_list(this, cons(r_unev, nil)); // yyy
     } else
@@ -990,10 +990,10 @@ TOP:
   case ev_qq0:
 
     t = r_unev->type();
-    if (t == Cell::Cons) {
+    if (t == Cell::Type::Cons) {
       r_exp = car(r_unev);
 
-      if (r_exp->type() == Cell::Symbol) {
+      if (r_exp->type() == Cell::Type::Symbol) {
         p = r_exp->SymbolValue();
 
         if (p == s_unquote) // unquote: evaluate sequel.
@@ -1020,7 +1020,7 @@ TOP:
           goto QQCONS;
       }
 
-      else if (r_exp->type() == Cell::Cons &&
+      else if (r_exp->type() == Cell::Type::Cons &&
                car(r_exp)->is_symbol(s_unquote_splicing)) {
         if (r_qq == 1) {
           // unquote_splicing: generate list, and splice it
@@ -1308,12 +1308,12 @@ void Context::bind_arguments(Cell *env, Cell *variables, Cell *values) {
   Cell *var;
   Cell *val;
 
-  if (variables->type() == Cell::Cons) {
+  if (variables->type() == Cell::Type::Cons) {
     for (var = variables, val = values; var != nil;
          var = cdr(var), val = cdr(val)) {
       bind(env, car(var), car(val));
 
-      if (cdr(var)->type() == Cell::Symbol) {
+      if (cdr(var)->type() == Cell::Type::Symbol) {
         // Implement "dotted tail" procedure call.  If
         // the cdr of var is another symbol, then this
         // was to the right of the "dot"; put all the rest
@@ -1332,7 +1332,7 @@ void Context::bind_arguments(Cell *env, Cell *variables, Cell *values) {
 }
 
 Cell *Context::get(Cell *env, Cell *c) {
-  c->typecheck(Cell::Symbol);
+  c->typecheck(Cell::Type::Symbol);
   Cell *pResult = find(env, c);
 
   if (!pResult || !pResult->unsafe_cdr())
@@ -1340,7 +1340,7 @@ Cell *Context::get(Cell *env, Cell *c) {
 
   Cell *res = pResult->unsafe_cdr();
 
-  if (res->type() == Cell::Magic)
+  if (res->type() == Cell::Type::Magic)
     return res->unsafe_magic_box()->get_f(this, res->unsafe_magic_vp());
   else
     return res;
@@ -1354,7 +1354,7 @@ void Context::set(Cell *env, Cell *var, Cell *value) {
   if (!target)
     error("unbound variable ", s->key);
 
-  if ((d = cdr(target)) && d->type() == Cell::Magic)
+  if ((d = cdr(target)) && d->type() == Cell::Type::Magic)
     d->unsafe_magic_box()->set_f(this, d->unsafe_magic_vp(), value);
   else
     Cell::setcdr(target, value);
@@ -1367,7 +1367,7 @@ Cell *Context::find(Cell *env, Cell *c) {
   Cell *e = env;
   Cell *val;
 
-  if (c->flag(Cell::QUICK)) {
+  if (c->is_quickened()) {
     int e_skip = c->e_skip();
     int b_skip = c->b_skip();
 
@@ -1443,15 +1443,12 @@ void Context::quicken(Cell *c, int e_count, int b_count) {
 }
 
 Cell *Context::make_procedure(Cell *e, Cell *body, Cell *arglist) {
-  Cell *c = alloc(Cell::Lambda);
-  // XXX cellvector * cv = new cellvector (3);
   cellvector *cv = cellvector::alloc(3);
-
-  c->val = Cell::LambdaVal{cv};
-  c->flag(Cell::VREF, true);
   cv->set(0, e);
   cv->set(1, body);
   cv->set(2, arglist);
+  Cell *c = alloc<Cell::Lambda>(cv);
+  c->flag(Cell::VREF, true);
 
   return c;
 }
@@ -1463,18 +1460,8 @@ Cell *Context::make_macro(Cell *e, Cell *body, Cell *arglist) {
 }
 
 Cell *Context::make_promise(Cell *e, Cell *body) {
-  Cell *c = alloc(Cell::Promise);
   cellvector *cv = cellvector::alloc(1);
-
-  // Now it may seem odd to allocate a vector of one element to
-  // store the content of the promise.  But, our garbage collector
-  // only knows how to traverse two kinds of entities: (1) conses,
-  // consisting of a car and cdr and (2) vectors.  Since we're not a
-  // cons, but contain a reference to either the procedure that will
-  // compute the promise or that procedure's memoized value, we must
-  // store that thing in a unit vector.
-
-  c->val = Cell::PromiseVal{cv};
+  Cell *c = alloc<Cell::Promise>(cv);
   c->flag(Cell::VREF, true);
   gc_protect(c);
   cv->set(0, make_procedure(e, body, nil));
@@ -1493,24 +1480,18 @@ Cell *Context::make_list3(Cell *e1, Cell *e2, Cell *e3) {
 }
 
 Cell *Context::make_continuation() {
-  Cell *c = alloc(Cell::Cont);
-
-  // Allocate a cellvector to hold the continutation (saved
-  // machine stack).
-
   int msize = m_stack.size();
   cellvector *cv = cellvector::alloc(msize);
-  c->flag(Cell::VREF, true);
-  c->val = Cell::ContVal{cv};
-
   for (int ix = 0; ix < msize; ++ix)
     cv->set(ix, m_stack[ix]);
+  Cell *c = alloc<Cell::Cont>(cv);
+  c->flag(Cell::VREF, true);
 
   return c;
 }
 
 void Context::load_continuation(Cell *cont) {
-  cont->typecheck(Cell::Cont);
+  cont->typecheck(Cell::Type::Cont);
 
   cellvector *cv = cont->unsafe_vector_value();
   int msize = cv->size();

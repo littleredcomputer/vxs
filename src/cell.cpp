@@ -11,13 +11,6 @@
 
 static const char *nomem_error = "out of memory";
 
-Cell *Context::make() {
-  Cell *c = alloc(Cell::Cons);
-  c->set_unsafe_car(&Cell::Nil);
-  c->set_unsafe_cdr(&Cell::Nil);
-  return c;
-}
-
 Cell *Context::make_int(intptr_t i) {
 // SHORT INTEGER support: if the integer fits in 24 bits,
 // then return a phony pointer with the short flag set and
@@ -28,75 +21,22 @@ Cell *Context::make_int(intptr_t i) {
     return reinterpret_cast<Cell *>((i << 8) | Cell::SHORT | Cell::ATOM);
   }
 #endif
-  Cell *c = alloc(Cell::Int);
-  c->init_int(i);
-
-  return c;
-}
-
-Cell *Context::make_char(char ch) {
-  Cell *c = alloc(Cell::Char);
-  c->init_char(ch);
-  return c;
-}
-
-Cell *Context::make_real(double d) {
-  Cell *c = alloc(Cell::Real);
-  c->init_real(d);
-  return c;
+  return alloc<intptr_t>(i);
 }
 
 // Context::make_string
 //   Makes a string of the indicated length -- it is UNINITIALIZED
 
-Cell *Context::make_string(size_t len) {
-  Cell *c = alloc(Cell::String);
-  c->init_string(std::string(len, '\0'));
-  return c;
+Cell *Context::make_iport(const std::string &fname) {
+  return make_iport(fname.c_str());
 }
 
-Cell *Context::make_string(int len, char ch) {
-  Cell *c = make_string(len);
-  memset(c->StringValue(), ch, len);
-  c->StringValue()[len] = '\0';
-  return c;
-}
-
-Cell *Context::make_string(const char *s) { return make_string(s, strlen(s)); }
-
-Cell *Context::make_string(const char *s, size_t len) {
-  Cell *c = make_string(len);
-  strncpy(c->StringValue(), s, len);
-  c->StringValue()[len] = '\0';
-  return c;
-}
-
-Cell *Context::make_subr(subr_f s, const char *name) {
-  Cell *c = alloc(Cell::Subr);
-  c->init_subr(s, name);
-  return c;
-}
-
-Cell *Context::make_builtin(psymbol y) {
-  Cell *c = alloc(Cell::Builtin);
-  c->init_builtin(y);
-  return c;
-}
-
-Cell *Context::make_symbol(psymbol y) {
-  Cell *c = alloc(Cell::Symbol);
-  c->init_symbol(y);
-
-  return c;
-}
-
-Cell *Context::make_boolean(bool b) {
-  return b ? &Cell::Bool_T : &Cell::Bool_F;
+Cell *Context::make_oport(const std::string &fname) {
+  return make_oport(fname.c_str());
 }
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
-  Cell *c = alloc(Cell::Vec);
-  c->val = Cell::VecVal{cellvector::alloc(n)};
+  Cell *c = alloc<Cell::Vec>(cellvector::alloc(n));
   c->flag(Cell::VREF, true);
 
   for (int ix = 0; ix < n; ++ix)
@@ -114,13 +54,6 @@ Cell *Context::make_iport(const char *fname) {
   return nil;
 }
 
-Cell *Context::make_iport(FILE *ip) {
-  Cell *c = alloc(Cell::Iport);
-  c->init_iport(ip);
-
-  return c;
-}
-
 Cell *Context::make_oport(const char *fname) {
   FILE *ofs = fopen(fname, "w");
   if (ofs)
@@ -130,60 +63,18 @@ Cell *Context::make_oport(const char *fname) {
   return nil;
 }
 
-Cell *Context::make_oport(FILE *op) {
-  Cell *c = alloc(Cell::Oport);
-  c->init_oport(op);
-
-  return c;
-}
-
-Cell *Context::make(Cell *ca, Cell *cd /* = &Nil*/) {
-  Cell *c = alloc(Cell::Cons);
-  c->val = Cell::ConsPair{ca, cd};
-  return c;
-}
-
-Cell *Context::make_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
-  Cell *c = alloc(Cell::Magic);
-  c->init_magic(key, set_f, get_f);
-  return c;
-}
-
 Cell *Cell::notcons() {
   error("expecting a Cons");
   return nil;
 }
 
 bool Cell::ispair() {
-  return type() == Cell::Cons && this != unspecified && this != nil;
+  return type() == Type::Cons && this != unspecified && this != nil;
 }
 
 void Cell::sanity_check() {
-  int bad = 0;
-
-  // Make sure that there are enough typebits to contain
-  // all the types we know about.
-
-  if ((1 << TYPEBITS) < NUM_ATOMS)
-    ++bad, printf("Not enough typebits!\n");
-
-  // Make sure that the size of a cell has not become greater
-  // than two machine pointers (car & cdr).
-
-  if (sizeof(Cell) > 2 * sizeof(void *))
-    printf("Cell (%zu) is larger than CAR+CDR!\n", sizeof(Cell));
-
-  // Make sure that the "zero zone" (the least significant
-  // bits of a pointer to a cell) is wide enough to accomodate
-  // the type and GC information stored there, assuming that
-  // a Cell is aligned to its own size in memory
-
-  if (sizeof(Cell) < (1 << TAGBITS))
-    ++bad, printf("Too many tag bits for cell size\n");
-
-  if (bad)
-    exit(bad);
-};
+  // Cell structure validation
+}
 
 bool Cell::eq(Cell *that) {
   if (this == that)
@@ -202,16 +93,16 @@ bool Cell::equal(Cell *c) {
     return true;
   if (short_atom(this) || short_atom(c))
     return false;
-    
+
   Type t0 = type();
   Type t1 = c->type();
 
   if (this == &Nil && c == &Nil)
     return true;
-  else if (t0 == Cons && t1 == Cons)
-    return std::get<ConsPair>(val).car->equal(std::get<ConsPair>(c->val).car) &&
-           std::get<ConsPair>(val).cdr->equal(std::get<ConsPair>(c->val).cdr);
-  else if (t0 == Vec && t1 == Vec) {
+  else if (t0 == Type::Cons && t1 == Type::Cons)
+    return std::get<Cons>(val).car->equal(std::get<Cons>(c->val).car) &&
+           std::get<Cons>(val).cdr->equal(std::get<Cons>(c->val).cdr);
+  else if (t0 == Type::Vec && t1 == Type::Vec) {
     cellvector *cv = VectorValue();
     cellvector *ocv = c->VectorValue();
     int s = cv->size();
@@ -224,9 +115,9 @@ bool Cell::equal(Cell *c) {
         return false;
 
     return true;
-  } else if (t0 == String && t1 == String)
-    return !strcmp(StringValue(), c->StringValue());
-  else if (t0 == Real && t1 == Real)
+  } else if (t0 == Type::String && t1 == Type::String)
+    return StringValue() == c->StringValue();
+  else if (t0 == Type::Real && t1 == Type::Real)
     return RealValue() == c->RealValue();
   else
     return eq(c);
@@ -269,102 +160,103 @@ Cell *Cell::cdddar(const Cell *c) { return Cell::cdr(Cell::cddar(c)); }
 Cell *Cell::cddddr(const Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
 
 psymbol Cell::SymbolValue() const {
-  typecheck(Symbol);
-  return std::get<SymbolVal>(val).s;
+  typecheck(Type::Symbol);
+  return std::get<Symbol>(val).s;
 }
 
 void Cell::stats() {
-  for (int ix = 0; ix < NUM_TYPES; ++ix)
+  for (size_t ix = 0; ix < static_cast<size_t>(Type::NUM_TYPES); ++ix)
     printf("%s %d ", typeName[ix], typeCount[ix]);
 
   printf("\n");
 }
 
-//======================================================================
-//
-//              Value Extractors
-//
-//======================================================================
-
 intptr_t Cell::IntValue() const {
-  if (short_atom(this)) return reinterpret_cast<intptr_t>(this) >> 8;
-  typecheck(Int);
+  if (short_atom(this))
+    return reinterpret_cast<intptr_t>(this) >> 8;
+  typecheck(Type::Int);
   return std::get<intptr_t>(val);
 }
 
 char Cell::CharValue() const {
-  typecheck(Char);
+  typecheck(Type::Char);
   return std::get<char>(val);
 }
 
-const Cell::SubrVal *Cell::SubrValue() const {
-  typecheck(Subr);
-  return &std::get<SubrVal>(val);
+const Cell::Subr *Cell::SubrValue() const {
+  typecheck(Type::Subr);
+  return &std::get<Subr>(val);
 }
 
-char *Cell::StringValue() const {
-  typecheck(String);
-  return const_cast<char*>(std::get<std::string>(val).c_str());
+const std::string &Cell::StringValue() const {
+  typecheck(Type::String);
+  return std::get<std::string>(val);
+}
+
+std::string &Cell::mutable_string() {
+  typecheck(Type::String);
+  return std::get<std::string>(val);
 }
 
 size_t Cell::StringLength() const {
-  typecheck(String);
+  typecheck(Type::String);
   return std::get<std::string>(val).length();
 }
 
 FILE *Cell::IportValue() const {
-  typecheck(Iport);
-  return std::get<IportVal>(val).f;
+  typecheck(Type::Iport);
+  return std::get<Iport>(val).f;
 }
 
 FILE *Cell::OportValue() const {
-  typecheck(Oport);
-  return std::get<OportVal>(val).f;
+  typecheck(Type::Oport);
+  return std::get<Oport>(val).f;
 }
 
-
-
 cellvector *Cell::VectorValue() const {
-  typecheck(Vec);
-  return std::get<VecVal>(val).cv;
+  typecheck(Type::Vec);
+  return std::get<Vec>(val).cv;
 }
 
 cellvector *Cell::CProcValue() const {
-  typecheck(Cproc);
-  return std::get<CprocVal>(val).cv;
+  typecheck(Type::Cproc);
+  return std::get<Cproc>(val).cv;
 }
 
 Cell *Cell::PromiseValue() const {
-  typecheck(Promise);
-  return std::get<PromiseVal>(val).cv->get(0);
+  typecheck(Type::Promise);
+  return std::get<Promise>(val).cv->get(0);
 }
 
 Cell *Cell::CPromiseValue() const {
-  typecheck(Cpromise);
-  return std::get<CpromiseVal>(val).cv->get(0);
+  typecheck(Type::Cpromise);
+  return std::get<Cpromise>(val).cv->get(0);
 }
 
 psymbol Cell::BuiltinValue() const {
-  typecheck(Builtin);
-  return std::get<BuiltinVal>(val).s;
+  typecheck(Type::Builtin);
+  return std::get<Builtin>(val).s;
 }
 
 Cell::Procedure Cell::LambdaValue() const {
-  typecheck(Lambda);
-  cellvector* cv = std::get<LambdaVal>(val).cv;
+  typecheck(Type::Lambda);
+  cellvector *cv = std::get<Lambda>(val).cv;
   return Procedure(cv->get(0), cv->get(1), cv->get(2));
 }
 
 double Cell::RealValue() const {
-  typecheck(Real);
+  typecheck(Type::Real);
   return std::get<double>(val);
 }
 
-const char *Cell::name() const { return typeName[type()]; }
+const char *Cell::name() const {
+  return typeName[static_cast<size_t>(type())];
+}
 
 void Cell::typefail(Type actual, Type wanted) const {
   fprintf(stderr, "caught: type check failure: wanted %s, got %s\n",
-          typeName[wanted], typeName[actual]);
+          typeName[static_cast<size_t>(wanted)],
+          typeName[static_cast<size_t>(actual)]);
   abort();
 }
 
@@ -375,38 +267,42 @@ void Cell::dump(FILE *out) {
   if (m_gc_mark)
     fputs("mark ", out);
 
-  if (flag(FORCED)) fputs("forced ", out);
-  if (flag(QUICK)) fputs("quick ", out);
-  if (flag(MACRO)) fputs("macro ", out);
-  if (flag(VREF)) fputs("vref ", out);
+  if (flag(FORCED))
+    fputs("forced ", out);
+  if (is_quickened())
+    fputs("quick ", out);
+  if (flag(MACRO))
+    fputs("macro ", out);
+  if (flag(VREF))
+    fputs("vref ", out);
 
-  fputs(typeName[t], out);
+  fputs(typeName[static_cast<size_t>(t)], out);
 
   switch (t) {
-  case Cons:
+  case Type::Cons:
     fputs(" ", out);
-    if (std::get<ConsPair>(val).car == nil)
+    if (std::get<Cons>(val).car == nil)
       fputs("nil", out);
     else
-      fprintf(out, "%p", std::get<ConsPair>(val).car);
+      fprintf(out, "%p", std::get<Cons>(val).car);
     fputs(" ", out);
-    if (std::get<ConsPair>(val).cdr == nil)
+    if (std::get<Cons>(val).cdr == nil)
       fputs("nil", out);
     else
-      fprintf(out, "%p", std::get<ConsPair>(val).cdr);
+      fprintf(out, "%p", std::get<Cons>(val).cdr);
     break;
 
-  case Int:
+  case Type::Int:
     fprintf(out, " %" PRIdPTR, std::get<intptr_t>(val));
     break;
-  case Real:
+  case Type::Real:
     fprintf(out, " %g", std::get<double>(val));
     break;
-  case Unique:
-    fprintf(out, " %s", std::get<Cell::UniqueVal>(val).s);
+  case Type::Unique:
+    fprintf(out, " %s", std::get<Cell::Unique>(val).s);
     break;
-  case Symbol:
-    fprintf(out, " %s", std::get<Cell::SymbolVal>(val).s->key);
+  case Type::Symbol:
+    fprintf(out, " %s", std::get<Cell::Symbol>(val).s->key);
     break;
   default:
     break;
@@ -609,7 +505,7 @@ private:
 
 int Slab::slabsize = 10000;
 
-Cell *Context::alloc(Cell::Type t) {
+Cell *Context::raw_alloc() {
   Cell *a;
 
   mem.last_alloc_gc = false;
@@ -619,8 +515,7 @@ TOP:
   if ((a = mem.free)) {
     ++cellsAlloc;
     mem.free = a->next_free();
-    
-    a->set_type(t);
+
     a->m_flags = 0;
     a->m_gc_mark = false;
     a->m_gc_alt_bit = false;
@@ -651,7 +546,6 @@ TOP:
 
   if ((a = mem.current()->alloc())) {
     ++cellsAlloc;
-    a->set_type(t);
     a->m_flags = 0;
     a->m_gc_mark = false;
     a->m_gc_alt_bit = false;
@@ -680,25 +574,19 @@ TOP:
 // GARBAGE COLLECTION
 //
 
-
-
-inline 
-
-inline 
-
 //----------------------------------------------------------------------
-// Marking for Garbage Collection
-//
-// This implementation is Knuth's Algorithm 2.3.5E (TAoCP 3ed. vol I
-// p. 418) We follow Knuth's presentation carefully (using the same
-// variable names and statement labels).  Like the evaluator, this
-// code has to take some care to avoid recursion: we want to be able
-// to perform a GC mark wihtout allocating any additional space (not
-// even C stack space).  That accounts for some of the complexity in
-// this routine.  The other part is that, due to vectors, we have to
-// support n-way marking instead of just 2-way marking.
+    // Marking for Garbage Collection
+    //
+    // This implementation is Knuth's Algorithm 2.3.5E (TAoCP 3ed. vol I
+    // p. 418) We follow Knuth's presentation carefully (using the same
+    // variable names and statement labels).  Like the evaluator, this
+    // code has to take some care to avoid recursion: we want to be able
+    // to perform a GC mark wihtout allocating any additional space (not
+    // even C stack space).  That accounts for some of the complexity in
+    // this routine.  The other part is that, due to vectors, we have to
+    // support n-way marking instead of just 2-way marking.
 
-void Context::mark(Cell *P) {
+    void Context::mark(Cell *P) {
   bool traceall = false; // OS::flag(TRACE_GC_ALL);
   if (P == nil || P == 0 || Cell::short_atom(P) || P->m_gc_mark)
     return;
@@ -722,8 +610,8 @@ E2:
         cv->gc_index = 0;
         T = P;
       }
-    } else if (P->type() == Cell::Symbol) {
-      psymbol ps = std::get<Cell::SymbolVal>(P->val).s;
+    } else if (P->type() == Cell::Type::Symbol) {
+      psymbol ps = std::get<Cell::Symbol>(P->val).s;
       if (ps->plist && ps->plist->gc_uplink == 0 && ps->plist->size() > 0) {
         ps->plist->gc_uplink = T;
         ps->plist->gc_index = 0;
@@ -734,10 +622,10 @@ E2:
   }
 
   if (!Cell::atomic(P)) {
-    Q = std::get<Cell::ConsPair>(P->val).car; // E4
+    Q = std::get<Cell::Cons>(P->val).car; // E4
     if (Q != nil && !Cell::short_atom(Q) && !Q->m_gc_mark) {
       P->m_gc_alt_bit = true;
-      std::get<Cell::ConsPair>(P->val).car = T;
+      std::get<Cell::Cons>(P->val).car = T;
       T = P;
       P = Q;
       goto E2;
@@ -746,9 +634,9 @@ E2:
 
 E5:
   if (!Cell::atomic(P)) {
-    Q = std::get<Cell::ConsPair>(P->val).cdr;
+    Q = std::get<Cell::Cons>(P->val).cdr;
     if (Q != nil && !Cell::short_atom(Q) && !Q->m_gc_mark) {
-      std::get<Cell::ConsPair>(P->val).cdr = T;
+      std::get<Cell::Cons>(P->val).cdr = T;
       T = P;
       P = Q;
       goto E2;
@@ -767,7 +655,7 @@ E6:
     int i = cv->gc_index++;
     if (i >= cv->size()) {
       T = cv->gc_uplink;
-      cv->gc_index = 0; 
+      cv->gc_index = 0;
       P = Q;
       goto E6;
     } else {
@@ -776,8 +664,8 @@ E6:
         goto next_element;
       goto E2;
     }
-  } else if (Q->type() == Cell::Symbol) {
-    psymbol ps = std::get<Cell::SymbolVal>(Q->val).s;
+  } else if (Q->type() == Cell::Type::Symbol) {
+    psymbol ps = std::get<Cell::Symbol>(Q->val).s;
   next_property:
     int i = ps->plist->gc_index++;
     if (i >= ps->plist->size()) {
@@ -796,13 +684,13 @@ E6:
 
   if (Q->m_gc_alt_bit) {
     Q->m_gc_alt_bit = false;
-    T = std::get<Cell::ConsPair>(Q->val).car;
-    std::get<Cell::ConsPair>(Q->val).car = P;
+    T = std::get<Cell::Cons>(Q->val).car;
+    std::get<Cell::Cons>(Q->val).car = P;
     P = Q;
     goto E5;
   } else {
-    T = std::get<Cell::ConsPair>(Q->val).cdr;
-    std::get<Cell::ConsPair>(Q->val).cdr = P;
+    T = std::get<Cell::Cons>(Q->val).cdr;
+    std::get<Cell::Cons>(Q->val).cdr = P;
     P = Q;
     goto E6;
   }
@@ -814,7 +702,8 @@ void Slab::sweep(Context *ctx) {
   for (Cell *p = start; p < next; ++p) {
     if (p->m_gc_mark) {
       p->m_gc_mark = false;
-    } else if (p->type() != Cell::Free && !std::holds_alternative<Cell::FreeVal>(p->val)) {
+    } else if (p->type() != Cell::Type::Free &&
+               !std::holds_alternative<Cell::Free>(p->val)) {
       if (traceall) {
         printf("s ");
         p->dump(stdout);
@@ -823,30 +712,31 @@ void Slab::sweep(Context *ctx) {
       Cell::Type t = p->type();
 
       switch (t) {
-      case Cell::Cont:
-      case Cell::Promise:
-      case Cell::Cproc:
-      case Cell::Cpromise:
-      case Cell::Lambda:
-      case Cell::Vec: 
+      case Cell::Type::Cont:
+      case Cell::Type::Promise:
+      case Cell::Type::Cproc:
+      case Cell::Type::Cpromise:
+      case Cell::Type::Lambda:
+      case Cell::Type::Vec:
         p->unsafe_vector_value()->free();
         break;
-      case Cell::Iport: 
-        if (FILE *f = std::get<Cell::IportVal>(p->val).f) fclose(f);
+      case Cell::Type::Iport:
+        if (FILE *f = std::get<Cell::Iport>(p->val).f)
+          fclose(f);
         break;
-      case Cell::Oport:
-        if (FILE *f = std::get<Cell::OportVal>(p->val).f) fclose(f);
+      case Cell::Type::Oport:
+        if (FILE *f = std::get<Cell::Oport>(p->val).f)
+          fclose(f);
         break;
-      case Cell::Magic:
-        delete std::get<Cell::MagicBox*>(p->val);
+      case Cell::Type::Magic:
+        delete std::get<Cell::MagicBox *>(p->val);
         break;
       default:
         break;
       }
 
       --ctx->cellsAlloc;
-      p->set_type(Cell::Free);
-      std::get<Cell::FreeVal>(p->val).next = ctx->mem.free;
+      p->val = Cell::Free{ctx->mem.free};
       ctx->mem.free = p;
       ++ctx->mem.c_free;
     }
@@ -948,28 +838,27 @@ void Context::print_mem_stats(FILE *out) {
   fprintf(out, "; mem %d/%d\n", cellsAlloc, cellsTotal);
 }
 
-
 bool Cell::is_symbol(psymbol s) const {
-  if (short_atom(this)) return false;
-  return type() == Cell::Symbol && std::get<Cell::SymbolVal>(val).s == s;
+  if (short_atom(this))
+    return false;
+  return is<Symbol>() && std::get<Symbol>(val).s == s;
 }
 
 void *Context::xmalloc(size_t n) {
   void *p = malloc(n);
   if (!p) {
-    fprintf(stderr, "Virtual memory exhausted\\n");
+    fprintf(stderr, "Virtual memory exhausted\n");
     exit(1);
   }
   return p;
 }
 
-
-const Cell::InsnVal* Cell::InsnValue() const {
-  typecheck(Insn);
-  return &std::get<InsnVal>(val);
+const Cell::Insn *Cell::InsnValue() const {
+  typecheck(Type::Insn);
+  return &std::get<Insn>(val);
 }
 
-Cell::InsnVal* Cell::InsnValue() {
-  typecheck(Insn);
-  return &std::get<InsnVal>(val);
+Cell::Insn *Cell::InsnValue() {
+  typecheck(Type::Insn);
+  return &std::get<Insn>(val);
 }

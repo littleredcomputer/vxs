@@ -149,8 +149,8 @@ TOP:
         r_nu = make_vector(vl);
         cellvector *vec = r_nu->VectorValue();
         int ix = 0;
-        FOR_EACH(elt, Cell::car(&r_argl))
-        vec->set(ix++, Cell::car(elt));
+        for (Cell *elt = Cell::car(&r_argl); elt != nil; elt = Cell::cdr(elt))
+          vec->set(ix++, Cell::car(elt));
         READ_RETURN(r_nu);
       }
       l_append(r_argl, r_nu);
@@ -330,7 +330,7 @@ Cell *Context::read(FILE *fp) {
 }
 
 void Cell::real_to_string(double d, char *buf, int nbytes) {
-  snprintf(buf, sizeof(buf), "%.15g", d);
+  snprintf(buf, nbytes, "%.15g", d);
 
   // Now if buf contains neither a `.' nor an `e', then
   // the number was whole, and it won't "read back" as
@@ -353,54 +353,54 @@ void Cell::write(sstring &ss) const {
   else {
     Type t = type();
     switch (t) {
-    case Int: {
+    case Type::Int: {
       char buf[40];
       snprintf(buf, sizeof(buf), "%" PRIdPTR, IntValue());
       ss.append(buf);
       break;
     }
-    case Symbol:
+    case Type::Symbol:
       ss.append(SymbolValue()->key);
       break;
-    case Builtin:
+    case Type::Builtin:
       ss.append("#<builtin ");
       ss.append(BuiltinValue()->key);
       ss.append(">");
       break;
-    case Char:
+    case Type::Char:
       ss.append("#\\");
       // XXX escaping?
       ss.append(CharValue());
       break;
-    case Iport:
+    case Type::Iport:
       ss.append("#<input-port>");
       break;
-    case Oport:
+    case Type::Oport:
       ss.append("#<output-port>");
       break;
-    case Subr:
+    case Type::Subr:
       ss.append("#<subr ");
       ss.append(SubrValue()->name);
       ss.append('>');
       break;
-    case Cont:
+    case Type::Cont:
       ss.append("#<continuation>");
       break;
-    case Real: {
+    case Type::Real: {
       char buf[80];
       real_to_string(RealValue(), buf, sizeof(buf));
       ss.append(buf);
       break;
     }
-    case Unique:
+    case Type::Unique:
       // "Unique" objects (like #t and EOF) keep their
       // printed representations in their cdrs.
-      ss.append(std::get<Cell::UniqueVal>(val).s);
+      ss.append(std::get<Cell::Unique>(val).s);
       break;
-    case Cons: {
+    case Type::Cons: {
       const Cell *d;
       ss.append('(');
-      for (d = this; d->type() == Cons; d = cdr(d)) {
+      for (d = this; d->type() == Type::Cons; d = cdr(d)) {
         if (d == nil) {
           ss.append(')');
           return;
@@ -414,11 +414,10 @@ void Cell::write(sstring &ss) const {
       ss.append(')');
       break;
     }
-    case String: {
-      char *p = StringValue();
-      char ch;
+    case Type::String: {
+      const std::string &str = StringValue();
       ss.append('"');
-      while ((ch = *p++)) {
+      for (char ch : str) {
         if (ch == '"')
           ss.append("\\\"");
         else if (ch == '\\')
@@ -431,7 +430,7 @@ void Cell::write(sstring &ss) const {
       ss.append('"');
       break;
     }
-    case Vec: {
+    case Type::Vec: {
       cellvector *v = VectorValue();
       ss.append("#(");
       for (int ix = 0; ix < v->size(); ++ix) {
@@ -442,7 +441,7 @@ void Cell::write(sstring &ss) const {
       ss.append(')');
       break;
     }
-    case Lambda: {
+    case Type::Lambda: {
       Procedure proc = LambdaValue();
       ss.append(flag(MACRO) ? "#<macro " : "#<lambda ");
       if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
@@ -456,21 +455,21 @@ void Cell::write(sstring &ss) const {
       }
       break;
     }
-    case Promise:
+    case Type::Promise:
       ss.append("#<promise ");
       PromiseValue()->write(ss);
       ss.append('>');
       break;
-    case Cproc:
+    case Type::Cproc:
       ss.append("#<compiled-procedure>");
       break;
-    case Cpromise:
+    case Type::Cpromise:
       if (flag(FORCED))
         CPromiseValue()->write(ss);
       else
         ss.append("#<compiled-promise>");
       break;
-    case Insn:
+    case Type::Insn:
       ss.append("#<vm-instruction>");
       break;
     default:
@@ -481,11 +480,11 @@ void Cell::write(sstring &ss) const {
 
 void Cell::display(FILE *out) {
   switch (type()) {
-  case Char:
+  case Type::Char:
     fputc(CharValue(), out);
     break;
-  case String:
-    fputs(StringValue(), out);
+  case Type::String:
+    fputs(StringValue().c_str(), out);
     break;
   default:
     write(out);
