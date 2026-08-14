@@ -58,7 +58,7 @@ static vm_insn _callcc_procedure_insns[] = {
 
 static vm_cproc _callcc_procedure = {
     _callcc_procedure_insns,
-    sizeof(_callcc_procedure_insns) / sizeof(*_callcc_procedure_insns),
+    static_cast<unsigned int>(std::size(_callcc_procedure_insns)),
     0, // literals
     0, // # literals
     0, // starting insn
@@ -77,9 +77,8 @@ public:
         {"with-input-from-file", with_input_from_file},
         {"time", time},
     };
-    static const unsigned int n_bindings = sizeof(bindings) / sizeof(*bindings);
-    for (unsigned int ix = 0; ix < n_bindings; ++ix) {
-      ctx->bind_subr(bindings[ix].name, bindings[ix].subr);
+    for (const auto &b : bindings) {
+      ctx->bind_subr(b.name, b.subr);
     }
     // Compile the procedure stub for a saved continuation
     ctx->cc_procedure = ctx->load_instructions(&_callcc_procedure);

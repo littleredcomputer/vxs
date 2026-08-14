@@ -1337,9 +1337,9 @@ static Cell *sk_impl_platform(Context *ctx, Cell *arglist) {
 
 static Cell *file_exists_p(Context *ctx, Cell *arglist) {
   FILE *ip = fopen(car(arglist)->StringValue().c_str(), "r");
-  if (ip != NULL)
+  if (ip != nullptr)
     fclose(ip);
-  return ctx->make_boolean(ip != NULL);
+  return ctx->make_boolean(ip != nullptr);
 }
 
 //
@@ -1390,7 +1390,7 @@ static Cell *get_property(Context *ctx, Cell *arglist) {
 
 Cell *bound_p(Context *ctx, Cell *arglist) {
   psymbol s = car(arglist)->SymbolValue();
-  return ctx->make_boolean(ctx->find_var(ctx->root(), s, 0) != NULL);
+  return ctx->make_boolean(ctx->find_var(ctx->root(), s, 0) != nullptr);
 }
 
 // Imported from Common Lisp.  Retrieves the value of a symbol in the
@@ -1635,8 +1635,8 @@ void Context::provision() {
       //----------------------------------------------------------------
   };
 
-  for (unsigned int ix = 0; ix < sizeof(subr) / sizeof(*subr); ++ix)
-    bind_subr(subr[ix].n, subr[ix].i);
+  for (const auto &s_desc : subr)
+    bind_subr(s_desc.n, s_desc.i);
 
   // Source code in SICP uses the symbols `true' and `false' for
   // boolean values instead of #t and #f as suggested by RxRS.

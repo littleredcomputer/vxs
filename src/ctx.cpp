@@ -154,5 +154,5 @@ Cell *Context::RunMain() {
   if (SchemeExtension::HaveMain())
     return SchemeExtension::RunMain(this);
 
-  return NULL;
+  return nullptr;
 }

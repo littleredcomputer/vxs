@@ -174,7 +174,6 @@ const char *Cell::name() const {
                                [](const Promise &) { return "promise"; },
                                [](const Cont &) { return "continuation"; },
                                [](const Builtin &) { return "builtin"; },
-                               [](MagicBox *) { return "magic"; },
                                [](const Insn &) { return "insn"; },
                                [](const Cproc &) { return "cproc"; },
                                [](const Cpromise &) { return "cpromise"; },
@@ -449,7 +448,7 @@ TOP:
     // Configurable slabsize
 
     char *c;
-    if ((c = getenv("SLABSIZE")) != NULL)
+    if ((c = getenv("SLABSIZE")) != nullptr)
       Slab::slabsize = atoi(c);
 
     mem.active.push((Cell *)new Slab(this));
@@ -498,7 +497,7 @@ TOP:
 // p. 418) We follow Knuth's presentation carefully (using the same
 // variable names and statement labels).  Like the evaluator, this
 // code has to take some care to avoid recursion: we want to be able
-// to perform a GC mark wihtout allocating any additional space (not
+// to perform a GC mark without allocating any additional space (not
 // even C stack space).  That accounts for some of the complexity in
 // this routine.  The other part is that, due to vectors, we have to
 // support n-way marking instead of just 2-way marking.
@@ -634,8 +633,6 @@ void Slab::sweep(Context *ctx) {
       } else if (auto *op = p->get_if<Cell::Oport>()) {
         if (op->f)
           fclose(op->f);
-      } else if (auto *mb = p->get_if<Cell::MagicBox *>()) {
-        delete *mb;
       }
 
       --ctx->cellsAlloc;

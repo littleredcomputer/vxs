@@ -31,7 +31,7 @@ uint32_t debug_flags() {
   static uint32_t f = 0;
   if (!env_checked) {
     char *c;
-    if ((c = getenv("T")) != NULL)
+    if ((c = getenv("T")) != nullptr)
       f = strtoul(c, 0, 0);
     env_checked = true;
   }

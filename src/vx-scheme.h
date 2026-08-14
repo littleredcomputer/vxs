@@ -7,10 +7,12 @@
 //
 // vx-scheme.h : class definitions
 
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include <string>
 #include <unistd.h>
@@ -46,9 +48,7 @@ inline bool debug_flag(DebugFlag bit) {
 }
 double vx_get_time();
 
-typedef Cell *(*subr_f)(Context *ctx, Cell *arglist);
-typedef void (*magic_set_f)(Context *, void *key, Cell *rhs);
-typedef Cell *(*magic_get_f)(Context *, void *key);
+using subr_f = Cell *(*)(Context *ctx, Cell *arglist);
 extern Cell *nil;
 extern Cell *unspecified;
 extern Cell *unassigned;
@@ -155,14 +155,15 @@ private:
 // so that, when we try the VxWorks symbol table after all else has failed,
 // we can respect the case of the sybmol as written.
 
-typedef struct _symbol {
-  struct _symbol *llink; // Left binary tree link */
-  struct _symbol *rlink; // Right binary tree link */
-  const char *key;       // Search key (symbol name) */
-  const char *truename;  // case-sensitive name, if diff. */
-  cellvector *plist;     // property list */
-  short b;               // Balance factor */
-} symbol, *psymbol;
+struct symbol {
+  symbol *llink = nullptr; // Left binary tree link
+  symbol *rlink = nullptr; // Right binary tree link
+  const char *key = nullptr; // Search key (symbol name)
+  const char *truename = nullptr; // case-sensitive name, if diff.
+  cellvector *plist = nullptr; // property list
+  int16_t b = 0; // Balance factor
+};
+using psymbol = symbol *;
 
 psymbol intern(const char *name);
 psymbol intern(const std::string &name);
@@ -240,7 +241,7 @@ public:
   void ignore();
 
 private:
-  static const int stat_size = 32;
+  static constexpr size_t stat_size = 32;
   char c[stat_size];
 
   size_t sz;
@@ -257,21 +258,11 @@ private:
 // The Cell is the heart of the Scheme implementation.  It is the
 // universal container for all Scheme data types and also the central
 // structure supporting Scheme's garbage-collected memory model.
-// The economy of a Cell's realization is the single most significant
-// factor influencing the speed and space efficiency of a Scheme
-// system (with the possible exception of compilation, beyind the
-// scope of this header file).
 //
-// We consider it imperative that an ordinary cell be no larger than
-// two machine pointers (car and cdr); if a data object requires
-// more storage than this, we allocate extension words.
-//
-// For our implementation, we expect that a machine pointer is at
-// least four bytes, so that two of these (car,cdr) will occupy
-// eight bytes.  In consequence, we may therefore insist that the
-// storage for cells be 8-byte aligned, which gives us three bits at
-// the least-significant end of a cell pointer to use as type-tagging
-// information.
+// In modern vxs, Cell is a compact std::variant-backed value type
+// managed within Slab memory pools. Immediate integers are encoded
+// as tagged pointers (ATOM bit tag) requiring zero heap allocation.
+// Slabs ensure 2-byte minimum alignment for tagged pointer safety.
 
 class Cell {
   // friend class Context;
@@ -321,11 +312,6 @@ public:
     subr_f subr = nullptr;
     const char *name = nullptr;
     bool operator==(const Subr &o) const = default;
-  };
-  struct MagicBox {
-    void *key = nullptr;
-    magic_set_f set_f = nullptr;
-    magic_get_f get_f = nullptr;
   };
   struct LexAddr {
     static constexpr int16_t UNQUICKENED = -2;
@@ -450,12 +436,11 @@ public:
                                  Promise,     // 11: Promise
                                  Cont,        // 12: Cont
                                  Builtin,     // 13: Builtin
-                                 MagicBox *,  // 14: Magic
-                                 Insn,        // 15: Insn
-                                 Cproc,       // 16: Cproc
-                                 Cpromise,    // 17: Cpromise
-                                 Free,        // 18: Free
-                                 Cons         // 19: Cons
+                                 Insn,        // 14: Insn
+                                 Cproc,       // 15: Cproc
+                                 Cpromise,    // 16: Cpromise
+                                 Free,        // 17: Free
+                                 Cons         // 18: Cons
                                  >;
 
   CellValue val;
@@ -646,8 +631,6 @@ public:
                       val);
   }
   cellvector *unsafe_vector_value() const { return vector_payload(); }
-  MagicBox *unsafe_magic_box() const { return std::get<MagicBox *>(val); }
-  void *unsafe_magic_vp() const { return std::get<MagicBox *>(val)->key; }
 
   static void real_to_string(double, char *, int);
   double asReal() const {
@@ -710,47 +693,20 @@ static_assert(alignof(Cell) >= 2,
 // class Environment
 //
 // At the simplest level, an Environment is a mapping from symbols
-// to values.  Symbols are the hash codes maintained by the SymbolTable
-// class, and the value of any symbol is simply a pointer to a Scheme
-// cell.  To implement this simple data structure, we use an STL vector
-// of <symbol, Cell*> pairs.  This choice of data structure is guided
-// by some particularities of evaluation in Scheme (discussed below).
+// to values. Symbols are the hash codes maintained by the symbol table,
+// and the value of any symbol is a pointer to a Scheme cell.
 //
 // Environments are created by binding constructs (like let and lambda),
-// and a new environment is always linked to the environment in force
-// when it was created (this is called the "enclosing environment").
-// The enclosure chain always terminates at the global environment, which
-// is where the symbols representing the language's standard features
-// are bound.
+// and a new environment is linked to the enclosing environment in force
+// when it was created. The enclosure chain terminates at the global
+// environment.
 //
-// In Scheme, all variables are "lexically bound."  This means that
-// when a variable is mentioned in source code, one can determine the
-// binding for that variable at "compile time" by looking through the
-// stack of bindings crated by special forms capable of creating such
-// bindings (e.g., lambda, let, et al.).  The innermost matching binding
-// found represents the storage for the value of the variable, and
-// this can never change.
-//
-// This binding model creates the possibility of lexcial addressing, a
-// system in which a variable reference can be replaced by the "index"
-// of the storage in terms of the number of enclosing environments
-// that must be traversed together with the index of the target
-// variable within that environment.  This represents an extremely
-// efficient shortcut for variable value lookup.  This is why we
-// choose the vector data structure rather than an STL map: while a
-// vector is slower to search the first time a variable is referenced,
-// that initial search will reveal the "lexical address" of the
-// variable, which we can then store in place of the referring symbol.
-// It is therefore necessary that variable storage in an environment
-// never move, once allocated.  The simplest way to guarantee this is
-// to manage the bindings ourselves in a vector; the lexical address
-// can then be stored in the simple form of two integers and does not
-// depend on peculiarities of the data-structure implementation.
-//
-// We overload the concept of Environment with other data needed to
-// evaluate Scheme expressions.  For example, Scheme I/O primitives
-// like `with-input-from-file' provide for the presence of a stack
-// of open files which we maintain in this structure.
+// In Scheme, all variables are lexically bound. This binding model
+// creates the possibility of lexical addressing, a system in which
+// a variable reference can be replaced by the coordinate pair (e_skip, b_skip):
+// the number of enclosing environments to traverse, and the index within
+// that environment. Once resolved, the lexical address is cached directly
+// in the AST for fast subsequent lookup.
 
 class Context {
 
@@ -886,9 +842,6 @@ public:
   Cell *make_procedure(Cell *env, Cell *body, Cell *arglist);
   Cell *make_promise(Cell *env, Cell *body);
   Cell *make_macro(Cell *env, Cell *body, Cell *arglist);
-  Cell *make_magic(void *key, magic_set_f set_f, magic_get_f get_f) {
-    return alloc<Cell::MagicBox *>(new Cell::MagicBox{key, set_f, get_f});
-  }
   Cell *make_list1(Cell *);
   Cell *make_list2(Cell *, Cell *);
   Cell *make_list3(Cell *, Cell *, Cell *);
@@ -1082,7 +1035,7 @@ public:
   static void Register(SchemeExtension *ext);
   static void RunInstall(Context *, Cell *);
   static void MainProcedure(SchemeExtension *m) { main = m; }
-  static bool HaveMain() { return main != NULL; }
+  static bool HaveMain() { return main != nullptr; }
   static Cell *RunMain(Context *ctx) { return main->Run(ctx); }
 
   virtual void Install(Context *, Cell *) = 0;
@@ -1164,7 +1117,7 @@ extern psymbol s_callcc;
 // a compiled procedure into a C data structure that can be used to load
 // the bytecode.
 
-typedef unsigned char byte;
+using byte = uint8_t;
 
 struct vm_insn {
   byte opcode;

@@ -70,10 +70,7 @@ clean:
 		rm -f ../lib/slib_* ../lib/slibcat
 		rm -f core core.*
 
-# We don't want to distribute any Wind River simulator binary--just 
-# the project files.  So we clean before rolling a distro.  We nuke
-# the tornado makefiles so that the dependencies will be generated 
-# with the correct absolute pathnames.
+# Clean before rolling a distribution tarball/zip.
 
 distro:		clean 
 		(cd ../..; tar czhf $(PKG).tgz $(PKG)/)

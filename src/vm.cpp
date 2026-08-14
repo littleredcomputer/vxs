@@ -58,7 +58,7 @@ static const vm_op optab[] = {
     {"gset.", OP_INT},
 };
 
-static const int n_vmops = sizeof(optab) / sizeof(*optab);
+static constexpr auto n_vmops = std::size(optab);
 
 // exact_top_n: return true if the top n elements of the stack contained
 // in cv are of exact type (in this implementation, exact is synonymous
@@ -301,7 +301,7 @@ XEQ:
       error("reference to undefined global variable: ",
             insn->InsnValue()->Symbol()->key);
     } else {
-      if (cdr(r_val) == NULL)
+      if (cdr(r_val) == nullptr)
         error("yikes"); // XXX
       // Quicken the instruction.
       insn->InsnValue()->opcode = 43; // gref.  XXX: magic number (among others)
@@ -821,7 +821,7 @@ Cell *Context::load_compiled_procedure(vm_cproc *cp) {
     sstring litstr;
     litstr.append(cp->literals[ix]);
     Cell *lit = read(litstr);
-    if (lit == NULL)
+    if (lit == nullptr)
       error("undecipherable literal", cp->literals[ix]);
     litv->set(ix, lit);
   }
@@ -994,9 +994,8 @@ public:
         {"disassemble", disassemble},
         {"execute", execute},
     };
-    static const unsigned int n_bindings = sizeof(bindings) / sizeof(*bindings);
-    for (unsigned int ix = 0; ix < n_bindings; ++ix) {
-      ctx->bind_subr(bindings[ix].name, bindings[ix].subr);
+    for (const auto &b : bindings) {
+      ctx->bind_subr(b.name, b.subr);
     }
     // Initialize the macro table.
     ctx->set_var(envt, intern("__macro_table"), nil);

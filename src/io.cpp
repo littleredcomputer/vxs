@@ -86,7 +86,7 @@ TOP:
     save(r_argl);
     r_nu = read(in);
     restore(r_argl);
-    if (r_nu == NULL)
+    if (r_nu == nullptr)
       return Cell::car(&r_argl);
     if (dotmode == 1) {
       l_appendtail(r_argl, r_nu);
@@ -112,7 +112,7 @@ TOP:
 
     error("unexpected eof");
   } else if (c == '`') {
-    if ((r_nu = read(in)) != NULL) {
+    if ((r_nu = read(in)) != nullptr) {
       r_tmp = make_symbol(s_quasiquote);
       r_nu = make(r_nu);
       return cons(r_tmp, r_nu);
@@ -127,7 +127,7 @@ TOP:
       wrap = s_unquote_splicing;
     }
 
-    if ((r_nu = read(in)) != NULL) {
+    if ((r_nu = read(in)) != nullptr) {
       r_nu = make(r_nu);
       r_tmp = make_symbol(wrap);
       return cons(r_tmp, r_nu);
@@ -147,7 +147,7 @@ TOP:
       r_nu = read(in);
       restore(r_argl);
 
-      if (r_nu == NULL) {
+      if (r_nu == nullptr) {
         r_nu = make_vector(vl);
         cellvector *vec = r_nu->VectorValue();
         int ix = 0;

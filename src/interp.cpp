@@ -1319,26 +1319,17 @@ Cell *Context::get(Cell *env, Cell *c) {
   if (!pResult || !pResult->unsafe_cdr())
     error("unbound variable ", c->SymbolValue()->key);
 
-  Cell *res = pResult->unsafe_cdr();
-
-  if (res->is<Cell::MagicBox *>())
-    return res->unsafe_magic_box()->get_f(this, res->unsafe_magic_vp());
-  else
-    return res;
+  return pResult->unsafe_cdr();
 }
 
 void Context::set(Cell *env, Cell *var, Cell *value) {
   Cell *target = find(env, var);
-  Cell *d;
   psymbol s = var->SymbolValue();
 
   if (!target)
     error("unbound variable ", s->key);
 
-  if ((d = cdr(target)) && d->is<Cell::MagicBox *>())
-    d->unsafe_magic_box()->set_f(this, d->unsafe_magic_vp(), value);
-  else
-    Cell::setcdr(target, value);
+  Cell::setcdr(target, value);
 }
 
 Cell *Context::find(Cell *env, Cell *c) {
@@ -1524,11 +1515,11 @@ public:
         {"with-output-to-file", false},
     };
 
-    for (unsigned int ix = 0; ix < sizeof(builtin) / sizeof(*builtin); ++ix) {
-      psymbol ps = intern(builtin[ix].name);
+    for (const auto &b_desc : builtin) {
+      psymbol ps = intern(b_desc.name);
       Cell *b = ctx->make_builtin(ps);
       ctx->set_var(envt, ps, b);
-      if (builtin[ix].macro)
+      if (b_desc.macro)
         b->flag(Cell::Flag::Macro, true);
     }
   }
