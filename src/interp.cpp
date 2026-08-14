@@ -1314,7 +1314,6 @@ void Context::bind_arguments(Cell *env, Cell *variables, Cell *values) {
 }
 
 Cell *Context::get(Cell *env, Cell *c) {
-  c->typecheck(Cell::Type::Symbol);
   Cell *pResult = find(env, c);
 
   if (!pResult || !pResult->unsafe_cdr())
@@ -1473,8 +1472,6 @@ Cell *Context::make_continuation() {
 }
 
 void Context::load_continuation(Cell *cont) {
-  cont->typecheck(Cell::Type::Cont);
-
   cellvector *cv = cont->unsafe_vector_value();
   int msize = cv->size();
 

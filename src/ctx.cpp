@@ -14,12 +14,7 @@
 // Initialize Static Data
 //
 
-const char *Cell::typeName[] = {
-    "int",     "symbol", "unique", "string", "real",   "subr",
-    "lambda",  "vec",    "char",   "iport",  "oport",  "promise",
-    "cont",    "builtin", "magic",  "insn",   "cproc",  "cpromise",
-    "free",    "cons"};
-int Cell::typeCount[static_cast<size_t>(Type::NUM_TYPES)] = {0};
+
 
 psymbol s_unquote = intern("unquote");
 psymbol s_unquote_splicing = intern("unquote-splicing");

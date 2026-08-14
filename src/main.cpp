@@ -46,7 +46,6 @@ void interact(Context *ctx) {
 
   if (debug_flag(DEBUG_MEMSTATS_AT_EXIT)) {
     ctx->print_mem_stats(stdout);
-    Cell::stats();
   }
 
   exit(0);

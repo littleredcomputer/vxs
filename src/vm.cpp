@@ -219,7 +219,6 @@ Cell *Context::execute(Cell *proc, Cell *args) {
   cellvector *root_bindings = car(root_envt)->unsafe_vector_value();
 
 PROC:
-  r_cproc->typecheck(Cell::Type::Cproc);
   const cellvector *const v = r_cproc->unsafe_vector_value();
   insns = v->get(0)->unsafe_vector_value();
   literals = v->get(1)->unsafe_vector_value();
@@ -721,7 +720,6 @@ Cell *Context::make_compiled_promise(Cell *procedure) {
 }
 
 Cell *Context::force_compiled_promise(Cell *promise) {
-  promise->typecheck(Cell::Type::Cpromise);
   if (promise->flag(Cell::Flag::Forced))
     return promise->unsafe_vector_value()->get(0);
   Cell *val = execute(promise->unsafe_vector_value()->get(0), nil);

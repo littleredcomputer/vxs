@@ -159,109 +159,36 @@ Cell *Cell::cddadr(const Cell *c) { return Cell::cdr(Cell::cdadr(c)); }
 Cell *Cell::cdddar(const Cell *c) { return Cell::cdr(Cell::cddar(c)); }
 Cell *Cell::cddddr(const Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
 
-psymbol Cell::SymbolValue() const {
-  typecheck(Type::Symbol);
-  return std::get<Symbol>(val).s;
-}
-
-void Cell::stats() {
-  for (size_t ix = 0; ix < static_cast<size_t>(Type::NUM_TYPES); ++ix)
-    printf("%s %d ", typeName[ix], typeCount[ix]);
-
-  printf("\n");
-}
-
-intptr_t Cell::IntValue() const {
-  if (short_atom(this))
-    return reinterpret_cast<intptr_t>(this) >> 1;
-  typecheck(Type::Int);
-  return std::get<intptr_t>(val);
-}
-
-char Cell::CharValue() const {
-  typecheck(Type::Char);
-  return std::get<char>(val);
-}
-
-const Cell::Subr *Cell::SubrValue() const {
-  typecheck(Type::Subr);
-  return &std::get<Subr>(val);
-}
-
-const std::string &Cell::StringValue() const {
-  typecheck(Type::String);
-  return std::get<std::string>(val);
-}
-
-std::string &Cell::mutable_string() {
-  typecheck(Type::String);
-  return std::get<std::string>(val);
-}
-
-size_t Cell::StringLength() const {
-  typecheck(Type::String);
-  return std::get<std::string>(val).length();
-}
-
-FILE *Cell::IportValue() const {
-  typecheck(Type::Iport);
-  return std::get<Iport>(val).f;
-}
-
-FILE *Cell::OportValue() const {
-  typecheck(Type::Oport);
-  return std::get<Oport>(val).f;
-}
-
-cellvector *Cell::VectorValue() const {
-  typecheck(Type::Vec);
-  return std::get<Vec>(val).cv;
-}
-
-cellvector *Cell::CProcValue() const {
-  typecheck(Type::Cproc);
-  return std::get<Cproc>(val).cv;
-}
-
-Cell *Cell::PromiseValue() const {
-  typecheck(Type::Promise);
-  return std::get<Promise>(val).cv->get(0);
-}
-
-Cell *Cell::CPromiseValue() const {
-  typecheck(Type::Cpromise);
-  return std::get<Cpromise>(val).cv->get(0);
-}
-
-psymbol Cell::BuiltinValue() const {
-  typecheck(Type::Builtin);
-  return std::get<Builtin>(val).s;
-}
-
-Cell::Procedure Cell::LambdaValue() const {
-  typecheck(Type::Lambda);
-  cellvector *cv = std::get<Lambda>(val).cv;
-  return Procedure(cv->get(0), cv->get(1), cv->get(2));
-}
-
-double Cell::RealValue() const {
-  typecheck(Type::Real);
-  return std::get<double>(val);
-}
-
 const char *Cell::name() const {
-  return typeName[static_cast<size_t>(type())];
-}
-
-void Cell::typefail(Type actual, Type wanted) const {
-  fprintf(stderr, "caught: type check failure: wanted %s, got %s\n",
-          typeName[static_cast<size_t>(wanted)],
-          typeName[static_cast<size_t>(actual)]);
-  abort();
+  if (short_atom(this))
+    return "int";
+  return std::visit(
+      overloaded{
+          [](intptr_t) { return "int"; },
+          [](const Symbol &) { return "symbol"; },
+          [](const Unique &) { return "unique"; },
+          [](const std::string &) { return "string"; },
+          [](double) { return "real"; },
+          [](const Subr &) { return "subr"; },
+          [](const Lambda &) { return "lambda"; },
+          [](const Vec &) { return "vector"; },
+          [](char) { return "char"; },
+          [](const Iport &) { return "iport"; },
+          [](const Oport &) { return "oport"; },
+          [](const Promise &) { return "promise"; },
+          [](const Cont &) { return "continuation"; },
+          [](const Builtin &) { return "builtin"; },
+          [](MagicBox *) { return "magic"; },
+          [](const Insn &) { return "insn"; },
+          [](const Cproc &) { return "cproc"; },
+          [](const Cpromise &) { return "cpromise"; },
+          [](const Free &) { return "free"; },
+          [](const Cons &) { return "pair"; },
+          [](const auto &) { return "unknown"; }},
+      val);
 }
 
 void Cell::dump(FILE *out) {
-  Type t = type();
   fprintf(out, "[%p ", this);
 
   if (m_gc_mark)
@@ -276,36 +203,31 @@ void Cell::dump(FILE *out) {
   if (flag(Flag::VRef))
     fputs("vref ", out);
 
-  fputs(typeName[static_cast<size_t>(t)], out);
+  fputs(name(), out);
 
-  switch (t) {
-  case Type::Cons:
-    fputs(" ", out);
-    if (std::get<Cons>(val).car == nil)
-      fputs("nil", out);
-    else
-      fprintf(out, "%p", std::get<Cons>(val).car);
-    fputs(" ", out);
-    if (std::get<Cons>(val).cdr == nil)
-      fputs("nil", out);
-    else
-      fprintf(out, "%p", std::get<Cons>(val).cdr);
-    break;
-
-  case Type::Int:
-    fprintf(out, " %" PRIdPTR, std::get<intptr_t>(val));
-    break;
-  case Type::Real:
-    fprintf(out, " %g", std::get<double>(val));
-    break;
-  case Type::Unique:
-    fprintf(out, " %s", std::get<Cell::Unique>(val).s);
-    break;
-  case Type::Symbol:
-    fprintf(out, " %s", std::get<Cell::Symbol>(val).s->key);
-    break;
-  default:
-    break;
+  if (short_atom(this)) {
+    fprintf(out, " %" PRIdPTR, IntValue());
+  } else {
+    std::visit(
+        overloaded{
+            [&](const Cons &c) {
+              fputs(" ", out);
+              if (c.car == nil)
+                fputs("nil", out);
+              else
+                fprintf(out, "%p", c.car);
+              fputs(" ", out);
+              if (c.cdr == nil)
+                fputs("nil", out);
+              else
+                fprintf(out, "%p", c.cdr);
+            },
+            [&](intptr_t i) { fprintf(out, " %" PRIdPTR, i); },
+            [&](double d) { fprintf(out, " %g", d); },
+            [&](const Unique &u) { fprintf(out, " %s", u.s); },
+            [&](const Symbol &s) { fprintf(out, " %s", s.s->key); },
+            [&](const auto &) {}},
+        val);
   }
   fputc(']', out);
 }
@@ -839,12 +761,4 @@ void *Context::xmalloc(size_t n) {
   return p;
 }
 
-const Cell::Insn *Cell::InsnValue() const {
-  typecheck(Type::Insn);
-  return &std::get<Insn>(val);
-}
 
-Cell::Insn *Cell::InsnValue() {
-  typecheck(Type::Insn);
-  return &std::get<Insn>(val);
-}

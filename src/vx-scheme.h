@@ -309,31 +309,6 @@ public:
   ALIGN8 static Cell Halt;
   ALIGN8 static Cell Unimplemented;
 
-  enum class Type : uint8_t {
-    Int = 0,
-    Symbol = 1,
-    Unique = 2,
-    String = 3,
-    Real = 4,
-    Subr = 5,
-    Lambda = 6,
-    Vec = 7,
-    Char = 8,
-    Iport = 9,
-    Oport = 10,
-    Promise = 11,
-    Cont = 12,
-    Builtin = 13,
-    Magic = 14,
-    Insn = 15,
-    Cproc = 16,
-    Cpromise = 17,
-    Free = 18,
-    NUM_ATOMS = 19,
-    Cons = NUM_ATOMS,
-    NUM_TYPES = Cons + 1
-  };
-
   struct Cons {
     Cell *car = nullptr;
     Cell *cdr = nullptr;
@@ -486,11 +461,7 @@ public:
   bool m_gc_alt_bit = false;
   uint16_t m_flags = 0;
 
-  Type type() const {
-    if (short_atom(this))
-      return Type::Int;
-    return static_cast<Type>(val.index());
-  }
+
 
   template <typename T> bool is() const {
     if constexpr (std::is_same_v<T, intptr_t>) {
@@ -537,11 +508,6 @@ public:
 
   static const int GLOBAL_ENV = -1;
 
-  void typefail(Type t1, Type t2) const;
-  void typecheck(Type t) const {
-    if (type() != t)
-      typefail(type(), t);
-  }
   bool macro() const { return flag(Flag::Macro); }
 
   static inline bool short_atom(const Cell *c) {
@@ -573,8 +539,7 @@ public:
     s.b_skip = static_cast<int16_t>(b_skip);
   }
 
-  static const char *typeName[static_cast<size_t>(Type::NUM_TYPES)];
-  static int typeCount[static_cast<size_t>(Type::NUM_TYPES)];
+
 
   void flag(Flag f, bool b) {
     if (b)
@@ -642,26 +607,33 @@ public:
   static Cell *cdddar(const Cell *c);
   static Cell *cddddr(const Cell *c);
 
-  intptr_t IntValue() const;
-  char CharValue() const;
-  const Subr *SubrValue() const;
-  const std::string &StringValue() const;
-  std::string &mutable_string();
-  size_t StringLength() const;
-  FILE *IportValue() const;
-  FILE *OportValue() const;
-  cellvector *VectorValue() const;
-  cellvector *CProcValue() const;
-  Cell *PromiseValue() const;
-  Cell *CPromiseValue() const;
-  psymbol SymbolValue() const;
-  psymbol BuiltinValue() const;
-  Procedure LambdaValue() const;
-  double RealValue() const;
+  intptr_t IntValue() const {
+    if (short_atom(this))
+      return reinterpret_cast<intptr_t>(this) >> 1;
+    return as<intptr_t>();
+  }
+  char CharValue() const { return as<char>(); }
+  const Subr *SubrValue() const { return &as<Subr>(); }
+  const std::string &StringValue() const { return as<std::string>(); }
+  std::string &mutable_string() { return as<std::string>(); }
+  size_t StringLength() const { return as<std::string>().length(); }
+  FILE *IportValue() const { return as<Iport>().f; }
+  FILE *OportValue() const { return as<Oport>().f; }
+  cellvector *VectorValue() const { return as<Vec>().cv; }
+  cellvector *CProcValue() const { return as<Cproc>().cv; }
+  Cell *PromiseValue() const { return as<Promise>().cv->get(0); }
+  Cell *CPromiseValue() const { return as<Cpromise>().cv->get(0); }
+  psymbol SymbolValue() const { return as<Symbol>().s; }
+  psymbol BuiltinValue() const { return as<Builtin>().s; }
+  Procedure LambdaValue() const {
+    cellvector *cv = as<Lambda>().cv;
+    return Procedure(cv->get(0), cv->get(1), cv->get(2));
+  }
+  double RealValue() const { return as<double>(); }
   const char *name() const;
   void free_contents();
-  const Insn *InsnValue() const;
-  Insn *InsnValue();
+  const Insn *InsnValue() const { return &as<Insn>(); }
+  Insn *InsnValue() { return &as<Insn>(); }
 
   cellvector *vector_payload() const {
     if (short_atom(this))
@@ -1106,10 +1078,7 @@ public:
     Cell::sanity_check();
   }
 
-  ~VxSchemeInit() {
-    // Print statistics when scheme exits.
-    Cell::stats();
-  }
+  ~VxSchemeInit() {}
 };
 
 class SchemeExtension {
