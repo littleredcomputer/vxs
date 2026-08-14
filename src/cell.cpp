@@ -632,7 +632,6 @@ void Slab::sweep(Context *ctx) {
 
 void Context::gc() {
   bool gc_verbose = debug_flag(DebugFlag::TraceGc);
-  Cell *p;
 
   if (!ok_to_gc) {
     fprintf(stderr,
@@ -653,21 +652,6 @@ void Context::gc() {
   mark(root_envt);
   mark(cc_procedure);
   mark(empty_vector);
-
-  // Mark the things in the compiler VM and parser.
-  mark(r_cproc);
-  mark(r_envt);
-  mark(r_val);
-  mark(r_tmp);
-  mark(r_proc);
-  mark(r_nu);
-  mark(r_elt);
-  mark(Cell::car(&r_argl));
-  mark(Cell::cdr(&r_argl));
-
-  for (int ix = 0; ix < m_stack.size(); ++ix)
-    if ((reinterpret_cast<intptr_t>((p = m_stack[ix])) & Cell::ATOM) == 0)
-      mark(p);
 
   // Mark all active fibers
   for (Fiber *f : active_fibers)

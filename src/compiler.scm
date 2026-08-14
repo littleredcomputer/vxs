@@ -71,7 +71,7 @@
 
   (define (builtin? proc)
     (memq proc '(if quote cond begin lambda or and let set! define letrec
-		    let* do case quasiquote delay defmacro define-macro)))
+		    let* do case quasiquote delay defmacro define-macro yield)))
 
   ;; We provide two simplified replacements for the library function map
   ;; (one for one arguments, the other for two), neither of which uses
@@ -422,6 +422,9 @@
 	      '((promise))
 	      (code-if (not val?) '(pop))
 	      (code-if (not more?) '(return))))
+     ((eq? proc 'yield)
+      (append '((yield))
+	      (form-returning unspecified more? val?)))
      (else
       (error "unknown builtin"))))
 

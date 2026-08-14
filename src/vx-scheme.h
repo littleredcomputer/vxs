@@ -859,9 +859,8 @@ public:
   void unregister_fiber(Fiber *f);
   std::unique_ptr<Fiber> spawn_fiber(Cell *form);
 
-  // Interpreting evaluator
-
   Step eval_coro(Fiber &f);
+  Step vm_coro(Fiber &f, Cell *proc, Cell *args);
   Cell *interp_evaluator(Cell *form);
   Cell *(Context::*interp_eval)(Cell *form);
 
@@ -976,63 +975,9 @@ private:
 
   std::vector<Fiber *> active_fibers;
 
-  // ===========================
-  // BYTECODE VM STATE & STACK
-  // ===========================
-
-  void save(Cell *c) { m_stack.push(c); }
-  void save(Cell &rc) {
-    m_stack.push(rc.unsafe_car());
-    m_stack.push(rc.unsafe_cdr());
-  }
-  void save_i(intptr_t i) {
-    m_stack.push(reinterpret_cast<Cell *>((i << 1) | Cell::ATOM));
-  }
-  void restore(Cell *&c) { c = m_stack.pop(); }
-  void restore(Cell &rc) {
-    rc.set_unsafe_cdr(m_stack.pop());
-    rc.set_unsafe_car(m_stack.pop());
-  }
-  void restore_i(intptr_t &i) {
-    i = (reinterpret_cast<intptr_t>(m_stack.pop()) &
-         static_cast<intptr_t>(~Cell::ATOM)) >>
-        1;
-  }
-
-  void l_appendtail(Cell &l, Cell *t) {
-    if (l.unsafe_car() == nil) {
-      l.set_unsafe_car(t);
-      l.set_unsafe_cdr(t);
-    } else {
-      l.unsafe_cdr()->set_unsafe_cdr(t);
-      l.set_unsafe_cdr(t);
-    }
-  }
-
-  void l_append(Cell &l, Cell *t) {
-    r_elt = make(t);
-    l_appendtail(l, r_elt);
-  }
-
-  void clear(Cell &c) {
-    c.val = Cell::Cons{nil, nil};
-  }
-
-  Cell *r_envt;  // environment
-  Cell *r_cproc; // current compiled procedure.
-  Cell *r_val;
-  Cell *r_tmp;
-  Cell *r_proc;
-  Cell *r_nu;
-  Cell *r_elt;
-  Cell r_argl;
-  cellvector m_stack;
-
   // The assembled instructions to resume a saved continuation
   Cell *cc_procedure;
   Cell *empty_vector;
-
-  // ===========================
 
   Cell *envt;
   Cell *root_envt;
@@ -1177,9 +1122,14 @@ struct Fiber {
   cellvector m_stack;
   int state = 0;
 
+  // VM compiled code registers
+  Cell *r_envt = nullptr;
+  Cell *r_cproc = nullptr;
+
   Step step;
 
   Fiber(Context &c, Cell *form);
+  Fiber(Context &c, Cell *proc, Cell *args);
   ~Fiber();
 
   Fiber(const Fiber &) = delete;
@@ -1212,6 +1162,9 @@ struct Fiber {
   [[nodiscard]] intptr_t pop_i() {
     return untag_int(m_stack.pop());
   }
+
+  Cell *pop_list(int n);
+  int push_list(Cell *list);
 
   void l_appendtail(Cell &l, Cell *t) {
     if (l.unsafe_car() == nil) {

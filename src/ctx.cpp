@@ -67,8 +67,6 @@ Context::Context() {
 
   root_envt = envt = extend(envt);
 
-  r_cproc = r_envt = r_val = r_tmp = r_proc = r_nu = r_elt = nil;
-  clear(r_argl);
   provision();
   ok_to_gc = true;
 }
@@ -83,10 +81,20 @@ std::unique_ptr<Fiber> Context::spawn_fiber(Cell *form) {
   return std::make_unique<Fiber>(*this, form);
 }
 
+__attribute__((weak)) Step Context::eval_coro(Fiber &f) {
+  co_return;
+}
+
+__attribute__((weak)) Step Context::vm_coro(Fiber &f, Cell *proc, Cell *args) {
+  co_return;
+}
+
 Fiber::Fiber(Context &c, Cell *form) : ctx(c) {
   r_exp = form;
   r_env = c.root();
   r_val = r_proc = r_unev = r_elt = r_nu = r_tmp = nil;
+  r_envt = nil;
+  r_cproc = nil;
   r_qq = 0;
   r_cont = 1;
   state = 0;
@@ -96,7 +104,40 @@ Fiber::Fiber(Context &c, Cell *form) : ctx(c) {
   step = c.eval_coro(*this);
 }
 
+Fiber::Fiber(Context &c, Cell *proc, Cell *args) : ctx(c) {
+  r_cproc = proc;
+  r_exp = args;
+  r_env = c.root();
+  r_val = r_proc = r_unev = r_elt = r_nu = r_tmp = nil;
+  r_envt = nil;
+  r_qq = 0;
+  r_cont = 1;
+  state = 0;
+  clear(r_argl);
+  clear(r_varl);
+  c.register_fiber(this);
+  step = c.vm_coro(*this, proc, args);
+}
+
 Fiber::~Fiber() { ctx.unregister_fiber(this); }
+
+Cell *Fiber::pop_list(int n) {
+  r_tmp = nil;
+  for (int ix = 0; ix < n; ++ix) {
+    r_tmp = ctx.cons(ctx.gc_protect(m_stack.pop()), r_tmp);
+    ctx.gc_unprotect();
+  }
+  return r_tmp;
+}
+
+int Fiber::push_list(Cell *list) {
+  int count = 0;
+  for (Cell *a = list; a != nil; a = Cell::cdr(a)) {
+    m_stack.push(car(a));
+    ++count;
+  }
+  return count;
+}
 
 void Fiber::l_append(Cell &l, Cell *t) {
   r_elt = ctx.make(t);
@@ -105,6 +146,8 @@ void Fiber::l_append(Cell &l, Cell *t) {
 
 void Fiber::mark_roots(Context *gc) {
   gc->mark(r_env);
+  gc->mark(r_envt);
+  gc->mark(r_cproc);
   gc->mark(Cell::car(&r_argl));
   gc->mark(Cell::cdr(&r_argl));
   gc->mark(Cell::car(&r_varl));
@@ -164,10 +207,6 @@ void Fiber::load_continuation(Cell *cont) {
     push(cv->get(ix));
 }
 
-__attribute__((weak)) Step Context::eval_coro(Fiber &f) {
-  co_return;
-}
-
 #include <stdexcept>
 #include <string>
 
@@ -197,8 +236,10 @@ void error(std::string_view message, std::string_view m2) {
 }
 
 Cell *Context::extend(Cell *env) {
-  r_nu = make_vector(0);
-  return make(r_nu, env);
+  Cell *v = gc_protect(make_vector(0));
+  Cell *res = make(v, env);
+  gc_unprotect();
+  return res;
 }
 
 // Context::find_var: find a variable in the given environment.  If

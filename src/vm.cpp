@@ -55,7 +55,7 @@ static const vm_op optab[] = {
     {"gref.", OP_INT},       {"false", OP_NONE},
     {"true", OP_NONE}, // 45
     {"int", OP_INT},         {"promise", OP_NONE},
-    {"gset.", OP_INT},
+    {"gset.", OP_INT},       {"yield", OP_NONE},
 };
 
 static constexpr auto n_vmops = std::size(optab);
@@ -96,42 +96,18 @@ Cell *Context::extend(Cell *envt, Cell *blist) {
 
 Cell *Context::extend_from_vector(Cell *envt, cellvector *v, int n) {
   int size = v->size();
-  r_nu = make_vector(n);
+  Cell *r_nu = gc_protect(make_vector(n));
   cellvector *new_vec = r_nu->unsafe_vector_value();
   for (int ix = 0, iy = size - n; ix < n; ++ix, ++iy)
     new_vec->set_unchecked(ix, v->get_unchecked(iy));
   v->discard(n);
   envt = cons(r_nu, envt);
+  gc_unprotect();
   return envt;
 }
 
 void Context::adjoin(Cell *envt, Cell *val) {
   car(envt)->unsafe_vector_value()->push(val);
-}
-
-// Context::pop_list
-// Context::push_list
-//   'pop' pops the specified number of elements off the machine stack and
-//   returns a list of the elements.  The last element popped will be first
-//   in the list.  'Push' pushes the supplied list onto the stack.  Elements
-//   are pushed in the order given.
-
-Cell *Context::pop_list(int n) {
-  r_tmp = nil;
-  for (int ix = 0; ix < n; ++ix) {
-    r_tmp = cons(gc_protect(m_stack.pop()), r_tmp);
-    gc_unprotect();
-  }
-  return r_tmp;
-}
-
-int Context::push_list(Cell *list) {
-  int count = 0;
-  for (Cell *a = list; a != nil; a = Cell::cdr(a)) {
-    m_stack.push(car(a));
-    ++count;
-  }
-  return count;
 }
 
 void Context::print_insn(int addr, const Cell *insn) {
@@ -174,7 +150,6 @@ Cell *Context::vm_evaluator(Cell *form) {
       eval_cproc = cdr(binding);
   }
   if (eval_cproc) {
-    r_tmp = form;
     Cell *args = cons(form, nil);
     return execute(eval_cproc, args);
   }
@@ -182,11 +157,21 @@ Cell *Context::vm_evaluator(Cell *form) {
   return make_boolean(false);
 }
 
-Cell *Context::execute(Cell *proc, Cell *args) {
-  cellvector *insns, *literals;
-  intptr_t pc;
-  intptr_t start;
-  unsigned int count;
+Step Context::vm_coro(Fiber &f, Cell *proc, Cell *args) {
+  cellvector &m_stack = f.m_stack;
+  Cell *&r_envt = f.r_envt;
+  Cell *&r_cproc = f.r_cproc;
+  Cell *&r_val = f.r_val;
+  Cell *&r_tmp = f.r_tmp;
+  Cell *&r_proc = f.r_proc;
+  Cell *&r_nu = f.r_nu;
+  Cell *&r_elt = f.r_elt;
+
+  cellvector *insns = nullptr;
+  cellvector *literals = nullptr;
+  intptr_t pc = 0;
+  intptr_t start = 0;
+  unsigned int count = 0;
   unsigned int n_args = 0;
   unsigned int b_skip = 0;
   unsigned int e_skip = 0;
@@ -194,13 +179,12 @@ Cell *Context::execute(Cell *proc, Cell *args) {
   // Note the initial stack size.
   int initial_stackdepth = m_stack.size();
 
-  save_i(-1);
+  f.push_i(-1);
 
   // Push any arguments we received onto the stack.
-
   for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
     ++n_args;
-    save(car(a));
+    f.push(car(a));
   }
 
   r_cproc = proc;
@@ -210,23 +194,21 @@ Cell *Context::execute(Cell *proc, Cell *args) {
 
   int xcount[n_vmops];
   if (count_insns)
-    for (int ix = 0; ix < n_vmops; ++ix)
+    for (size_t ix = 0; ix < n_vmops; ++ix)
       xcount[ix] = 0;
 
   cellvector *root_bindings = car(root_envt)->unsafe_vector_value();
 
 PROC:
-  const cellvector *const v = r_cproc->unsafe_vector_value();
-  insns = v->get(0)->unsafe_vector_value();
-  literals = v->get(1)->unsafe_vector_value();
-  r_envt = v->get(2);
-  pc = v->get(3)->IntValue();
+  {
+    const cellvector *const v = r_cproc->unsafe_vector_value();
+    insns = v->get(0)->unsafe_vector_value();
+    literals = v->get(1)->unsafe_vector_value();
+    r_envt = v->get(2);
+    pc = v->get(3)->IntValue();
+  }
 
 XEQ:
-  Cell *insn = insns->get_unchecked(pc); // trust compiler!
-  unsigned int opcode = insn->InsnValue()->opcode;
-  if (count_insns)
-    ++xcount[opcode];
   if (trace) {
     if (trace_stack) {
       printf("\t");
@@ -243,53 +225,53 @@ XEQ:
       }
       printf("\n");
     }
-    print_insn(pc, insn);
+    print_insn(pc, insns->get_unchecked(pc));
+    co_yield true;
   }
+
+  Cell *insn = insns->get_unchecked(pc); // trust compiler!
+  unsigned int opcode = insn->InsnValue()->opcode;
+  if (count_insns)
+    ++xcount[opcode];
+
   switch (opcode) {
   case 0: // consti
-    save_i(insn->InsnValue()->int_val());
+    f.push_i(insn->InsnValue()->int_val());
     break;
   case 1: // nil
-    m_stack.push(nil);
+    f.push(nil);
     break;
   case 2: // subr
     if (!insn->InsnValue()->is_quickened_subr()) {
       Cell *subr = find_var(root_envt, insn->InsnValue()->Symbol(), 0);
       if (!subr)
         error("missing primitive procedure");
-      Cell *proc = cdr(subr);
-      if (proc->is<Cell::Cproc>()) {
-        // Yuck.  When the current procedure was compiled, the
-        // routine we are about to invoke was a builtin (subr): now
-        // it's a compiled procedure.  The optimized calling
-        // convention for subrs no longer applies.  We must pop
-        // the args off the stack, then push a continuation, then
-        // re-push the args, and dispatch to the procedure.
+      Cell *subr_proc = cdr(subr);
+      if (subr_proc->is<Cell::Cproc>()) {
         n_args = insn->InsnValue()->count;
         cellvector cv;
         for (unsigned int ix = 0; ix < n_args; ++ix)
-          cv.push(m_stack.pop());
-        save(r_envt);
-        save(r_cproc);
-        save_i(pc + 1);
+          cv.push(f.pop());
+        f.push(r_envt);
+        f.push(r_cproc);
+        f.push_i(pc + 1);
         for (unsigned int ix = 0; ix < n_args; ++ix)
-          m_stack.push(cv.pop());
-        r_cproc = proc;
+          f.push(cv.pop());
+        r_cproc = subr_proc;
         goto PROC;
-      } else if (auto *s = proc->get_if<Cell::Subr>()) {
+      } else if (auto *s = subr_proc->get_if<Cell::Subr>()) {
         insn->InsnValue()->payload = s;
       } else {
         error("subr invoked on non-procedure");
       }
     }
-    r_val = pop_list(insn->InsnValue()->count);
-    // Subr's can change anything (in particular they can reenter execute).
-    save(r_envt);
-    save(r_cproc);
+    r_val = f.pop_list(insn->InsnValue()->count);
+    f.push(r_envt);
+    f.push(r_cproc);
     r_val = insn->InsnValue()->subr_val()->subr(this, r_val);
-    restore(r_cproc);
-    restore(r_envt);
-    m_stack.push(r_val);
+    r_cproc = f.pop();
+    r_envt = f.pop();
+    f.push(r_val);
     break;
   case 3: { // gref
     unsigned int index;
@@ -299,19 +281,17 @@ XEQ:
             insn->InsnValue()->Symbol()->key);
     } else {
       if (cdr(r_val) == nullptr)
-        error("yikes"); // XXX
-      // Quicken the instruction.
-      insn->InsnValue()->opcode = 43; // gref.  XXX: magic number (among others)
+        error("yikes");
+      insn->InsnValue()->opcode = 43; // gref.
       insn->InsnValue()->payload = static_cast<intptr_t>(index);
-      m_stack.push(cdr(r_val));
+      f.push(cdr(r_val));
     }
     break;
   }
   case 4: { // gset
     unsigned int index;
-    set_var(root_envt, insn->InsnValue()->Symbol(), m_stack.pop(), &index);
-    // Quicken the instruction.
-    insn->InsnValue()->opcode = 48; // gset.  XXX: magic number
+    set_var(root_envt, insn->InsnValue()->Symbol(), f.pop(), &index);
+    insn->InsnValue()->opcode = 48; // gset.
     insn->InsnValue()->payload = static_cast<intptr_t>(index);
     break;
   }
@@ -322,7 +302,7 @@ XEQ:
     r_tmp = r_envt;
     for (unsigned int ix = 0; ix < e_skip; ++ix)
       r_tmp = cdr(r_tmp);
-    m_stack.push(car(r_tmp)->unsafe_vector_value()->get(b_skip));
+    f.push(car(r_tmp)->unsafe_vector_value()->get(b_skip));
     break;
   }
   case 6: { // lset
@@ -332,14 +312,14 @@ XEQ:
     r_tmp = r_envt;
     for (unsigned int ix = 0; ix < e_skip; ++ix)
       r_tmp = cdr(r_tmp);
-    car(r_tmp)->unsafe_vector_value()->set(b_skip, m_stack.pop());
+    car(r_tmp)->unsafe_vector_value()->set(b_skip, f.pop());
     break;
   }
   case 7: // goto
     pc = insn->InsnValue()->int_val();
     goto XEQ;
   case 8: // false?p
-    if (!m_stack.pop()->istrue()) {
+    if (!f.pop()->istrue()) {
       pc = insn->InsnValue()->int_val();
       goto XEQ;
     }
@@ -351,7 +331,7 @@ XEQ:
     }
     break;
   case 10: // true?p
-    if (m_stack.pop()->istrue()) {
+    if (f.pop()->istrue()) {
       pc = insn->InsnValue()->int_val();
       goto XEQ;
     }
@@ -363,10 +343,8 @@ XEQ:
     }
     break;
   case 12: // proc
-    // pop the starting instruction from the stack and compose it
-    // with the current environment.
-    restore_i(start);
-    m_stack.push(make_compiled_procedure(
+    start = f.pop_i();
+    f.push(make_compiled_procedure(
         r_cproc->unsafe_vector_value()->get_unchecked(0),
         r_cproc->unsafe_vector_value()->get_unchecked(1), r_envt, start));
     break;
@@ -376,47 +354,41 @@ XEQ:
     r_envt = extend_from_vector(r_envt, &m_stack, insn->InsnValue()->int_val());
     break;
   case 14: // extend!
-    r_envt = extend(r_envt, gc_protect(pop_list(1)));
+    r_envt = extend(r_envt, gc_protect(f.pop_list(1)));
     gc_unprotect();
     break;
   case 15: // extend.
     if (n_args < static_cast<unsigned int>(insn->InsnValue()->int_val()))
       error("vm: not enough arguments to procedure");
-    r_val = pop_list(n_args - insn->InsnValue()->int_val());
-    r_envt = extend(r_envt, gc_protect(pop_list(insn->InsnValue()->int_val())));
+    r_val = f.pop_list(n_args - insn->InsnValue()->int_val());
+    r_envt = extend(r_envt, gc_protect(f.pop_list(insn->InsnValue()->int_val())));
     gc_unprotect();
     adjoin(r_envt, r_val);
     break;
   case 16: // save
-    // make a continuation that will invoke the indicated
-    // instruction slot in this segment.
-    save(r_envt);
-    save(r_cproc);
-    save_i(insn->InsnValue()->int_val());
+    f.push(r_envt);
+    f.push(r_cproc);
+    f.push_i(insn->InsnValue()->int_val());
     break;
-  case 17:                 // return
-    r_val = m_stack.pop(); // value
+  case 17: // return
+    r_val = f.pop(); // value
   RETURN:
-    restore_i(pc);
+    pc = f.pop_i();
     if (pc < 0)
       goto FINISH;
-    restore(r_cproc);
+    r_cproc = f.pop();
     insns = r_cproc->unsafe_vector_value()->get(0)->VectorValue();
     literals = r_cproc->unsafe_vector_value()->get(1)->VectorValue();
-    restore(r_envt);
-    save(r_val);
+    r_envt = f.pop();
+    f.push(r_val);
     goto XEQ;
   case 18: // pop
-    m_stack.pop();
+    (void)f.pop();
     break;
   case 19: // dup
-    m_stack.push(m_stack.top());
+    f.push(m_stack.top());
     break;
   case 20: { // take
-    // Remove the n'th item from the stack and push it onto the top.
-    // (We count from zero).  'take 0' would be a no-op; 'take 1'
-    // would swap the top two elements.  We use an unchecked get
-    // because we "trust the compiler."
     intptr_t target = insn->InsnValue()->int_val();
     int last = m_stack.size() - 1;
     r_tmp = m_stack.get_unchecked(last - target);
@@ -432,74 +404,66 @@ XEQ:
       saved_stack->set(ix, m_stack.get(ix));
     r_nu = cons(r_tmp, nil);
     r_envt = extend(r_envt, r_nu);
-    m_stack.push(
+    f.push(
         make_compiled_procedure(cc_procedure, empty_vector, r_envt, 0));
     r_envt = cdr(r_envt);
-    // YYY
     break;
   }
   case 22: { // resume
-    r_val = m_stack.pop();
-    r_tmp = m_stack.pop();
+    r_val = f.pop();
+    r_tmp = f.pop();
     cellvector *new_stack = r_tmp->VectorValue();
-    m_stack.clear(); // !
+    m_stack.clear();
     for (int ix = 0; ix < new_stack->size(); ++ix)
       m_stack.push(new_stack->get(ix));
     goto RETURN;
   }
   case 23: // apply.
-    // Covert stack from:   rest ... a2 a1 proc
-    //                to:   proc a1 a2 ... rest
-    // with 'rest' spliced in in the correct order.
-    // Then do as in an ordinary apply.  This exists
-    // only to support the 'apply' special procedure.
-    r_tmp = m_stack.pop();
+    r_tmp = f.pop();
     for (count = 0; count < n_args - 2; ++count)
-      r_tmp = cons(m_stack.pop(), r_tmp);
-    r_proc = m_stack.pop();
-    count = push_list(r_tmp);
-    m_stack.push(r_proc);
-    // dummy up the 'real' arument count that the
-    // microcode for 'apply' will see below.
+      r_tmp = cons(f.pop(), r_tmp);
+    r_proc = f.pop();
+    count = f.push_list(r_tmp);
+    f.push(r_proc);
     insn->InsnValue()->payload = static_cast<intptr_t>(count);
   /* FALL THROUGH */
   case 24: // apply
     {
-      Cell *proc = m_stack.pop();
-      if (proc->is<Cell::Cproc>()) {
+      Cell *proc_cell = f.pop();
+      if (proc_cell->is<Cell::Cproc>()) {
         n_args = insn->InsnValue()->int_val();
-        r_cproc = proc;
+        r_cproc = proc_cell;
         goto PROC;
-      } else if (auto *s = proc->get_if<Cell::Subr>()) {
-        r_val = pop_list(insn->InsnValue()->int_val());
-        save(r_envt);
-        save(r_cproc);
+      } else if (auto *s = proc_cell->get_if<Cell::Subr>()) {
+        r_val = f.pop_list(insn->InsnValue()->int_val());
+        f.push(r_envt);
+        f.push(r_cproc);
         r_val = s->subr(this, r_val);
-        restore(r_cproc);
-        restore(r_envt);
+        r_cproc = f.pop();
+        r_envt = f.pop();
         goto RETURN;
-      } else if (proc->is<Cell::Lambda>()) {
-        Cell *args = pop_list(insn->InsnValue()->int_val());
-        save(r_envt);
-        save(r_cproc);
-        r_val = eval(cons(proc, args));
-        restore(r_cproc);
-        restore(r_envt);
+      } else if (proc_cell->is<Cell::Lambda>()) {
+        Cell *lambda_args = f.pop_list(insn->InsnValue()->int_val());
+        f.push(r_envt);
+        f.push(r_cproc);
+        r_val = eval(cons(proc_cell, lambda_args));
+        r_cproc = f.pop();
+        r_envt = f.pop();
         goto RETURN;
       } else {
-        proc->write(stderr);
+        proc_cell->write(stderr);
         error("vm: inapplicable");
       }
     }
     break;
   case 25: // unspc
-    m_stack.push(unspecified);
+    f.push(unspecified);
     break;
   case 26: // unassn
-    m_stack.push(unassigned);
+    f.push(unassigned);
     break;
   case 27: // lit
-    m_stack.push(literals->get(insn->InsnValue()->int_val()));
+    f.push(literals->get(insn->InsnValue()->int_val()));
     break;
   case 28: { // vector-set!
     n_args = insn->InsnValue()->int_val();
@@ -509,173 +473,169 @@ XEQ:
     cellvector *cv = m_stack.get(ix - 2)->VectorValue();
     cv->set(m_stack.get(ix - 1)->IntValue(), m_stack.get(ix));
     m_stack.discard(3);
-    m_stack.push(unspecified);
+    f.push(unspecified);
     break;
   }
   case 29: { // vector-ref
     n_args = insn->InsnValue()->int_val();
     if (n_args != 2)
       error("bad arguments to vector-ref!");
-    intptr_t ix = m_stack.pop()->IntValue();
-    cellvector *cv = m_stack.pop()->VectorValue();
-    m_stack.push(cv->get(ix));
+    intptr_t ix = f.pop()->IntValue();
+    cellvector *cv = f.pop()->VectorValue();
+    f.push(cv->get(ix));
     break;
   }
   case 30: // car
-    m_stack.push(car(m_stack.pop()));
+    f.push(car(f.pop()));
     break;
   case 31: // cdr
-    m_stack.push(cdr(m_stack.pop()));
+    f.push(cdr(f.pop()));
     break;
   case 32: { // zero?
-    Cell *c = m_stack.pop();
+    Cell *c = f.pop();
     if (c->is<intptr_t>())
-      m_stack.push(make_boolean(c->IntValue() == 0));
+      f.push(make_boolean(c->IntValue() == 0));
     else if (c->is<double>())
-      m_stack.push(make_boolean(c->RealValue() == 0.0));
+      f.push(make_boolean(c->RealValue() == 0.0));
     else
       error("non-numeric type");
     break;
   }
   case 33: { // +
-    // get n; see if top n elements are all exact or not; add them
-    // accumulating in situ (to avoid consing an argument list),
-    // discard those elements and push the result.
     n_args = insn->InsnValue()->int_val();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t sum = 0;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        sum += m_stack.get(ix)->IntValue(); // exact_top_n guarantees this is OK
+        sum += m_stack.get(ix)->IntValue();
       m_stack.discard(n_args);
-      m_stack.push(make_int(sum));
+      f.push(make_int(sum));
     } else {
       double sum = 0.0;
       for (int ix = sz - n_args; ix < sz; ++ix)
         sum += m_stack.get(ix)->asReal();
       m_stack.discard(n_args);
-      m_stack.push(make_real(sum));
+      f.push(make_real(sum));
     }
     break;
   }
   case 34: { // *
-    // much like +, above.
     n_args = insn->InsnValue()->int_val();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t product = 1;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        product *= m_stack.get(ix)->IntValue(); // exact_top_n says this is OK
+        product *= m_stack.get(ix)->IntValue();
       m_stack.discard(n_args);
-      m_stack.push(make_int(product));
+      f.push(make_int(product));
     } else {
       double product = 1.0;
       for (int ix = sz - n_args; ix < sz; ++ix)
         product *= m_stack.get(ix)->asReal();
       m_stack.discard(n_args);
-      m_stack.push(make_real(product));
+      f.push(make_real(product));
     }
     break;
   }
   case 35: { // quotient
     if (insn->InsnValue()->int_val() != 2)
       error("wrong # args");
-    intptr_t d = m_stack.pop()->IntValue();
-    intptr_t n = m_stack.pop()->IntValue();
+    intptr_t d = f.pop()->IntValue();
+    intptr_t n = f.pop()->IntValue();
     if (d == 0)
       error("/0");
-    m_stack.push(make_int(n / d));
+    f.push(make_int(n / d));
     break;
   }
   case 36: { // remainder
     if (insn->InsnValue()->int_val() != 2)
       error("wrong # args");
-    intptr_t d = m_stack.pop()->IntValue();
-    intptr_t n = m_stack.pop()->IntValue();
+    intptr_t d = f.pop()->IntValue();
+    intptr_t n = f.pop()->IntValue();
     if (d == 0)
       error("/0");
-    m_stack.push(make_int(n % d));
+    f.push(make_int(n % d));
     break;
   }
   case 37: { // -
-    // get n; see if top n elements are all exact or not; add them
-    // accumulating in situ (to avoid consing an argument list),
-    // discard those elements and push the result.
     n_args = insn->InsnValue()->int_val();
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       if (n_args == 1) {
-        m_stack.push(make_int(-m_stack.pop()->IntValue()));
+        f.push(make_int(-f.pop()->IntValue()));
       } else {
         intptr_t difference = m_stack.get(sz - n_args)->IntValue();
         for (int ix = sz - n_args + 1; ix < sz; ++ix)
           difference -= m_stack.get(ix)->IntValue();
         m_stack.discard(n_args);
-        m_stack.push(make_int(difference));
+        f.push(make_int(difference));
       }
     } else {
       if (n_args == 1) {
-        m_stack.push(make_real(-m_stack.pop()->asReal()));
+        f.push(make_real(-f.pop()->asReal()));
       } else {
         double difference = m_stack.get(sz - n_args)->asReal();
         for (int ix = sz - n_args + 1; ix < sz; ++ix)
           difference -= m_stack.get(ix)->asReal();
         m_stack.discard(n_args);
-        m_stack.push(make_real(difference));
+        f.push(make_real(difference));
       }
     }
     break;
   }
   case 38: // not
-    m_stack.push(m_stack.pop()->istrue() ? &Cell::Bool_F : &Cell::Bool_T);
+    f.push(f.pop()->istrue() ? &Cell::Bool_F : &Cell::Bool_T);
     break;
   case 39: // null?
-    m_stack.push(m_stack.pop() == &Cell::Nil ? &Cell::Bool_T : &Cell::Bool_F);
+    f.push(f.pop() == &Cell::Nil ? &Cell::Bool_T : &Cell::Bool_F);
     break;
   case 40: // eq?
-    m_stack.push(m_stack.pop()->eq(m_stack.pop()) ? &Cell::Bool_T
-                                                  : &Cell::Bool_F);
+    f.push(f.pop()->eq(f.pop()) ? &Cell::Bool_T : &Cell::Bool_F);
     break;
   case 41: // pair?
-    m_stack.push(m_stack.pop()->ispair() ? &Cell::Bool_T : &Cell::Bool_F);
+    f.push(f.pop()->ispair() ? &Cell::Bool_T : &Cell::Bool_F);
     break;
-  case 42: // cons (watch out: order matters, and cons can provoke GC.)
-    r_tmp = m_stack.pop();
-    r_elt = m_stack.pop();
-    m_stack.push(cons(r_elt, r_tmp));
+  case 42: // cons
+    r_tmp = f.pop();
+    r_elt = f.pop();
+    f.push(cons(r_elt, r_tmp));
     break;
-  case 43: { // gref. (quickened global ref; contains index of target binding)
-    m_stack.push(cdr(root_bindings->get(insn->InsnValue()->int_val())));
+  case 43: { // gref.
+    f.push(cdr(root_bindings->get(insn->InsnValue()->int_val())));
     break;
   }
   case 44: // false
-    m_stack.push(&Cell::Bool_F);
+    f.push(&Cell::Bool_F);
     break;
   case 45: // true
-    m_stack.push(&Cell::Bool_T);
+    f.push(&Cell::Bool_T);
     break;
   case 46: // int
-    m_stack.push(make_int(insn->InsnValue()->int_val()));
+    f.push(make_int(insn->InsnValue()->int_val()));
     break;
   case 47: // promise
-    restore_i(start);
+    start = f.pop_i();
     r_tmp = make_compiled_procedure(r_cproc->unsafe_vector_value()->get(0),
                                     r_cproc->unsafe_vector_value()->get(1),
                                     r_envt, start);
-    m_stack.push(make_compiled_promise(r_tmp));
+    f.push(make_compiled_promise(r_tmp));
     break;
   case 48: // gset.
     Cell::setcdr(root_bindings->get(insn->InsnValue()->int_val()),
-                 m_stack.pop());
+                 f.pop());
+    break;
+  case 49: // yield
+    co_yield true;
     break;
   default:
     error("unimplemented opcode_");
   }
   ++pc;
   goto XEQ;
+
 FINISH:
   if (count_insns) {
-    for (int ix = 0; ix < n_vmops; ++ix)
+    for (size_t ix = 0; ix < n_vmops; ++ix)
       printf("%s:%d ", optab[ix].name, xcount[ix]);
     printf("\n");
   }
@@ -683,7 +643,15 @@ FINISH:
     fprintf(stderr, "stack imbalance: %d (%d expected)\n", m_stack.size(),
             initial_stackdepth);
   }
-  return r_val;
+  f.r_val = r_val;
+  co_return;
+}
+
+Cell *Context::execute(Cell *proc, Cell *args) {
+  Fiber fiber(*this, proc, args);
+  while (fiber.next())
+    ;
+  return fiber.r_val;
 }
 
 // find_op: match the supplied opcode symbol in the vm_op table;

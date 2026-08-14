@@ -40,18 +40,6 @@ TOP:
 //
 
 Cell *Context::read(sio &in) {
-  struct ReadGuard {
-    Context &ctx;
-    ReadGuard(Context &c) : ctx(c) {
-      ctx.save(ctx.r_nu);
-      ctx.save(ctx.r_tmp);
-    }
-    ~ReadGuard() {
-      ctx.restore(ctx.r_tmp);
-      ctx.restore(ctx.r_nu);
-    }
-  } guard(*this);
-
   char c;
 
 TOP:
@@ -80,43 +68,65 @@ TOP:
     // this allows the syntax `(a . b)' to produce a "raw
     // cons."
 
-    clear(r_argl);
+    Cell *head = nil;
+    Cell *tail = nil;
     int dotmode = 0;
 
   LISTLOOP:
-    save(r_argl);
-    r_nu = read(in);
-    restore(r_argl);
+    gc_protect(head);
+    Cell *r_nu = read(in);
+    gc_unprotect();
     if (r_nu == nullptr)
-      return Cell::car(&r_argl);
+      return head;
     if (dotmode == 1) {
-      l_appendtail(r_argl, r_nu);
+      if (head == nil) {
+        head = tail = r_nu;
+      } else {
+        Cell::setcdr(tail, r_nu);
+        tail = r_nu;
+      }
       dotmode = 2; // expecting: )
     } else if (r_nu->is_symbol(s_dot)) {
       dotmode = 1; // expecting: cdr
     } else if (dotmode == 2) {
       // Uh-oh: something came between `. cdr' and `)'
       error("bad . list syntax");
-    } else
-      l_append(r_argl, r_nu);
+    } else {
+      Cell *elt = make(r_nu);
+      if (head == nil) {
+        head = tail = elt;
+      } else {
+        Cell::setcdr(tail, elt);
+        tail = elt;
+      }
+    }
 
     goto LISTLOOP;
   } else if (c == ')') {
     return 0;
   } else if (c == '\'') {
-    r_nu = read(in);
+    Cell *r_nu = read(in);
     if (r_nu) {
-      r_nu = make(r_nu);
-      r_tmp = make_symbol(s_quote);
-      return cons(r_tmp, r_nu);
+      gc_protect(r_nu);
+      Cell *quoted = make(r_nu);
+      gc_protect(quoted);
+      Cell *r_tmp = make_symbol(s_quote);
+      Cell *res = cons(r_tmp, quoted);
+      gc_unprotect(2);
+      return res;
     }
 
     error("unexpected eof");
   } else if (c == '`') {
-    if ((r_nu = read(in)) != nullptr) {
-      r_tmp = make_symbol(s_quasiquote);
-      r_nu = make(r_nu);
-      return cons(r_tmp, r_nu);
+    Cell *r_nu = read(in);
+    if (r_nu != nullptr) {
+      gc_protect(r_nu);
+      Cell *qq = make(r_nu);
+      gc_protect(qq);
+      Cell *r_tmp = make_symbol(s_quasiquote);
+      Cell *res = cons(r_tmp, qq);
+      gc_unprotect(2);
+      return res;
     }
 
     error("unexpected eof");
@@ -128,10 +138,15 @@ TOP:
       wrap = s_unquote_splicing;
     }
 
-    if ((r_nu = read(in)) != nullptr) {
-      r_nu = make(r_nu);
-      r_tmp = make_symbol(wrap);
-      return cons(r_tmp, r_nu);
+    Cell *r_nu = read(in);
+    if (r_nu != nullptr) {
+      gc_protect(r_nu);
+      Cell *uq = make(r_nu);
+      gc_protect(uq);
+      Cell *r_tmp = make_symbol(wrap);
+      Cell *res = cons(r_tmp, uq);
+      gc_unprotect(2);
+      return res;
     }
 
     error("unexpected eof");
@@ -141,22 +156,29 @@ TOP:
     if (in.peek() == '(') {
       // Vector.
       int vl = 0;
-      clear(r_argl);
+      Cell *head = nil;
+      Cell *tail = nil;
       in.get(); // drop the '('. It's cleaner.
     VECLOOP:
-      save(r_argl);
-      r_nu = read(in);
-      restore(r_argl);
+      gc_protect(head);
+      Cell *r_nu = read(in);
+      gc_unprotect();
 
       if (r_nu == nullptr) {
-        r_nu = make_vector(vl);
-        cellvector *vec = r_nu->VectorValue();
+        Cell *vec_cell = make_vector(vl);
+        cellvector *vec = vec_cell->VectorValue();
         int ix = 0;
-        for (Cell *elt = Cell::car(&r_argl); elt != nil; elt = Cell::cdr(elt))
+        for (Cell *elt = head; elt != nil; elt = Cell::cdr(elt))
           vec->set(ix++, Cell::car(elt));
-        return r_nu;
+        return vec_cell;
       }
-      l_append(r_argl, r_nu);
+      Cell *elt = make(r_nu);
+      if (head == nil) {
+        head = tail = elt;
+      } else {
+        Cell::setcdr(tail, elt);
+        tail = elt;
+      }
       ++vl;
       goto VECLOOP;
     }

@@ -11,7 +11,7 @@ VM_COMP_OBJ     = $(VM_OBJ) _compiler.o
 UNIX_OBJ        = main.o
 PROGRAM		= vx-scheme
 DEFVER          = -DVERSION=$(VERSION)
-CFLAGS		= -std=c++20 -O2 -fno-rtti -Wall $(DEFVER)
+CFLAGS		= -std=c++20 -O2 -g -fno-rtti -Wall $(DEFVER)
 CC		= gcc	
 TC              = ../testcases
 
@@ -59,7 +59,8 @@ scheme-compiler: $(VM_COMP_OBJ) $(UNIX_OBJ) compile-file.scm vx-scheme
 # warning: this clean is pretty thorough!
 
 clean:
-		rm -f *.o *.a *.exe vxs-interp vxs-bootstrap vx-scheme 
+		rm -f *.o *.a *.exe vxs-interp vxs-bootstrap vx-scheme test_fibers
+		rm -rf *.dSYM
 		rm -f scheme-compiler
 		rm -f _compile-file.cpp  _*.cpp
 		find .. -name '*~' -print | xargs rm -f 
@@ -78,7 +79,7 @@ distro:		clean
 
 # Testing: run the test suite.   If SLIB is installed, smoke-test it.
 
-test:		test-interp test-compile
+test:		test-interp test-compile test-fibers
 
 TESTARENA = 	SLABSIZE=1000000
 
@@ -95,6 +96,13 @@ test-compile:	vx-scheme
 		    (cd ../lib; ../src/vx-scheme < vx-slib-test.scm); \
 		fi
 		@(cd ../testcases; $(TESTARENA) ../src/vx-scheme < vx-test.scm)
+
+test_fibers:	$(BOOTSTRAP_OBJ) lib.o _library.o _compiler.o test_fibers.o
+		$(CC) $(CFLAGS) -o $@ $^ -lstdc++ -lc -lm
+
+test-fibers:	test_fibers
+		@echo '========== TESTING FIBER COROUTINES & YIELD =========='
+		./test_fibers
 
 
 #----------------------------------------------------------------------

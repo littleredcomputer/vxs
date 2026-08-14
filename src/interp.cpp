@@ -42,6 +42,7 @@ psymbol s_set = intern("set!");
 psymbol s_time = intern("time");
 psymbol s_withinput = intern("with-input-from-file");
 psymbol s_withoutput = intern("with-output-to-file");
+psymbol s_yield = intern("yield");
 
 // --------------------------------------------------------------------------
 // Unsafe Accessors
@@ -67,8 +68,8 @@ void Context::bind(Cell *env, Cell *c, Cell *value) {
     int sz = vec->size();
 
     if (b_skip == sz) {
-      r_nu = cons(c, value);
-      vec->push(r_nu);
+      Cell *binding = cons(c, value);
+      vec->push(binding);
     } else if (b_skip < 0 || b_skip > sz)
       error("internal error: invalid lexical address: ", c->SymbolValue()->key);
     else
@@ -81,12 +82,9 @@ void Context::bind(Cell *env, Cell *c, Cell *value) {
         return;
       }
     }
-    // construct new binding element (being carful that
-    // intermediate material is reachable from the register
-    // set.
-    r_nu = make_symbol(s);
-    r_nu = cons(r_nu, value);
-    vec->push(r_nu);
+    Cell *sym = gc_protect(make_symbol(s));
+    vec->push(cons(sym, value));
+    gc_unprotect();
   }
 }
 
@@ -181,6 +179,7 @@ enum {
   ev_callwof2,
   ev_time,
   ev_time1,
+  ev_yield,
 };
 
 // These are the above states in string form.  This is only used
@@ -272,6 +271,7 @@ enum {
     "ev_callwof2",
     "ev_time",
     "ev_time1",
+    "ev_yield",
 };
 
 // Here it is: a >1000 line function that consists of a giant switch
@@ -477,7 +477,9 @@ TOP:
       else if (s == s_quasiquote) {
         r_unev = car(r_unev);
         GOTO(ev_quasiquote);
-      } else if (s == s_lambda)
+      } else if (s == s_yield)
+        GOTO(ev_yield);
+      else if (s == s_lambda)
         r_val = make_procedure(r_env, cdr(r_unev), car(r_unev));
       else if (s == s_defmacro) {
         r_proc = make_macro(r_env, cdr(r_unev), cdar(r_unev));
@@ -1265,6 +1267,10 @@ TOP:
     fflush(r_unev->OportValue());
     RETURN_VALUE(r_val);
 
+  case ev_yield:
+    co_yield true;
+    RETURN_VALUE(unspecified);
+
   default:
     printf("IC = %x\n", state);
     error("internal: invalid continuation");
@@ -1492,6 +1498,7 @@ public:
         {"time", false},
         {"with-input-from-file", false},
         {"with-output-to-file", false},
+        {"yield", false},
     };
 
     for (const auto &b_desc : builtin) {
