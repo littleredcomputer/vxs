@@ -1651,9 +1651,9 @@ void Context::provision() {
   SchemeExtension::RunInstall(this, envt);
 }
 
-void Context::bind_subr(const char *name, subr_f subr) {
+void Context::bind_subr(std::string_view name, subr_f subr) {
   psymbol s = intern(name);
-  set_var(envt, s, make_subr(subr, name));
+  set_var(envt, s, make_subr(subr, s->key));
 }
 
 cellvector *SchemeExtension::extensions = 0;

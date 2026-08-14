@@ -23,13 +23,6 @@ Cell *Context::make_int(intptr_t i) {
 // Context::make_string
 //   Makes a string of the indicated length -- it is UNINITIALIZED
 
-Cell *Context::make_iport(const std::string &fname) {
-  return make_iport(fname.c_str());
-}
-
-Cell *Context::make_oport(const std::string &fname) {
-  return make_oport(fname.c_str());
-}
 
 Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   Cell *c = alloc<Cell::Vec>(cellvector::alloc(n));
@@ -41,21 +34,23 @@ Cell *Context::make_vector(int n, Cell *init /* = &Unspecified */) {
   return c;
 }
 
-Cell *Context::make_iport(const char *fname) {
-  FILE *ip = fopen(fname, "r");
+Cell *Context::make_iport(std::string_view fname) {
+  std::string path(fname);
+  FILE *ip = fopen(path.c_str(), "r");
   if (ip)
     return make_iport(ip);
 
-  error("unable to open stream for reading");
+  error("unable to open stream for reading: ", fname);
   return nil;
 }
 
-Cell *Context::make_oport(const char *fname) {
-  FILE *ofs = fopen(fname, "w");
+Cell *Context::make_oport(std::string_view fname) {
+  std::string path(fname);
+  FILE *ofs = fopen(path.c_str(), "w");
   if (ofs)
     return make_oport(ofs);
 
-  error("unable to open stream for writing");
+  error("unable to open stream for writing: ", fname);
   return nil;
 }
 
@@ -447,8 +442,7 @@ TOP:
   if (mem.active.size() == 0) {
     // Configurable slabsize
 
-    char *c;
-    if ((c = getenv("SLABSIZE")) != nullptr)
+    if (const char *c = getenv("SLABSIZE"))
       Slab::slabsize = atoi(c);
 
     mem.active.push((Cell *)new Slab(this));

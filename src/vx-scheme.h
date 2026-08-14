@@ -795,7 +795,7 @@ public:
 
   void bind(Cell *env, Cell *c, Cell *value);
   void bind_arguments(Cell *env, Cell *vars, Cell *values);
-  void bind_subr(const char *name, subr_f subr);
+  void bind_subr(std::string_view name, subr_f subr);
   Cell *find_var(Cell *env, psymbol var, unsigned int *index);
   void set_var(Cell *env, psymbol var, Cell *value) {
     set_var(env, var, value, 0);
@@ -879,13 +879,9 @@ public:
   Cell *make_int(intptr_t i);
   Cell *make_char(char ch) { return alloc<char>(ch); }
   Cell *make_real(double d) { return alloc<double>(d); }
-  Cell *make_string(std::string s) { return alloc<std::string>(std::move(s)); }
+  Cell *make_string(std::string_view s) { return alloc<std::string>(std::string(s)); }
   Cell *make_string(size_t len, char ch = '\0') {
     return alloc<std::string>(len, ch);
-  }
-  Cell *make_string(const char *s) { return alloc<std::string>(s); }
-  Cell *make_string(const char *s, size_t len) {
-    return alloc<std::string>(s, len);
   }
   Cell *make_subr(subr_f s, const char *name) {
     return alloc<Cell::Subr>(s, name);
@@ -894,11 +890,9 @@ public:
   Cell *make_symbol(psymbol y) { return alloc<Cell::Symbol>(y); }
   Cell *make_boolean(bool b) { return b ? &Cell::Bool_T : &Cell::Bool_F; }
   Cell *make_vector(int n, Cell *init = &Cell::Unspecified);
-  Cell *make_iport(const std::string &fname);
-  Cell *make_iport(const char *fname);
+  Cell *make_iport(std::string_view fname);
   Cell *make_iport(FILE *ip) { return alloc<Cell::Iport>(ip); }
-  Cell *make_oport(const std::string &fname);
-  Cell *make_oport(const char *fname);
+  Cell *make_oport(std::string_view fname);
   Cell *make_oport(FILE *op) { return alloc<Cell::Oport>(op); }
   Cell *make_procedure(Cell *env, Cell *body, Cell *arglist);
   Cell *make_promise(Cell *env, Cell *body);
@@ -921,11 +915,8 @@ public:
 
   // ------------------------------------------------------------
 
-  void with_input(const std::string &fname) { istack.push(make_iport(fname)); }
-  void with_input(const char *fname) { istack.push(make_iport(fname)); }
-
-  void with_output(const std::string &fname) { ostack.push(make_oport(fname)); }
-  void with_output(const char *fname) { ostack.push(make_oport(fname)); }
+  void with_input(std::string_view fname) { istack.push(make_iport(fname)); }
+  void with_output(std::string_view fname) { ostack.push(make_oport(fname)); }
 
   void without_output() { fflush(ostack.pop()->OportValue()); }
 

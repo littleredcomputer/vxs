@@ -30,9 +30,8 @@ uint32_t debug_flags() {
   static bool env_checked = false;
   static uint32_t f = 0;
   if (!env_checked) {
-    char *c;
-    if ((c = getenv("T")) != nullptr)
-      f = strtoul(c, 0, 0);
+    if (const char *c = getenv("T"))
+      f = strtoul(c, nullptr, 0);
     env_checked = true;
   }
   return f;

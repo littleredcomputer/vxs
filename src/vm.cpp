@@ -869,10 +869,9 @@ Cell *Context::load_instructions(vm_cproc *cp) {
   return insns;
 }
 
-static void write_escaped_string(FILE *output, const char *str) {
-  char c;
+static void write_escaped_string(FILE *output, std::string_view str) {
   fputc('"', output);
-  while ((c = *str++)) {
+  for (char c : str) {
     switch (c) {
     case '\n':
       fputc('\\', output);
@@ -881,7 +880,8 @@ static void write_escaped_string(FILE *output, const char *str) {
     case '"':
     case '\\':
       fputc('\\', output);
-    /* fall through */
+      fputc(c, output);
+      break;
     default:
       fputc(c, output);
     }
