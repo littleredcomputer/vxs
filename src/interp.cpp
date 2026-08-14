@@ -292,7 +292,7 @@ static const char *state_name[] = {
 // For these reasons, eval should not be recursed into by anyone,
 // including itself.
 
-Cell *Context::interp_evaluator(Cell *form) {
+Step Context::eval_coro(Cell *form) {
   psymbol s;
   Cell::Procedure lambda;
   intptr_t flag = 0;
@@ -362,6 +362,8 @@ TOP:
   if (trace)
     print_vm_state();
 
+  co_yield true;
+
   switch (state) {
   case eval_dispatch:
 
@@ -381,7 +383,7 @@ TOP:
     }
 
   case eval_complete:
-    return r_val;
+    co_return;
 
   case ev_application:
     save_i(r_cont);
@@ -1261,7 +1263,14 @@ TOP:
     error("internal: invalid continuation");
   }
 
-  return unimplemented;
+  co_return;
+}
+
+Cell *Context::interp_evaluator(Cell *form) {
+  auto coro = eval_coro(form);
+  while (coro.next())
+    ;
+  return r_val;
 }
 
 void Context::print_vm_state() {

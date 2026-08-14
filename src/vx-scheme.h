@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <coroutine>
 #include <string>
 #include <unistd.h>
 #include <variant>
@@ -22,6 +23,48 @@ template <class... Ts> struct overloaded : Ts... {
   using Ts::operator()...;
 };
 template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
+struct Step {
+  struct promise_type {
+    Step get_return_object() {
+      return Step{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    std::suspend_always initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+    std::suspend_always yield_value(bool) noexcept { return {}; }
+    void return_void() noexcept {}
+    void unhandled_exception() { std::terminate(); }
+  };
+
+  std::coroutine_handle<promise_type> handle = nullptr;
+
+  bool done() const { return !handle || handle.done(); }
+  bool next() {
+    if (handle && !handle.done()) {
+      handle.resume();
+      return !handle.done();
+    }
+    return false;
+  }
+
+  Step(std::coroutine_handle<promise_type> h = nullptr) : handle(h) {}
+  Step(const Step &) = delete;
+  Step &operator=(const Step &) = delete;
+  Step(Step &&o) noexcept : handle(o.handle) { o.handle = nullptr; }
+  Step &operator=(Step &&o) noexcept {
+    if (this != &o) {
+      if (handle)
+        handle.destroy();
+      handle = o.handle;
+      o.handle = nullptr;
+    }
+    return *this;
+  }
+  ~Step() {
+    if (handle)
+      handle.destroy();
+  }
+};
 
 class OS;
 class Cell;
@@ -778,6 +821,7 @@ public:
 
   // Interpreting evaluator
 
+  Step eval_coro(Cell *form);
   Cell *interp_evaluator(Cell *form);
   Cell *(Context::*interp_eval)(Cell *form);
 
