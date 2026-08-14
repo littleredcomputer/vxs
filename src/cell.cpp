@@ -64,9 +64,7 @@ Cell *Cell::notcons() {
   return nil;
 }
 
-bool Cell::ispair() {
-  return is<Cons>() && this != unspecified && this != nil;
-}
+bool Cell::ispair() { return is<Cons>() && this != unspecified && this != nil; }
 
 void Cell::sanity_check() {
   // Cell structure validation
@@ -162,30 +160,28 @@ Cell *Cell::cddddr(const Cell *c) { return Cell::cdr(Cell::cdddr(c)); }
 const char *Cell::name() const {
   if (short_atom(this))
     return "int";
-  return std::visit(
-      overloaded{
-          [](intptr_t) { return "int"; },
-          [](const Symbol &) { return "symbol"; },
-          [](const Unique &) { return "unique"; },
-          [](const std::string &) { return "string"; },
-          [](double) { return "real"; },
-          [](const Subr &) { return "subr"; },
-          [](const Lambda &) { return "lambda"; },
-          [](const Vec &) { return "vector"; },
-          [](char) { return "char"; },
-          [](const Iport &) { return "iport"; },
-          [](const Oport &) { return "oport"; },
-          [](const Promise &) { return "promise"; },
-          [](const Cont &) { return "continuation"; },
-          [](const Builtin &) { return "builtin"; },
-          [](MagicBox *) { return "magic"; },
-          [](const Insn &) { return "insn"; },
-          [](const Cproc &) { return "cproc"; },
-          [](const Cpromise &) { return "cpromise"; },
-          [](const Free &) { return "free"; },
-          [](const Cons &) { return "pair"; },
-          [](const auto &) { return "unknown"; }},
-      val);
+  return std::visit(overloaded{[](intptr_t) { return "int"; },
+                               [](const Symbol &) { return "symbol"; },
+                               [](const Unique &) { return "unique"; },
+                               [](const std::string &) { return "string"; },
+                               [](double) { return "real"; },
+                               [](const Subr &) { return "subr"; },
+                               [](const Lambda &) { return "lambda"; },
+                               [](const Vec &) { return "vector"; },
+                               [](char) { return "char"; },
+                               [](const Iport &) { return "iport"; },
+                               [](const Oport &) { return "oport"; },
+                               [](const Promise &) { return "promise"; },
+                               [](const Cont &) { return "continuation"; },
+                               [](const Builtin &) { return "builtin"; },
+                               [](MagicBox *) { return "magic"; },
+                               [](const Insn &) { return "insn"; },
+                               [](const Cproc &) { return "cproc"; },
+                               [](const Cpromise &) { return "cpromise"; },
+                               [](const Free &) { return "free"; },
+                               [](const Cons &) { return "pair"; },
+                               [](const auto &) { return "unknown"; }},
+                    val);
 }
 
 void Cell::dump(FILE *out) {
@@ -206,27 +202,26 @@ void Cell::dump(FILE *out) {
   fputs(name(), out);
 
   if (short_atom(this)) {
-    fprintf(out, " %" PRIdPTR, IntValue());
+    fprintf(out, " %ld", IntValue());
   } else {
     std::visit(
-        overloaded{
-            [&](const Cons &c) {
-              fputs(" ", out);
-              if (c.car == nil)
-                fputs("nil", out);
-              else
-                fprintf(out, "%p", c.car);
-              fputs(" ", out);
-              if (c.cdr == nil)
-                fputs("nil", out);
-              else
-                fprintf(out, "%p", c.cdr);
-            },
-            [&](intptr_t i) { fprintf(out, " %" PRIdPTR, i); },
-            [&](double d) { fprintf(out, " %g", d); },
-            [&](const Unique &u) { fprintf(out, " %s", u.s); },
-            [&](const Symbol &s) { fprintf(out, " %s", s.s->key); },
-            [&](const auto &) {}},
+        overloaded{[&](const Cons &c) {
+                     fputs(" ", out);
+                     if (c.car == nil)
+                       fputs("nil", out);
+                     else
+                       fprintf(out, "%p", c.car);
+                     fputs(" ", out);
+                     if (c.cdr == nil)
+                       fputs("nil", out);
+                     else
+                       fprintf(out, "%p", c.cdr);
+                   },
+                   [&](intptr_t i) { fprintf(out, " %ld", i); },
+                   [&](double d) { fprintf(out, " %g", d); },
+                   [&](const Unique &u) { fprintf(out, " %s", u.s); },
+                   [&](const Symbol &s) { fprintf(out, " %s", s.s->key); },
+                   [&](const auto &) {}},
         val);
   }
   fputc(']', out);
@@ -460,7 +455,7 @@ TOP:
     mem.active.push((Cell *)new Slab(this));
     mem.free = 0;
     mem.low_water = false;
-    mem.no_inline_gc = debug_flag(DEBUG_NO_INLINE_GC);
+    mem.no_inline_gc = debug_flag(DebugFlag::NoInlineGc);
   }
 
   // Check the "top" slab to see if there's any room
@@ -497,19 +492,19 @@ TOP:
 //
 
 //----------------------------------------------------------------------
-    // Marking for Garbage Collection
-    //
-    // This implementation is Knuth's Algorithm 2.3.5E (TAoCP 3ed. vol I
-    // p. 418) We follow Knuth's presentation carefully (using the same
-    // variable names and statement labels).  Like the evaluator, this
-    // code has to take some care to avoid recursion: we want to be able
-    // to perform a GC mark wihtout allocating any additional space (not
-    // even C stack space).  That accounts for some of the complexity in
-    // this routine.  The other part is that, due to vectors, we have to
-    // support n-way marking instead of just 2-way marking.
+// Marking for Garbage Collection
+//
+// This implementation is Knuth's Algorithm 2.3.5E (TAoCP 3ed. vol I
+// p. 418) We follow Knuth's presentation carefully (using the same
+// variable names and statement labels).  Like the evaluator, this
+// code has to take some care to avoid recursion: we want to be able
+// to perform a GC mark wihtout allocating any additional space (not
+// even C stack space).  That accounts for some of the complexity in
+// this routine.  The other part is that, due to vectors, we have to
+// support n-way marking instead of just 2-way marking.
 
-    void Context::mark(Cell *P) {
-  bool traceall = false; // OS::flag(TRACE_GC_ALL);
+void Context::mark(Cell *P) {
+  bool traceall = debug_flag(DebugFlag::TraceGcAll);
   if (P == nil || P == 0 || Cell::short_atom(P) || P->m_gc_mark)
     return;
 
@@ -619,7 +614,7 @@ E6:
 }
 
 void Slab::sweep(Context *ctx) {
-  bool traceall = false; // OS::flag(TRACE_GC_ALL);
+  bool traceall = debug_flag(DebugFlag::TraceGcAll);
 
   for (Cell *p = start; p < next; ++p) {
     if (p->m_gc_mark) {
@@ -652,7 +647,7 @@ void Slab::sweep(Context *ctx) {
 }
 
 void Context::gc() {
-  bool gc_verbose = debug_flag(TRACE_GC);
+  bool gc_verbose = debug_flag(DebugFlag::TraceGc);
   Cell *p;
 
   if (!ok_to_gc) {
@@ -760,5 +755,3 @@ void *Context::xmalloc(size_t n) {
   }
   return p;
 }
-
-

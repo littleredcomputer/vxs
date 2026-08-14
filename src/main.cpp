@@ -26,13 +26,13 @@ double vx_get_time() {
   return std::chrono::duration<double>(duration).count();
 }
 
-unsigned int debug_flags() {
+uint32_t debug_flags() {
   static bool env_checked = false;
-  static unsigned int f = 0;
+  static uint32_t f = 0;
   if (!env_checked) {
     char *c;
     if ((c = getenv("T")) != NULL)
-      f = strtol(c, 0, 0);
+      f = strtoul(c, 0, 0);
     env_checked = true;
   }
   return f;
@@ -44,7 +44,7 @@ void interact(Context *ctx) {
   while (ctx->read_eval_print(stdin, stdout, interactive))
     ;
 
-  if (debug_flag(DEBUG_MEMSTATS_AT_EXIT)) {
+  if (debug_flag(DebugFlag::MemstatsAtExit)) {
     ctx->print_mem_stats(stdout);
   }
 

@@ -352,7 +352,7 @@ void Cell::write(sstring &ss) const {
   }
   if (short_atom(this)) {
     char buf[40];
-    snprintf(buf, sizeof(buf), "%" PRIdPTR, IntValue());
+    snprintf(buf, sizeof(buf), "%ld", IntValue());
     ss.append(buf);
     return;
   }
@@ -361,7 +361,7 @@ void Cell::write(sstring &ss) const {
       overloaded{
           [&](intptr_t i) {
             char buf[40];
-            snprintf(buf, sizeof(buf), "%" PRIdPTR, i);
+            snprintf(buf, sizeof(buf), "%ld", i);
             ss.append(buf);
           },
           [&](const Cell::Symbol &s) { ss.append(s.s->key); },
@@ -430,7 +430,7 @@ void Cell::write(sstring &ss) const {
           [&](const Cell::Lambda &) {
             Procedure proc = LambdaValue();
             ss.append(flag(Flag::Macro) ? "#<macro " : "#<lambda ");
-            if (debug_flag(DEBUG_PRINT_PROCEDURES)) {
+            if (debug_flag(DebugFlag::PrintProcedures)) {
               proc.arglist->write(ss);
               ss.append(' ');
               proc.body->write(ss);

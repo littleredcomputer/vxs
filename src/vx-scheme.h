@@ -7,32 +7,43 @@
 //
 // vx-scheme.h : class definitions
 
-#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
 
 #include <string>
 #include <unistd.h>
 #include <variant>
 
-template <class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> struct overloaded : Ts... {
+  using Ts::operator()...;
+};
 template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
-
-
 
 class OS;
 class Cell;
 class Slab;
 class Context;
 
-// OS abstraction layer
+// Execution / Debug flags
 
-unsigned int debug_flags();
-inline bool debug_flag(int bit) { return (debug_flags() & bit) != 0; }
+enum class DebugFlag : uint32_t {
+  TraceEval = 1 << 0,
+  TraceGc = 1 << 1,
+  NoInlineGc = 1 << 2,
+  MemstatsAtExit = 1 << 3,
+  PrintProcedures = 1 << 4,
+  TraceGcAll = 1 << 5,
+  TraceVm = 1 << 6,
+  TraceVmStack = 1 << 7,
+  CountInsns = 1 << 8,
+};
+
+uint32_t debug_flags();
+inline bool debug_flag(DebugFlag bit) {
+  return (debug_flags() & static_cast<uint32_t>(bit)) != 0;
+}
 double vx_get_time();
 
 typedef Cell *(*subr_f)(Context *ctx, Cell *arglist);
@@ -453,8 +464,6 @@ public:
   bool m_gc_alt_bit = false;
   uint16_t m_flags = 0;
 
-
-
   template <typename T> bool is() const {
     if constexpr (std::is_same_v<T, intptr_t>) {
       if (short_atom(this))
@@ -481,12 +490,10 @@ public:
     return std::get_if<T>(&val);
   }
 
-  template <typename Visitor>
-  decltype(auto) visit(Visitor &&visitor) const {
+  template <typename Visitor> decltype(auto) visit(Visitor &&visitor) const {
     return std::visit(std::forward<Visitor>(visitor), val);
   }
-  template <typename Visitor>
-  decltype(auto) visit(Visitor &&visitor) {
+  template <typename Visitor> decltype(auto) visit(Visitor &&visitor) {
     return std::visit(std::forward<Visitor>(visitor), val);
   }
 
@@ -506,12 +513,10 @@ public:
     return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0;
   }
   static inline bool long_atom(const Cell *c) {
-    return (reinterpret_cast<uintptr_t>(c) & ATOM) == 0 &&
-           !c->is<Cons>();
+    return (reinterpret_cast<uintptr_t>(c) & ATOM) == 0 && !c->is<Cons>();
   }
   static inline bool atomic(const Cell *c) {
-    return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0 ||
-           !c->is<Cons>();
+    return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0 || !c->is<Cons>();
   }
   static Cell *notcons();
 
@@ -530,8 +535,6 @@ public:
     s.e_skip = static_cast<int16_t>(e_skip);
     s.b_skip = static_cast<int16_t>(b_skip);
   }
-
-
 
   void flag(Flag f, bool b) {
     if (b)
@@ -630,19 +633,17 @@ public:
   cellvector *vector_payload() const {
     if (short_atom(this))
       error("expecting a vector-backed cell");
-    return std::visit(
-        overloaded{
-            [](const Vec &v) { return v.cv; },
-            [](const Lambda &l) { return l.cv; },
-            [](const Cproc &cp) { return cp.cv; },
-            [](const Promise &p) { return p.cv; },
-            [](const Cpromise &cp) { return cp.cv; },
-            [](const Cont &k) { return k.cv; },
-            [](const auto &) -> cellvector * {
-              error("expecting a vector-backed cell");
-              return nullptr;
-            }},
-        val);
+    return std::visit(overloaded{[](const Vec &v) { return v.cv; },
+                                 [](const Lambda &l) { return l.cv; },
+                                 [](const Cproc &cp) { return cp.cv; },
+                                 [](const Promise &p) { return p.cv; },
+                                 [](const Cpromise &cp) { return cp.cv; },
+                                 [](const Cont &k) { return k.cv; },
+                                 [](const auto &) -> cellvector * {
+                                   error("expecting a vector-backed cell");
+                                   return nullptr;
+                                 }},
+                      val);
   }
   cellvector *unsafe_vector_value() const { return vector_payload(); }
   MagicBox *unsafe_magic_box() const { return std::get<MagicBox *>(val); }
@@ -703,7 +704,8 @@ public:
   static void sanity_check();
 };
 
-static_assert(alignof(Cell) >= 2, "Cell must be at least 2-byte aligned for tagged pointers");
+static_assert(alignof(Cell) >= 2,
+              "Cell must be at least 2-byte aligned for tagged pointers");
 
 // class Environment
 //
@@ -1157,18 +1159,6 @@ extern psymbol s_do;
 extern psymbol s_cond;
 extern psymbol s_case;
 extern psymbol s_callcc;
-
-// Execution flags
-
-#define TRACE_EVAL 0x01
-#define TRACE_GC 0x02
-#define DEBUG_NO_INLINE_GC 0x04
-#define DEBUG_MEMSTATS_AT_EXIT 0x08
-#define DEBUG_PRINT_PROCEDURES 0x10
-#define TRACE_GC_ALL 0x20
-#define TRACE_VM 0x40
-#define TRACE_VMSTACK 0x80
-#define COUNT_INSNS 0x100
 
 // Typedefs for compiled procedures in C form.  It's possible to serialize
 // a compiled procedure into a C data structure that can be used to load

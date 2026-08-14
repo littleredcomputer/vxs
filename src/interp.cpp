@@ -305,7 +305,7 @@ Cell *Context::interp_evaluator(Cell *form) {
   r_cont = eval_complete;
   r_exp = form;
   r_qq = 0;
-  trace = debug_flag(TRACE_EVAL);
+  trace = debug_flag(DebugFlag::TraceEval);
 
 #define GOTO(x)                                                                \
   do {                                                                         \

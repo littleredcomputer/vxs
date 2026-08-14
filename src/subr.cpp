@@ -205,7 +205,8 @@ Cell *skabs(Context *ctx, Cell *arglist) {
 // in coercion).
 
 template <typename ValueExtractor, typename Op>
-static Cell *typed_compare(Context *ctx, Cell *args, ValueExtractor extract, Op op) {
+static Cell *typed_compare(Context *ctx, Cell *args, ValueExtractor extract,
+                           Op op) {
   for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
     if (Cell::cdr(a) != nil) {
       const auto &ia = extract(Cell::car(a));
@@ -233,31 +234,46 @@ static int strcmp_ci(const std::string &s, const std::string &t) {
 }
 
 struct CharCiEqual {
-  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) == tolower(static_cast<unsigned char>(b)); }
+  bool operator()(char a, char b) const {
+    return tolower(static_cast<unsigned char>(a)) ==
+           tolower(static_cast<unsigned char>(b));
+  }
 };
 struct CharCiLess {
-  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) < tolower(static_cast<unsigned char>(b)); }
+  bool operator()(char a, char b) const {
+    return tolower(static_cast<unsigned char>(a)) <
+           tolower(static_cast<unsigned char>(b));
+  }
 };
 struct CharCiLessEqual {
-  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) <= tolower(static_cast<unsigned char>(b)); }
+  bool operator()(char a, char b) const {
+    return tolower(static_cast<unsigned char>(a)) <=
+           tolower(static_cast<unsigned char>(b));
+  }
 };
 struct CharCiGreater {
-  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) > tolower(static_cast<unsigned char>(b)); }
+  bool operator()(char a, char b) const {
+    return tolower(static_cast<unsigned char>(a)) >
+           tolower(static_cast<unsigned char>(b));
+  }
 };
 struct CharCiGreaterEqual {
-  bool operator()(char a, char b) const { return tolower(static_cast<unsigned char>(a)) >= tolower(static_cast<unsigned char>(b)); }
+  bool operator()(char a, char b) const {
+    return tolower(static_cast<unsigned char>(a)) >=
+           tolower(static_cast<unsigned char>(b));
+  }
 };
 
-template <typename Op>
-static Cell *char_compare(Context *ctx, Cell *args) {
-  return typed_compare(ctx, args, [](const Cell *c) { return c->CharValue(); }, Op{});
+template <typename Op> static Cell *char_compare(Context *ctx, Cell *args) {
+  return typed_compare(
+      ctx, args, [](const Cell *c) { return c->CharValue(); }, Op{});
 }
 
-static constexpr subr_f char_eq    = char_compare<std::equal_to<>>;
-static constexpr subr_f char_le    = char_compare<std::less_equal<>>;
-static constexpr subr_f char_lt    = char_compare<std::less<>>;
-static constexpr subr_f char_ge    = char_compare<std::greater_equal<>>;
-static constexpr subr_f char_gt    = char_compare<std::greater<>>;
+static constexpr subr_f char_eq = char_compare<std::equal_to<>>;
+static constexpr subr_f char_le = char_compare<std::less_equal<>>;
+static constexpr subr_f char_lt = char_compare<std::less<>>;
+static constexpr subr_f char_ge = char_compare<std::greater_equal<>>;
+static constexpr subr_f char_gt = char_compare<std::greater<>>;
 static constexpr subr_f char_eq_ci = char_compare<CharCiEqual>;
 static constexpr subr_f char_le_ci = char_compare<CharCiLessEqual>;
 static constexpr subr_f char_lt_ci = char_compare<CharCiLess>;
@@ -265,39 +281,50 @@ static constexpr subr_f char_ge_ci = char_compare<CharCiGreaterEqual>;
 static constexpr subr_f char_gt_ci = char_compare<CharCiGreater>;
 
 struct StringCiEqual {
-  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) == 0; }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return strcmp_ci(a, b) == 0;
+  }
 };
 struct StringCiLess {
-  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) < 0; }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return strcmp_ci(a, b) < 0;
+  }
 };
 struct StringCiLessEqual {
-  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) <= 0; }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return strcmp_ci(a, b) <= 0;
+  }
 };
 struct StringCiGreater {
-  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) > 0; }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return strcmp_ci(a, b) > 0;
+  }
 };
 struct StringCiGreaterEqual {
-  bool operator()(const std::string &a, const std::string &b) const { return strcmp_ci(a, b) >= 0; }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return strcmp_ci(a, b) >= 0;
+  }
 };
 
-template <typename Op>
-static Cell *string_compare(Context *ctx, Cell *args) {
-  return typed_compare(ctx, args, [](const Cell *c) -> const std::string & { return c->StringValue(); }, Op{});
+template <typename Op> static Cell *string_compare(Context *ctx, Cell *args) {
+  return typed_compare(
+      ctx, args,
+      [](const Cell *c) -> const std::string & { return c->StringValue(); },
+      Op{});
 }
 
-static constexpr subr_f string_eq    = string_compare<std::equal_to<>>;
-static constexpr subr_f string_le    = string_compare<std::less_equal<>>;
-static constexpr subr_f string_lt    = string_compare<std::less<>>;
-static constexpr subr_f string_ge    = string_compare<std::greater_equal<>>;
-static constexpr subr_f string_gt    = string_compare<std::greater<>>;
+static constexpr subr_f string_eq = string_compare<std::equal_to<>>;
+static constexpr subr_f string_le = string_compare<std::less_equal<>>;
+static constexpr subr_f string_lt = string_compare<std::less<>>;
+static constexpr subr_f string_ge = string_compare<std::greater_equal<>>;
+static constexpr subr_f string_gt = string_compare<std::greater<>>;
 static constexpr subr_f string_eq_ci = string_compare<StringCiEqual>;
 static constexpr subr_f string_le_ci = string_compare<StringCiLessEqual>;
 static constexpr subr_f string_lt_ci = string_compare<StringCiLess>;
 static constexpr subr_f string_ge_ci = string_compare<StringCiGreaterEqual>;
 static constexpr subr_f string_gt_ci = string_compare<StringCiGreater>;
 
-template <typename Op>
-static Cell *numeric_compare(Context *ctx, Cell *args) {
+template <typename Op> static Cell *numeric_compare(Context *ctx, Cell *args) {
   Op op;
   bool exact = exact_list(args);
   for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
@@ -319,10 +346,10 @@ static Cell *numeric_compare(Context *ctx, Cell *args) {
 }
 
 static constexpr subr_f number_equal = numeric_compare<std::equal_to<>>;
-static constexpr subr_f le           = numeric_compare<std::less_equal<>>;
-static constexpr subr_f lt           = numeric_compare<std::less<>>;
-static constexpr subr_f ge           = numeric_compare<std::greater_equal<>>;
-static constexpr subr_f gt           = numeric_compare<std::greater<>>;
+static constexpr subr_f le = numeric_compare<std::less_equal<>>;
+static constexpr subr_f lt = numeric_compare<std::less<>>;
+static constexpr subr_f ge = numeric_compare<std::greater_equal<>>;
+static constexpr subr_f gt = numeric_compare<std::greater<>>;
 
 template <int (*Predicate)(int)>
 static Cell *char_class(Context *ctx, Cell *args) {
@@ -358,8 +385,7 @@ Cell *eq(Context *ctx, Cell *arglist) {
 
 Cell *eqv(Context *ctx, Cell *arglist) {
   // If they're both real, compare them as numbers; else use eq
-  if (car(arglist)->is<double>() &&
-      cadr(arglist)->is<double>())
+  if (car(arglist)->is<double>() && cadr(arglist)->is<double>())
     return ctx->make_boolean(car(arglist)->RealValue() ==
                              cadr(arglist)->RealValue());
   return eq(ctx, arglist);
@@ -630,19 +656,18 @@ static Cell *cons_accessor(Context *ctx, Cell *a) {
   return Accessor(Cell::car(a));
 }
 
-template <typename T>
-static Cell *type_predicate(Context *ctx, Cell *a) {
+template <typename T> static Cell *type_predicate(Context *ctx, Cell *a) {
   return ctx->make_boolean(Cell::car(a)->is<T>());
 }
 
-static constexpr subr_f string_p  = type_predicate<std::string>;
-static constexpr subr_f symbol_p  = type_predicate<Cell::Symbol>;
-static constexpr subr_f vector_p  = type_predicate<Cell::Vec>;
-static constexpr subr_f char_p    = type_predicate<char>;
-static constexpr subr_f input_p   = type_predicate<Cell::Iport>;
-static constexpr subr_f output_p  = type_predicate<Cell::Oport>;
+static constexpr subr_f string_p = type_predicate<std::string>;
+static constexpr subr_f symbol_p = type_predicate<Cell::Symbol>;
+static constexpr subr_f vector_p = type_predicate<Cell::Vec>;
+static constexpr subr_f char_p = type_predicate<char>;
+static constexpr subr_f input_p = type_predicate<Cell::Iport>;
+static constexpr subr_f output_p = type_predicate<Cell::Oport>;
 static constexpr subr_f integer_p = type_predicate<intptr_t>;
-static constexpr subr_f exact_p   = type_predicate<intptr_t>;
+static constexpr subr_f exact_p = type_predicate<intptr_t>;
 static constexpr subr_f inexact_p = type_predicate<double>;
 
 static Cell *number_p(Context *ctx, Cell *a) {
@@ -651,8 +676,8 @@ static Cell *number_p(Context *ctx, Cell *a) {
 }
 
 static constexpr subr_f rational_p = number_p;
-static constexpr subr_f real_p     = number_p;
-static constexpr subr_f complex_p  = number_p;
+static constexpr subr_f real_p = number_p;
+static constexpr subr_f complex_p = number_p;
 
 Cell *pair_p(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
@@ -1152,19 +1177,19 @@ static Cell *real_f2(Context *ctx, Cell *arglist) {
   return ctx->make_real(Func(asReal(car(arglist)), asReal(cadr(arglist))));
 }
 
-static constexpr subr_f skround      = real_f1<_round>;
-static constexpr subr_f sklog        = real_f1<log>;
-static constexpr subr_f sksqrt       = real_f1<sqrt>;
-static constexpr subr_f skexp        = real_f1<exp>;
-static constexpr subr_f sksin        = real_f1<sin>;
-static constexpr subr_f skcos        = real_f1<cos>;
-static constexpr subr_f sktan        = real_f1<tan>;
-static constexpr subr_f skasin       = real_f1<asin>;
-static constexpr subr_f skacos       = real_f1<acos>;
+static constexpr subr_f skround = real_f1<_round>;
+static constexpr subr_f sklog = real_f1<log>;
+static constexpr subr_f sksqrt = real_f1<sqrt>;
+static constexpr subr_f skexp = real_f1<exp>;
+static constexpr subr_f sksin = real_f1<sin>;
+static constexpr subr_f skcos = real_f1<cos>;
+static constexpr subr_f sktan = real_f1<tan>;
+static constexpr subr_f skasin = real_f1<asin>;
+static constexpr subr_f skacos = real_f1<acos>;
 static constexpr subr_f inexact_expt = real_f2<pow>;
-static constexpr subr_f skfloor      = real_f1<floor>;
-static constexpr subr_f skceiling    = real_f1<ceil>;
-static constexpr subr_f sktruncate   = real_f1<sktrunc>;
+static constexpr subr_f skfloor = real_f1<floor>;
+static constexpr subr_f skceiling = real_f1<ceil>;
+static constexpr subr_f sktruncate = real_f1<sktrunc>;
 
 static Cell *expt(Context *ctx, Cell *arglist) {
   // Scheme requires expt to return an exact result, if

@@ -207,9 +207,9 @@ Cell *Context::execute(Cell *proc, Cell *args) {
   }
 
   r_cproc = proc;
-  bool trace = debug_flag(TRACE_VM);
-  bool trace_stack = debug_flag(TRACE_VMSTACK);
-  bool count_insns = debug_flag(COUNT_INSNS);
+  bool trace = debug_flag(DebugFlag::TraceVm);
+  bool trace_stack = debug_flag(DebugFlag::TraceVmStack);
+  bool count_insns = debug_flag(DebugFlag::CountInsns);
 
   int xcount[n_vmops];
   if (count_insns)
@@ -241,7 +241,7 @@ XEQ:
           else
             c->write(stdout);
         } else
-          printf("%" PRIdPTR, (reinterpret_cast<intptr_t>(c)) >> 1);
+          printf("%ld", (reinterpret_cast<intptr_t>(c)) >> 1);
         fputc(' ', stdout);
       }
       printf("\n");
@@ -925,7 +925,7 @@ Cell *Context::write_compiled_procedure(Cell *arglist) {
         fprintf(output, "0,0");
         break;
       case OP_INT:
-        fprintf(output, "0,(void*)%" PRIdPTR, iv->int_val());
+        fprintf(output, "0,(void*)%ld", iv->int_val());
         break;
       case OP_SYMBOL:
         fprintf(output, "0,");
