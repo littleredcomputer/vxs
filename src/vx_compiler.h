@@ -44,14 +44,29 @@ public:
 
     // Register parameter locals (slots 1..N)
     uint32_t arity = 0;
+    bool is_variadic = false;
     Value p = params;
-    while (Heap::is_cons(p)) {
-      Value sym_val = Heap::car(p);
-      assert(sym_val.is_symbol());
-      std::string name = vm.get_symbol_name(sym_val.as_symbol_id());
+    if (p.is_symbol()) {
+      // (lambda args body...)
+      std::string name = vm.get_symbol_name(p.as_symbol_id());
       fn_compiler.add_local(name);
-      ++arity;
-      p = Heap::cdr(p);
+      is_variadic = true;
+      arity = 0;
+    } else {
+      while (Heap::is_cons(p)) {
+        Value sym_val = Heap::car(p);
+        assert(sym_val.is_symbol());
+        std::string name = vm.get_symbol_name(sym_val.as_symbol_id());
+        fn_compiler.add_local(name);
+        ++arity;
+        p = Heap::cdr(p);
+      }
+      if (p.is_symbol()) {
+        // Dotted variadic: (lambda (a b . rest) body...)
+        std::string name = vm.get_symbol_name(p.as_symbol_id());
+        fn_compiler.add_local(name);
+        is_variadic = true;
+      }
     }
     out_arity = arity;
 
@@ -71,7 +86,7 @@ public:
     }
     chunk->code.push_back(OP_RETURN);
     out_upvals = fn_compiler.upvalues;
-    return vm.heap.allocate<ObjClosure>(chunk, arity, false, static_cast<uint32_t>(out_upvals.size()), static_cast<uint32_t>(fn_compiler.max_locals));
+    return vm.heap.allocate<ObjClosure>(chunk, arity, is_variadic, static_cast<uint32_t>(out_upvals.size()), static_cast<uint32_t>(fn_compiler.max_locals));
   }
 
 private:
@@ -556,6 +571,59 @@ private:
           compile_expr(current, chunk, is_tail);
           return;
         }
+
+        // (quasiquote expr)
+        if (op_name == "quasiquote") {
+          std::unordered_map<std::string, Value> gensym_map;
+          Value expanded = expand_quasiquote(Heap::car(rest), gensym_map, 1);
+          compile_expr(expanded, chunk, is_tail);
+          return;
+        }
+
+        // (defmacro name (args...) body...) or (defmacro (name args...) body...)
+        if (op_name == "defmacro" || op_name == "define-macro") {
+          Value name_val;
+          Value params_val;
+          Value body_val;
+          Value target = Heap::car(rest);
+          if (target.is_symbol()) {
+            name_val = target;
+            params_val = Heap::car(Heap::cdr(rest));
+            body_val = Heap::cdr(Heap::cdr(rest));
+          } else if (Heap::is_cons(target)) {
+            name_val = Heap::car(target);
+            params_val = Heap::cdr(target);
+            body_val = Heap::cdr(rest);
+          } else {
+            chunk.code.push_back(OP_UNSPECIFIED);
+            return;
+          }
+          std::string macro_name = vm.get_symbol_name(name_val.as_symbol_id());
+          uint32_t arity = 0;
+          std::vector<UpvalueDesc> upvals;
+          ObjClosure *transformer = compile_function(params_val, body_val, arity, upvals, macro_name);
+          vm.macros[macro_name] = transformer;
+          chunk.code.push_back(OP_UNSPECIFIED);
+          return;
+        }
+
+        // Check for user-defined macro in VM::macros
+        auto macro_it = vm.macros.find(op_name);
+        if (macro_it != vm.macros.end()) {
+          ObjClosure *transformer = macro_it->second;
+          std::vector<Value> raw_args;
+          Value cur_m = rest;
+          while (Heap::is_cons(cur_m)) {
+            raw_args.push_back(Heap::car(cur_m));
+            cur_m = Heap::cdr(cur_m);
+          }
+          Value expanded = vm.call_closure(transformer, raw_args);
+          if (expanded.is_unspecified() && !vm.last_error.empty()) {
+            std::cerr << "[Macro Error in " << op_name << "] " << vm.last_error << std::endl;
+          }
+          compile_expr(expanded, chunk, is_tail);
+          return;
+        }
       }
 
       // Standard Function Application: (callee arg1 arg2 ...)
@@ -691,6 +759,81 @@ private:
       b = Heap::cdr(b);
     }
     return result;
+  }
+
+  Value expand_quasiquote(Value form, std::unordered_map<std::string, Value> &gensym_map, int depth = 1) {
+    if (!Heap::is_cons(form)) {
+      if (form.is_symbol()) {
+        std::string sym_name = vm.get_symbol_name(form.as_symbol_id());
+        if (sym_name.size() > 1 && sym_name.back() == '#') {
+          auto it = gensym_map.find(sym_name);
+          if (it == gensym_map.end()) {
+            std::string base = sym_name.substr(0, sym_name.size() - 1);
+            std::string generated = base + "__" + std::to_string(vm.next_gensym_id++) + "__auto__";
+            Value gen_sym = Value::from_symbol_id(vm.intern(generated));
+            gensym_map[sym_name] = gen_sym;
+            return vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                                vm.heap.cons(gen_sym, Value::nil()));
+          } else {
+            return vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                                vm.heap.cons(it->second, Value::nil()));
+          }
+        }
+      }
+      return vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                          vm.heap.cons(form, Value::nil()));
+    }
+
+    Value head = Heap::car(form);
+    Value rest = Heap::cdr(form);
+
+    if (head.is_symbol()) {
+      std::string sym = vm.get_symbol_name(head.as_symbol_id());
+      if (sym == "quasiquote") {
+        return vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+          vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                                    vm.heap.cons(head, Value::nil())),
+            vm.heap.cons(expand_quasiquote(Heap::car(rest), gensym_map, depth + 1), Value::nil())));
+      }
+      if (sym == "unquote") {
+        if (depth == 1) {
+          return Heap::car(rest);
+        } else {
+          return vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+            vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                                      vm.heap.cons(head, Value::nil())),
+              vm.heap.cons(expand_quasiquote(Heap::car(rest), gensym_map, depth - 1), Value::nil())));
+        }
+      }
+    }
+
+    // List elements: check for unquote-splicing
+    std::vector<Value> parts;
+    Value cur = form;
+    while (Heap::is_cons(cur)) {
+      Value elem = Heap::car(cur);
+      if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
+          vm.get_symbol_name(Heap::car(elem).as_symbol_id()) == "unquote-splicing" && depth == 1) {
+        parts.push_back(Heap::car(Heap::cdr(elem)));
+      } else {
+        Value expanded_elem = expand_quasiquote(elem, gensym_map, depth);
+        parts.push_back(vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+                                     vm.heap.cons(expanded_elem, Value::nil())));
+      }
+      cur = Heap::cdr(cur);
+    }
+
+    if (!cur.is_nil()) {
+      Value expanded_tail = expand_quasiquote(cur, gensym_map, depth);
+      parts.push_back(expanded_tail);
+    }
+
+    Value append_sym = Value::from_symbol_id(vm.intern("append"));
+    Value res_list = Value::nil();
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+      res_list = vm.heap.cons(*it, res_list);
+    }
+    return vm.heap.cons(append_sym, res_list);
   }
 
   VM &vm;

@@ -62,7 +62,13 @@ const TEST_DEFINITIONS = [
   { id: 'bracket-named-let', name: 'Bracketed Named let [i 0 acc 0]', code: '(let loop [i 0 acc 0] (if (= i 5) acc (loop (+ i 1) (+ acc i))))', expectOk: true, expectResult: '10' },
   { id: 'bracket-do', name: 'Bracketed do [i 0 (+ i 1)]', code: '(do [i 0 (+ i 1) acc 0 (+ acc i)] ((= i 5) acc))', expectOk: true, expectResult: '10' },
 
-  // 8. Negative & Error-Catching Tests
+  // 8. Metaprogramming & Macros
+  { id: 'macro-infix', name: 'Procedural defmacro (infix)', code: '(defmacro (infix a op b) `(,op ,a ,b)) (infix 10 * 4)', expectOk: true, expectResult: '40' },
+  { id: 'macro-auto-gensym', name: 'Auto-Gensym (sym# hygiene)', code: '(defmacro (swap! a b) `(let [tmp# ,a] (set! ,a ,b) (set! ,b tmp#))) (define u 100) (define v 200) (swap! u v) [u v]', expectOk: true, expectResult: '[200 100]' },
+  { id: 'macro-variadic-splice', name: 'Variadic Macro & Unquote-Splicing', code: '(defmacro (sum-all . nums) `(+ ,@nums)) (sum-all 10 20 30 40)', expectOk: true, expectResult: '100' },
+  { id: 'macro-expand', name: 'Macro Introspection (macroexpand)', code: '(defmacro (inc x) `(+ ,x 1)) (macroexpand \'(inc 41))', expectOk: true, expectResult: '(+ 41 1)' },
+
+  // 9. Negative & Error-Catching Tests
   { id: 'err-unbound', name: 'Catch Unbound Variable Error', code: 'nonexistent-identifier-12345', expectOk: false, errorContains: 'Unbound global variable' },
   { id: 'err-argc-mismatch', name: 'Catch Closure Arity Mismatch', code: '((lambda (x) x) 1 2 3)', expectOk: false, errorContains: 'Closure call: expected 1 args' },
   { id: 'err-non-procedure', name: 'Catch Non-Procedure Call', code: '(42 1 2)', expectOk: false, errorContains: 'Attempted to call non-procedure' },
