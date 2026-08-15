@@ -3,4 +3,6 @@ z/
 vxs-*
 vx-scheme
 _*
+.cache/
+
 

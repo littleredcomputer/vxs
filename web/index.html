@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vx-Scheme | WebAssembly Creative Concurrency Workbench</title>
+  <meta name="description" content="Vx-Scheme: High-performance C++20 Scheme Bytecode VM & Fiber Concurrency Engine running in WebAssembly.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header Toolbar -->
+  <header>
+    <div class="logo-group">
+      <span class="logo-badge">VXS</span>
+      <span class="title">Vx-Scheme Wasm Workbench</span>
+      <div id="status-badge" class="status-badge">
+        <span class="status-dot"></span>
+        <span id="status-text">Loading Wasm...</span>
+      </div>
+    </div>
+
+    <div class="controls-group">
+      <select id="select-preset" class="select-preset" title="Choose a Scheme demonstration preset">
+        <option value="particles">⚡ Concurrent Particle Fibers</option>
+        <option value="attractor">🌀 Chaos Game / Barnsley Fern</option>
+        <option value="mcmc">📊 2D MCMC Target Sampler</option>
+        <option value="wave">🌊 Interactive Wavefront Sim</option>
+        <option value="fibers">🧵 Multi-Fiber Task Scheduler</option>
+        <option value="repl">λ Classic Scheme & Math</option>
+      </select>
+
+      <button id="btn-run" class="btn btn-primary" title="Execute Scheme code (Cmd+Enter or Ctrl+Enter)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <span>Run</span>
+      </button>
+
+      <button id="btn-toggle-fibers" class="btn btn-secondary" title="Pause or Resume Background Fiber Stepping">
+        <span id="fibers-toggle-icon">⏸</span>
+        <span id="fibers-toggle-text">Fibers Running</span>
+      </button>
+
+      <button id="btn-run-tests" class="btn btn-secondary" title="Run Comprehensive In-Browser Test Suite">
+        <span>🧪 Run Tests (41)</span>
+      </button>
+
+      <button id="btn-clear-canvas" class="btn btn-secondary" title="Clear Canvas Visuals">
+        <span>Clear Canvas</span>
+      </button>
+
+      <button id="btn-clear-term" class="btn btn-secondary" title="Clear Terminal Log">
+        <span>Clear REPL</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main>
+    <!-- Code Editor Panel -->
+    <section class="panel editor-panel">
+      <div class="panel-header">
+        <div class="title-badge">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          <span>Scheme Source (C++20 Bytecode Compiler & VM)</span>
+        </div>
+        <div class="shortcut-hint">
+          <span class="shortcut-kbd">Cmd</span> + <span class="shortcut-kbd">Enter</span> to Run
+        </div>
+      </div>
+      <div class="editor-container">
+        <textarea id="code-editor" spellcheck="false" placeholder="Type Scheme expressions here..."></textarea>
+      </div>
+    </section>
+
+    <!-- Right Side: Canvas & REPL -->
+    <div class="right-column">
+      <!-- HTML5 Canvas Visual Viewport -->
+      <section class="panel canvas-panel">
+        <div class="panel-header">
+          <div class="title-badge">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            <span>Live Fiber Canvas Viewport</span>
+          </div>
+          <div class="canvas-overlay">
+            <span class="telemetry-tag" id="tag-fps">60 FPS</span>
+            <span class="telemetry-tag" id="tag-fibers">0 Active Fibers</span>
+          </div>
+        </div>
+        <div class="canvas-wrapper">
+          <canvas id="vxs-canvas" width="800" height="600"></canvas>
+        </div>
+      </section>
+
+      <!-- Terminal / REPL Panel -->
+      <section class="panel terminal-panel">
+        <div class="panel-header">
+          <div class="title-badge">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            <span>Evaluation Output & REPL</span>
+          </div>
+          <span id="eval-time" class="term-meta">Ready</span>
+        </div>
+        <div id="terminal-body" class="terminal-body">
+          <div class="terminal-line term-meta">;; Welcome to Vx-Scheme WebAssembly Workbench!</div>
+          <div class="terminal-line term-meta">;; Pure C++20 bytecode VM & cooperative coroutine scheduler.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Footer Telemetry -->
+  <footer>
+    <div class="footer-left">
+      <span>Core: <strong>vxs.wasm (339 KB)</strong></span>
+      <span>•</span>
+      <span>Architecture: <strong>C++20 Coroutines + Bytecode VM + Mark-Sweep GC</strong></span>
+    </div>
+    <div class="footer-right">
+      <span id="mouse-coords">Mouse: (0, 0)</span>
+      <span>•</span>
+      <span>Built with ❤️ in C++20 & Scheme</span>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="vxs.js"></script>
+  <script src="test_suite.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
