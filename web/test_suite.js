@@ -47,7 +47,22 @@ const TEST_DEFINITIONS = [
   { id: 'fut-multi', name: 'Concurrent Futures Sync', code: '(define f1 (future (+ 10 20))) (define f2 (future (+ 30 40))) (+ (touch f1) (touch f2))', expectOk: true, expectResult: '100' },
   { id: 'fut-coop-fiber', name: 'Cooperative Fiber Yielding', code: '(define bg 0) (future (begin (set! bg 1) (yield) (set! bg 2))) (run-fibers) bg', expectOk: true, expectResult: '2' },
 
-  // 7. Negative & Error-Catching Tests
+  // 7. Modern Collections, Keywords & Maps
+  { id: 'kw-literal', name: 'Keyword Literal & Predicate', code: '(and (keyword? :foo) (not (symbol? :foo)))', expectOk: true, expectResult: '#t' },
+  { id: 'kw-conv', name: 'Keyword to String & Back', code: '(string->keyword (keyword->string :webgpu))', expectOk: true, expectResult: ':webgpu' },
+  { id: 'vec-literal', name: 'Vector Literal [ ... ]', code: '[1 2 (+ 10 20)]', expectOk: true, expectResult: '[1 2 30]' },
+  { id: 'vec-ref-len', name: 'Vector Ref & Length', code: '(let ((v [10 20 30 40])) (+ (vector-ref v 2) (vector-length v)))', expectOk: true, expectResult: '34' },
+  { id: 'vec-as-proc', name: 'Vector As Procedure', code: '([100 200 300] 1)', expectOk: true, expectResult: '200' },
+  { id: 'map-literal', name: 'Map Literal { ... }', code: '(map-ref {:x 100 :y 200} :y)', expectOk: true, expectResult: '200' },
+  { id: 'map-as-proc', name: 'Map As Procedure', code: '({:format :rgba8unorm :usage :storage} :format)', expectOk: true, expectResult: ':rgba8unorm' },
+  { id: 'kw-as-proc', name: 'Keyword As Procedure', code: '(:pipeline {:pipeline :compute-pass})', expectOk: true, expectResult: ':compute-pass' },
+  { id: 'poly-get', name: 'Polymorphic get', code: '(list (get [10 20 30] 2) (get {:a 42} :a) (get \'(x y z) 1))', expectOk: true, expectResult: '(30 42 y)' },
+  { id: 'bracket-let', name: 'Bracketed let [x 10 y 20]', code: '(let [x 10 y 20] (+ x y))', expectOk: true, expectResult: '30' },
+  { id: 'bracket-let-star', name: 'Bracketed let* [a 10 b (* a 2)]', code: '(let* [a 10 b (* a 2) c (+ a b)] c)', expectOk: true, expectResult: '30' },
+  { id: 'bracket-named-let', name: 'Bracketed Named let [i 0 acc 0]', code: '(let loop [i 0 acc 0] (if (= i 5) acc (loop (+ i 1) (+ acc i))))', expectOk: true, expectResult: '10' },
+  { id: 'bracket-do', name: 'Bracketed do [i 0 (+ i 1)]', code: '(do [i 0 (+ i 1) acc 0 (+ acc i)] ((= i 5) acc))', expectOk: true, expectResult: '10' },
+
+  // 8. Negative & Error-Catching Tests
   { id: 'err-unbound', name: 'Catch Unbound Variable Error', code: 'nonexistent-identifier-12345', expectOk: false, errorContains: 'Unbound global variable' },
   { id: 'err-argc-mismatch', name: 'Catch Closure Arity Mismatch', code: '((lambda (x) x) 1 2 3)', expectOk: false, errorContains: 'Closure call: expected 1 args' },
   { id: 'err-non-procedure', name: 'Catch Non-Procedure Call', code: '(42 1 2)', expectOk: false, errorContains: 'Attempted to call non-procedure' },

@@ -65,7 +65,17 @@ public:
       return read_list();
     }
 
-    // Vector
+    // Bracketed Vector [ ... ]
+    if (c == '[') {
+      return read_bracket_vector();
+    }
+
+    // Braced Map { ... }
+    if (c == '{') {
+      return read_brace_map();
+    }
+
+    // Vector #( ... )
     if (c == '#' && peek_next() == '(') {
       advance(); // #
       advance(); // (
@@ -77,7 +87,7 @@ public:
       return read_string();
     }
 
-    // Atom (number, boolean, character, symbol)
+    // Atom (number, boolean, character, symbol, keyword)
     return read_atom();
   }
 
@@ -161,6 +171,46 @@ private:
     return result;
   }
 
+  Value read_bracket_vector() {
+    advance(); // '['
+    skip_whitespace_and_comments();
+    std::vector<Value> elements;
+    while (!is_at_end()) {
+      skip_whitespace_and_comments();
+      if (peek() == ']') {
+        advance();
+        break;
+      }
+      elements.push_back(read_form());
+    }
+    Value list = Value::nil();
+    for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
+      list = vm.heap.cons(*it, list);
+    }
+    Value vec_sym = Value::from_symbol_id(vm.intern("vector"));
+    return vm.heap.cons(vec_sym, list);
+  }
+
+  Value read_brace_map() {
+    advance(); // '{'
+    skip_whitespace_and_comments();
+    std::vector<Value> elements;
+    while (!is_at_end()) {
+      skip_whitespace_and_comments();
+      if (peek() == '}') {
+        advance();
+        break;
+      }
+      elements.push_back(read_form());
+    }
+    Value list = Value::nil();
+    for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
+      list = vm.heap.cons(*it, list);
+    }
+    Value map_sym = Value::from_symbol_id(vm.intern("hash-map"));
+    return vm.heap.cons(map_sym, list);
+  }
+
   Value read_vector() {
     std::vector<Value> elements;
     while (!is_at_end()) {
@@ -204,7 +254,11 @@ private:
     size_t start = cursor;
     while (!is_at_end()) {
       char c = peek();
-      if (std::isspace(static_cast<unsigned char>(c)) || c == '(' || c == ')' || c == '"' || c == ';') {
+      if (std::isspace(static_cast<unsigned char>(c)) ||
+          c == '(' || c == ')' ||
+          c == '[' || c == ']' ||
+          c == '{' || c == '}' ||
+          c == '"' || c == ';') {
         break;
       }
       advance();
@@ -215,6 +269,13 @@ private:
     // Booleans
     if (token == "#t" || token == "#true") return Value::boolean_true();
     if (token == "#f" || token == "#false") return Value::boolean_false();
+
+    // Keywords (:foo)
+    if (token.size() > 1 && token[0] == ':') {
+      std::string kw_name = std::string(token.substr(1));
+      uint32_t kw_id = vm.intern(kw_name);
+      return Value::from_keyword_id(kw_id);
+    }
 
     // Number (Integer or Real)
     char *endptr = nullptr;

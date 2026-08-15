@@ -23,7 +23,8 @@ enum class ObjType : uint8_t {
   Closure,
   Subr,
   Fiber,
-  Future
+  Future,
+  Map
 };
 
 // Base object header for all heap-allocated objects
@@ -187,6 +188,8 @@ struct ObjClosure : Obj {
 //-----------------------------------------------------------------------------
 // 7. Future & Fiber Concurrency
 //-----------------------------------------------------------------------------
+// 7. Future & Fiber Concurrency
+//-----------------------------------------------------------------------------
 struct ObjFuture : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Future;
   Fiber *fiber;
@@ -195,6 +198,42 @@ struct ObjFuture : Obj {
 
   inline explicit ObjFuture(Fiber *f)
       : Obj(ObjType::Future), fiber(f), result(Value::unspecified()), is_completed(false) {}
+};
+
+//-----------------------------------------------------------------------------
+// 8. Associative Map (Key-Value Dict)
+//-----------------------------------------------------------------------------
+struct ObjMap : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Map;
+  std::vector<std::pair<Value, Value>> entries;
+
+  inline ObjMap() : Obj(ObjType::Map) {}
+  inline explicit ObjMap(std::vector<std::pair<Value, Value>> kvs)
+      : Obj(ObjType::Map), entries(std::move(kvs)) {}
+
+  inline Value get(Value key, Value default_val = Value::nil()) const {
+    for (const auto &p : entries) {
+      if (p.first == key) return p.second;
+    }
+    return default_val;
+  }
+
+  inline void set(Value key, Value val) {
+    for (auto &p : entries) {
+      if (p.first == key) {
+        p.second = val;
+        return;
+      }
+    }
+    entries.push_back({key, val});
+  }
+
+  inline bool has(Value key) const {
+    for (const auto &p : entries) {
+      if (p.first == key) return true;
+    }
+    return false;
+  }
 };
 
 //=============================================================================
@@ -219,6 +258,11 @@ public:
     return Value::from_ptr(v);
   }
 
+  inline Value make_map(std::vector<std::pair<Value, Value>> entries = {}) {
+    ObjMap *m = allocate<ObjMap>(std::move(entries));
+    return Value::from_ptr(m);
+  }
+
   inline Value make_string(std::string_view sv) {
     ObjString *s = allocate<ObjString>(sv);
     return Value::from_ptr(s);
@@ -229,8 +273,8 @@ public:
     return Value::from_ptr(subr);
   }
 
-  inline Value make_closure(BytecodeChunk *chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0) {
-    ObjClosure *cl = allocate<ObjClosure>(chunk, arity, is_variadic, env_size);
+  inline Value make_closure(BytecodeChunk *chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
+    ObjClosure *cl = allocate<ObjClosure>(chunk, arity, is_variadic, env_size, max_locals);
     return Value::from_ptr(cl);
   }
 
@@ -246,6 +290,10 @@ public:
 
   static inline bool is_vector(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Vector;
+  }
+
+  static inline bool is_map(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Map;
   }
 
   static inline bool is_string(Value v) {
@@ -326,6 +374,7 @@ private:
       case ObjType::Subr:    static_cast<ObjSubr*>(obj)->~ObjSubr(); break;
       case ObjType::Fiber:   break;
       case ObjType::Future:  static_cast<ObjFuture*>(obj)->~ObjFuture(); break;
+      case ObjType::Map:     static_cast<ObjMap*>(obj)->~ObjMap(); break;
     }
     std::free(obj);
   }

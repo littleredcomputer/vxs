@@ -77,7 +77,7 @@ public:
 private:
   void compile_expr(Value form, BytecodeChunk &chunk, bool is_tail = false) {
     // 1. Self-evaluating literals
-    if (form.is_int() || form.is_double() || form.is_bool() || form.is_nil() || form.is_unspecified() || Heap::is_string(form) || Heap::is_vector(form)) {
+    if (form.is_int() || form.is_double() || form.is_bool() || form.is_nil() || form.is_unspecified() || form.is_keyword() || Heap::is_string(form) || Heap::is_vector(form) || Heap::is_map(form)) {
       emit_constant(form, chunk);
       return;
     }
@@ -252,26 +252,23 @@ private:
           return;
         }
 
-        // (let ((v e)...) body...)
+        // (let ((v e)...) body...) or (let [v e ...] body...)
         if (op_name == "let") {
           Value bindings = Heap::car(rest);
           Value let_body = Heap::cdr(rest);
 
-          // Check if named let: (let loop ((v e)...) body...)
+          // Check if named let: (let loop ((v e)...) body...) or (let loop [v e ...] body...)
           if (bindings.is_symbol()) {
             Value loop_name = bindings;
             bindings = Heap::car(let_body);
             let_body = Heap::cdr(let_body);
 
-            // Desugar named let to recursive lambda
+            auto pairs = parse_bindings(bindings);
             std::vector<Value> params;
             std::vector<Value> inits;
-            Value b = bindings;
-            while (Heap::is_cons(b)) {
-              Value pair = Heap::car(b);
-              params.push_back(Heap::car(pair));
-              inits.push_back(Heap::car(Heap::cdr(pair)));
-              b = Heap::cdr(b);
+            for (const auto &p : pairs) {
+              params.push_back(p.var);
+              inits.push_back(p.val);
             }
 
             Value param_list = Value::nil();
@@ -297,16 +294,12 @@ private:
           // Standard let: compile initializers into local slots
           size_t initial_locals = locals.size();
 
-          Value b = bindings;
-          while (Heap::is_cons(b)) {
-            Value pair = Heap::car(b);
-            Value var_sym = Heap::car(pair);
-            Value val_expr = Heap::car(Heap::cdr(pair));
-            compile_expr(val_expr, chunk, false);
-            int slot = add_local(vm.get_symbol_name(var_sym.as_symbol_id()));
+          auto pairs = parse_bindings(bindings);
+          for (const auto &p : pairs) {
+            compile_expr(p.val, chunk, false);
+            int slot = add_local(vm.get_symbol_name(p.var.as_symbol_id()));
             emit_op(OP_SET_LOCAL, static_cast<uint16_t>(slot), chunk);
             chunk.code.push_back(OP_POP);
-            b = Heap::cdr(b);
           }
 
           Value cur_body = let_body;
@@ -388,31 +381,29 @@ private:
           return;
         }
 
-        // (let* ((v1 e1) (v2 e2)...) body...)
+        // (let* ((v1 e1) (v2 e2)...) body...) or (let* [v1 e1 ...] body...)
         if (op_name == "let*") {
           Value bindings = Heap::car(rest);
           Value body = Heap::cdr(rest);
           Value let_sym = Value::from_symbol_id(vm.intern("let"));
 
-          if (bindings.is_nil()) {
+          auto pairs = parse_bindings(bindings);
+          if (pairs.empty()) {
             Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
             compile_expr(vm.heap.cons(begin_sym, body), chunk, is_tail);
             return;
           }
 
-          std::vector<Value> bind_vec;
-          Value b = bindings;
-          while (Heap::is_cons(b)) {
-            bind_vec.push_back(Heap::car(b));
-            b = Heap::cdr(b);
-          }
-
           Value current = vm.heap.cons(let_sym,
-                            vm.heap.cons(vm.heap.cons(bind_vec.back(), Value::nil()), body));
+                            vm.heap.cons(vm.heap.cons(
+                              vm.heap.cons(pairs.back().var, vm.heap.cons(pairs.back().val, Value::nil())),
+                              Value::nil()), body));
 
-          for (int i = static_cast<int>(bind_vec.size()) - 2; i >= 0; --i) {
+          for (int i = static_cast<int>(pairs.size()) - 2; i >= 0; --i) {
             current = vm.heap.cons(let_sym,
-                        vm.heap.cons(vm.heap.cons(bind_vec[i], Value::nil()),
+                        vm.heap.cons(vm.heap.cons(
+                          vm.heap.cons(pairs[i].var, vm.heap.cons(pairs[i].val, Value::nil())),
+                          Value::nil()),
                           vm.heap.cons(current, Value::nil())));
           }
 
@@ -420,7 +411,7 @@ private:
           return;
         }
 
-        // (do ((var init [step]) ...) (test expr...) cmd...)
+        // (do ((var init [step]) ...) (test expr...) cmd...) or (do [var init [step] ...] ...)
         if (op_name == "do") {
           Value var_clauses = Heap::car(rest);
           Value test_clause = Heap::car(Heap::cdr(rest));
@@ -432,17 +423,35 @@ private:
           std::vector<Value> bindings;
           std::vector<Value> step_args;
 
-          Value vc = var_clauses;
-          while (Heap::is_cons(vc)) {
-            Value item = Heap::car(vc);
-            Value v_name = Heap::car(item);
-            Value v_init = Heap::car(Heap::cdr(item));
-            Value v_step = Heap::is_cons(Heap::cdr(Heap::cdr(item))) ?
-                           Heap::car(Heap::cdr(Heap::cdr(item))) : v_name;
+          if (Heap::is_cons(var_clauses) && Heap::car(var_clauses).is_symbol() &&
+              vm.get_symbol_name(Heap::car(var_clauses).as_symbol_id()) == "vector") {
+            Value elems = Heap::cdr(var_clauses);
+            while (Heap::is_cons(elems)) {
+              Value v_name = Heap::car(elems);
+              elems = Heap::cdr(elems);
+              Value v_init = Heap::is_cons(elems) ? Heap::car(elems) : Value::unspecified();
+              if (Heap::is_cons(elems)) elems = Heap::cdr(elems);
+              Value v_step = v_name;
+              if (Heap::is_cons(elems) && !Heap::car(elems).is_symbol()) {
+                v_step = Heap::car(elems);
+                elems = Heap::cdr(elems);
+              }
+              bindings.push_back(vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
+              step_args.push_back(v_step);
+            }
+          } else {
+            Value vc = var_clauses;
+            while (Heap::is_cons(vc)) {
+              Value item = Heap::car(vc);
+              Value v_name = Heap::car(item);
+              Value v_init = Heap::car(Heap::cdr(item));
+              Value v_step = Heap::is_cons(Heap::cdr(Heap::cdr(item))) ?
+                             Heap::car(Heap::cdr(Heap::cdr(item))) : v_name;
 
-            bindings.push_back(vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
-            step_args.push_back(v_step);
-            vc = Heap::cdr(vc);
+              bindings.push_back(vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
+              step_args.push_back(v_step);
+              vc = Heap::cdr(vc);
+            }
           }
 
           Value binding_list = Value::nil();
@@ -645,6 +654,43 @@ private:
     }
     upvalues.push_back({index, is_local});
     return static_cast<int>(upvalues.size() - 1);
+  }
+
+  struct BindingPair {
+    Value var;
+    Value val;
+  };
+
+  std::vector<BindingPair> parse_bindings(Value bindings) {
+    std::vector<BindingPair> result;
+    if (bindings.is_nil()) return result;
+
+    // Check if bracketed vector: (vector var1 val1 var2 val2 ...)
+    if (Heap::is_cons(bindings) && Heap::car(bindings).is_symbol() &&
+        vm.get_symbol_name(Heap::car(bindings).as_symbol_id()) == "vector") {
+      Value elems = Heap::cdr(bindings);
+      while (Heap::is_cons(elems)) {
+        Value var = Heap::car(elems);
+        elems = Heap::cdr(elems);
+        Value val = Heap::is_cons(elems) ? Heap::car(elems) : Value::unspecified();
+        if (Heap::is_cons(elems)) elems = Heap::cdr(elems);
+        result.push_back({var, val});
+      }
+      return result;
+    }
+
+    // Classic list of pairs: ((var1 val1) (var2 val2) ...)
+    Value b = bindings;
+    while (Heap::is_cons(b)) {
+      Value pair = Heap::car(b);
+      if (Heap::is_cons(pair)) {
+        Value var = Heap::car(pair);
+        Value val = Heap::is_cons(Heap::cdr(pair)) ? Heap::car(Heap::cdr(pair)) : Value::unspecified();
+        result.push_back({var, val});
+      }
+      b = Heap::cdr(b);
+    }
+    return result;
   }
 
   VM &vm;
