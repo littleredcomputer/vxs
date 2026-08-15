@@ -720,14 +720,19 @@
 	   (let-bindings (let loop ((bindings '())
 				    (rest-formals formals)
 				    (rest-actuals args))
-			   (if (null? rest-formals)
-			       (reverse bindings)
-			       (loop
-				(cons `(,(car rest-formals)
-					(quote ,(car rest-actuals)))
-				      bindings)
-				(cdr rest-formals)
-				(cdr rest-actuals)))))
+			   (cond
+			    ((null? rest-formals)
+			     (reverse bindings))
+			    ((pair? rest-formals)
+			     (loop
+			      (cons `(,(car rest-formals)
+				      (quote ,(if (pair? rest-actuals) (car rest-actuals) '())))
+				    bindings)
+			      (cdr rest-formals)
+			      (if (pair? rest-actuals) (cdr rest-actuals) '())))
+			    (else
+			     (reverse (cons `(,rest-formals (quote ,rest-actuals))
+					    bindings))))))
 	   (macro-form `(let ,let-bindings ,body))
 	   (expansion (eval macro-form)))
       (compile-exp expansion env more? val?)))

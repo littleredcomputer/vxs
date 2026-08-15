@@ -24,6 +24,7 @@
 (assert-equal #t (future-done? f0) "future-done? on completed future")
 
 ;; 2. Concurrent futures with yield and value return
+
 (define log '())
 (define f1 (future
              (set! log (cons 'f1-1 log))

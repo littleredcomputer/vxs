@@ -121,7 +121,7 @@ public:
 
   Cell *get(int ix) const {
     if (ix < 0 || ix >= sz)
-      vref_error();
+      vref_error("cellvector::get out of bounds", ix);
     return v[ix];
   }
   void set(int, Cell *);
@@ -133,7 +133,7 @@ public:
   Cell *&operator[](int);
   Cell *top() {
     if (sz <= 0)
-      vref_error();
+      vref_error("cellvector::top on empty vector", -1);
     return v[sz - 1];
   }
   void push(Cell *c) {
@@ -143,7 +143,7 @@ public:
   }
   Cell *pop() {
     if (sz <= 0)
-      vref_error();
+      vref_error("cellvector::pop on empty vector", -1);
     return v[--sz];
   }
   Cell *shift();
@@ -152,7 +152,7 @@ public:
   int size() const { return sz; }
   void discard(int n = 1) {
     if (n < 0 || n > sz)
-      vref_error();
+      vref_error("cellvector::discard out of bounds", n);
     sz -= n;
   }
 
@@ -161,6 +161,7 @@ public:
 private:
   void make_cv(int size, int alloc);
   void expand();
+  void vref_error(const char *msg, int ix = -1) const;
   void vref_error() const;
   int sz;
   int allocated;
@@ -342,6 +343,8 @@ public:
   void display(FILE *);
   void write(FILE *) const;
   void write(sstring &) const;
+  static void write(const void *c, sstring &ss);
+  static void write(const void *c, FILE *out);
 
   bool eq(Cell *c);
   bool eqv(Cell *c) { return eq(c); }
@@ -525,40 +528,58 @@ public:
   bool m_gc_alt_bit = false;
   uint16_t m_flags = 0;
 
-  template <typename T> bool is() const {
+  template <typename T> static inline bool is_cell(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
     if constexpr (std::is_same_v<T, intptr_t>) {
-      if (short_atom(this))
+      if ((p & ATOM) != 0)
         return true;
     } else {
-      if (short_atom(this))
+      if ((p & ATOM) != 0)
         return false;
     }
-    return std::holds_alternative<T>(val);
+    if (!c)
+      return false;
+    return std::holds_alternative<T>(static_cast<const Cell *>(c)->val);
+  }
+
+  template <typename T> bool is() const {
+    return is_cell<T>(static_cast<const void *>(this));
+  }
+
+  template <typename T> static inline const T *get_if_cell(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0 || !c)
+      return nullptr;
+    return std::get_if<T>(&static_cast<const Cell *>(c)->val);
+  }
+
+  template <typename T> static inline T *get_if_cell(void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0 || !c)
+      return nullptr;
+    return std::get_if<T>(&static_cast<Cell *>(c)->val);
+  }
+
+  template <typename T> const T *get_if() const {
+    return get_if_cell<T>(static_cast<const void *>(this));
+  }
+
+  template <typename T> T *get_if() {
+    return get_if_cell<T>(static_cast<void *>(this));
   }
 
   template <typename T> const T &as() const {
-    if (const T *p = get_if<T>())
+    if (const T *p = get_if_cell<T>(static_cast<const void *>(this)))
       return *p;
     error("type error: unexpected cell variant access on ", name());
     return std::get<T>(val);
   }
 
   template <typename T> T &as() {
-    if (T *p = get_if<T>())
+    if (T *p = get_if_cell<T>(static_cast<void *>(this)))
       return *p;
     error("type error: unexpected cell variant access on ", name());
     return std::get<T>(val);
-  }
-
-  template <typename T> const T *get_if() const {
-    if (short_atom(this))
-      return nullptr;
-    return std::get_if<T>(&val);
-  }
-  template <typename T> T *get_if() {
-    if (short_atom(this))
-      return nullptr;
-    return std::get_if<T>(&val);
   }
 
   template <typename Visitor> decltype(auto) visit(Visitor &&visitor) const {
@@ -580,7 +601,7 @@ public:
 
   bool macro() const { return flag(Flag::Macro); }
 
-  static inline bool short_atom(const Cell *c) {
+  static inline bool short_atom(const void *c) {
     return (reinterpret_cast<uintptr_t>(c) & ATOM) != 0;
   }
   static inline bool long_atom(const Cell *c) {
@@ -673,10 +694,60 @@ public:
   static Cell *cdddar(const Cell *c);
   static Cell *cddddr(const Cell *c);
 
+  static inline intptr_t get_int_val(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0)
+      return static_cast<intptr_t>(p) >> 1;
+    if (!c)
+      return 0;
+    return static_cast<const Cell *>(c)->as<intptr_t>();
+  }
+
+  static inline intptr_t get_int(const Cell *c) {
+    return get_int_val(static_cast<const void *>(c));
+  }
+
+  static inline bool is_int(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0)
+      return true;
+    if (!c)
+      return false;
+    return std::holds_alternative<intptr_t>(static_cast<const Cell *>(c)->val);
+  }
+
+  static inline bool is_real(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0)
+      return false;
+    if (!c)
+      return false;
+    return std::holds_alternative<double>(static_cast<const Cell *>(c)->val);
+  }
+
+  static inline double as_real(const void *c) {
+    uintptr_t p = reinterpret_cast<uintptr_t>(c);
+    if ((p & ATOM) != 0)
+      return static_cast<double>(static_cast<intptr_t>(p) >> 1);
+    if (!c) {
+      error("expected a number");
+      return 0.0;
+    }
+    const Cell *self = static_cast<const Cell *>(c);
+    if (std::holds_alternative<intptr_t>(self->val))
+      return static_cast<double>(std::get<intptr_t>(self->val));
+    if (std::holds_alternative<double>(self->val))
+      return std::get<double>(self->val);
+    error("expected a number");
+    return 0.0;
+  }
+
+  double asReal() const {
+    return as_real(static_cast<const void *>(this));
+  }
+
   intptr_t IntValue() const {
-    if (short_atom(this))
-      return reinterpret_cast<intptr_t>(this) >> 1;
-    return as<intptr_t>();
+    return get_int_val(static_cast<const void *>(this));
   }
   char CharValue() const { return as<char>(); }
   const Subr *SubrValue() const { return &as<Subr>(); }
@@ -720,9 +791,6 @@ public:
   cellvector *unsafe_vector_value() const { return vector_payload(); }
 
   static std::string real_to_string(double);
-  double asReal() const {
-    return is<intptr_t>() ? (double)IntValue() : RealValue();
-  }
   bool isBoolean() { return this == &Bool_T || this == &Bool_F; }
   bool istrue() { return this != &Bool_F; }
   bool ispair();
@@ -773,6 +841,10 @@ public:
 
   static void sanity_check();
 };
+
+inline intptr_t get_int(const Cell *c) {
+  return Cell::get_int(c);
+}
 
 static_assert(alignof(Cell) >= 2,
               "Cell must be at least 2-byte aligned for tagged pointers");
@@ -867,6 +939,7 @@ public:
   // Fiber management and execution
   void register_fiber(Fiber *f) { active_fibers.push_back(f); }
   void unregister_fiber(Fiber *f);
+  size_t active_fibers_count() const { return active_fibers.size(); }
   std::unique_ptr<Fiber> spawn_fiber(Cell *form);
 
   Step eval_coro(Fiber &f);
@@ -1160,8 +1233,8 @@ struct Fiber {
   static Cell *tag_int(intptr_t i) {
     return reinterpret_cast<Cell *>((i << 1) | Cell::ATOM);
   }
-  static intptr_t untag_int(Cell *c) {
-    return (reinterpret_cast<intptr_t>(c) & static_cast<intptr_t>(~Cell::ATOM)) >> 1;
+  static intptr_t untag_int(const void *c) {
+    return static_cast<intptr_t>(reinterpret_cast<intptr_t>(c)) >> 1;
   }
 
   void push(Cell *c) { m_stack.push(c); }

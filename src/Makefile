@@ -27,6 +27,21 @@ vxs-bootstrap:	$(BOOTSTRAP_OBJ) $(UNIX_OBJ)
 vx-scheme:	$(VM_COMP_OBJ) $(UNIX_OBJ)
 		$(CC) $(CFLAGS) -o $@ $^ -lstdc++ -lc -lm
 
+EMSDK_DIR	?= $(HOME)/Work/me/emsdk/upstream/emscripten
+EMCC		= $(shell which em++ 2>/dev/null || echo $(EMSDK_DIR)/em++)
+EMFLAGS		= -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER) \
+		  -s WASM=1 \
+		  -s MODULARIZE=1 \
+		  -s EXPORT_NAME='createVxSchemeModule' \
+		  -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8"]' \
+		  -s EXPORTED_FUNCTIONS='["_vxs_init","_vxs_eval","_vxs_step_fibers","_vxs_active_fibers_count","_malloc","_free"]' \
+		  -s ALLOW_MEMORY_GROWTH=1 \
+		  -s NO_EXIT_RUNTIME=1
+
+wasm:		_library.cpp _compiler.cpp wasm_api.cpp
+		mkdir -p ../web
+		$(EMCC) $(EMFLAGS) cell.cpp ctx.cpp subr.cpp io.cpp symtab.cpp vm.cpp lib.cpp _library.cpp _compiler.cpp wasm_api.cpp -o ../web/vxs.js
+
 _library.cpp _compiler.cpp: compiler.scm bootstrap.scm library.scm vxs-bootstrap
 		./vxs-bootstrap . < bootstrap.scm
 

@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
 
   // Establish *argv* in global environment
 
-  ctx.set_var(intern("*argv*"), scheme_argv, 0);
+  ctx.set_var(intern("*argv*"), scheme_argv);
   ctx.gc_unprotect();
 
   // See if we have a canned main procedure.

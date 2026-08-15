@@ -41,21 +41,14 @@ static FILE *iport(Context *ctx, Cell *arglist) {
 
 static bool exact_list(Cell *arglist) {
   for (Cell *a = arglist; a != nil; a = Cell::cdr(a)) {
-    if (!Cell::car(a)->is<intptr_t>())
+    if (!Cell::is_int(Cell::car(a)))
       return false;
   }
   return true;
 }
 
 inline static double asReal(Cell *c) {
-  if (c->is<intptr_t>())
-    return (double)c->IntValue();
-  else if (c->is<double>())
-    return c->RealValue();
-  else {
-    error("expected a number");
-    return 0.0;
-  }
+  return Cell::as_real(c);
 }
 
 //---------------------------------------------------------------------
@@ -71,7 +64,7 @@ Cell *skplus(Context *ctx, Cell *arglist) {
     intptr_t result = 0;
 
     for (Cell *p = arglist; p != nil; p = Cell::cdr(p))
-      result += car(p)->IntValue();
+      result += get_int(car(p));
 
     return ctx->make_int(result);
   } else {
@@ -86,14 +79,14 @@ Cell *skplus(Context *ctx, Cell *arglist) {
 
 Cell *skminus(Context *ctx, Cell *arglist) {
   if (exact_list(arglist)) {
-    intptr_t result = car(arglist)->IntValue();
+    intptr_t result = get_int(car(arglist));
     arglist = cdr(arglist);
 
     if (arglist == nil)
       return ctx->make_int(-result);
 
     for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-      result -= car(a)->IntValue();
+      result -= get_int(car(a));
 
     return ctx->make_int(result);
   } else {
@@ -135,7 +128,7 @@ Cell *times(Context *ctx, Cell *arglist) {
     intptr_t result = 1;
 
     for (Cell *p = arglist; p != nil; p = Cell::cdr(p))
-      result *= Cell::car(p)->IntValue();
+      result *= get_int(Cell::car(p));
 
     return ctx->make_int(result);
   } else {
@@ -154,7 +147,7 @@ Cell *skmax(Context *ctx, Cell *arglist) {
     intptr_t z;
 
     for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-      if ((z = Cell::car(a)->IntValue()) > m)
+      if ((z = get_int(Cell::car(a))) > m)
         m = z;
 
     return ctx->make_int(m);
@@ -176,7 +169,7 @@ Cell *skmin(Context *ctx, Cell *arglist) {
     intptr_t z;
 
     for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-      if ((z = car(a)->IntValue()) < m)
+      if ((z = get_int(car(a))) < m)
         m = z;
 
     return ctx->make_int(m);
@@ -195,7 +188,7 @@ Cell *skmin(Context *ctx, Cell *arglist) {
 Cell *skabs(Context *ctx, Cell *arglist) {
   Cell *c = car(arglist);
   if (c->is<intptr_t>())
-    return ctx->make_int(std::abs(c->IntValue()));
+    return ctx->make_int(std::abs(get_int(c)));
   else if (c->is<double>())
     return ctx->make_real(fabs(c->RealValue()));
   else
@@ -334,8 +327,8 @@ template <typename Op> static Cell *numeric_compare(Context *ctx, Cell *args) {
   for (Cell *a = args; a != nil; a = Cell::cdr(a)) {
     if (Cell::cdr(a) != nil) {
       if (exact) {
-        intptr_t ia = Cell::car(a)->IntValue();
-        intptr_t ib = Cell::cadr(a)->IntValue();
+        intptr_t ia = get_int(Cell::car(a));
+        intptr_t ib = get_int(Cell::cadr(a));
         if (!op(ia, ib))
           return &Cell::Bool_F;
       } else {
@@ -368,19 +361,19 @@ static constexpr subr_f numeric_p = char_class<isdigit>;
 static constexpr subr_f whitespace_p = char_class<isspace>;
 
 Cell *negative_p(Context *ctx, Cell *arglist) {
-  return ctx->make_boolean(car(arglist)->IntValue() < 0);
+  return ctx->make_boolean(get_int(car(arglist)) < 0);
 }
 
 Cell *positive_p(Context *ctx, Cell *arglist) {
-  return ctx->make_boolean(car(arglist)->IntValue() > 0);
+  return ctx->make_boolean(get_int(car(arglist)) > 0);
 }
 
 Cell *even_p(Context *ctx, Cell *arglist) {
-  return ctx->make_boolean((car(arglist)->IntValue() & 1) == 0);
+  return ctx->make_boolean((get_int(car(arglist)) & 1) == 0);
 }
 
 Cell *odd_p(Context *ctx, Cell *arglist) {
-  return ctx->make_boolean((car(arglist)->IntValue() & 1) == 1);
+  return ctx->make_boolean((get_int(car(arglist)) & 1) == 1);
 }
 
 Cell *eq(Context *ctx, Cell *arglist) {
@@ -429,7 +422,7 @@ Cell *write_char(Context *ctx, Cell *arglist) {
 }
 
 Cell *skmake_vector(Context *ctx, Cell *arglist) {
-  intptr_t n = car(arglist)->IntValue();
+  intptr_t n = Cell::get_int(car(arglist));
 
   if (cdr(arglist) != nil)
     return ctx->make_vector(n, cadr(arglist));
@@ -439,14 +432,14 @@ Cell *skmake_vector(Context *ctx, Cell *arglist) {
 
 Cell *vector_ref(Context *ctx, Cell *arglist) {
   cellvector *v = car(arglist)->VectorValue();
-  int n = cadr(arglist)->IntValue();
+  int n = Cell::get_int(cadr(arglist));
 
   return v->get(n);
 }
 
 Cell *vector_set(Context *ctx, Cell *arglist) {
   cellvector *v = car(arglist)->VectorValue();
-  int n = cadr(arglist)->IntValue();
+  int n = Cell::get_int(cadr(arglist));
 
   v->set(n, caddr(arglist));
   return unspecified;
@@ -532,7 +525,7 @@ Cell *vector_to_list(Context *ctx, Cell *arglist) {
 
 Cell *list_ref(Context *ctx, Cell *arglist) {
   Cell *list = car(arglist);
-  int n = cadr(arglist)->IntValue();
+  int n = get_int(cadr(arglist));
   int ix = 0;
 
   for (Cell *a = list; a != nil; a = Cell::cdr(a))
@@ -544,16 +537,16 @@ Cell *list_ref(Context *ctx, Cell *arglist) {
 }
 
 Cell *quotient(Context *ctx, Cell *arglist) {
-  int d = cadr(arglist)->IntValue();
+  int d = get_int(cadr(arglist));
   if (d == 0)
     error("quotient /0");
 
-  return ctx->make_int(car(arglist)->IntValue() / d);
+  return ctx->make_int(get_int(car(arglist)) / d);
 }
 
 Cell *remainder(Context *ctx, Cell *arglist) {
-  int n = car(arglist)->IntValue();
-  int d = cadr(arglist)->IntValue();
+  int n = get_int(car(arglist));
+  int d = get_int(cadr(arglist));
   if (d == 0)
     error("remainder /0");
 
@@ -561,8 +554,8 @@ Cell *remainder(Context *ctx, Cell *arglist) {
 }
 
 Cell *modulo(Context *ctx, Cell *arglist) {
-  int n = car(arglist)->IntValue();
-  int d = cadr(arglist)->IntValue();
+  int n = get_int(car(arglist));
+  int d = get_int(cadr(arglist));
   int m = n % d;
   if (m < 0 && d > 0)
     return ctx->make_int(m + d);
@@ -623,7 +616,7 @@ Cell *gcd(Context *ctx, Cell *arglist) {
   int g = 0;
 
   for (Cell *i = arglist; i != nil; i = Cell::cdr(i))
-    g = gcd2(g, car(i)->IntValue());
+    g = gcd2(g, get_int(car(i)));
 
   return ctx->make_int(g);
 }
@@ -633,7 +626,7 @@ Cell *lcm(Context *ctx, Cell *arglist) {
   int g = 0;
 
   for (Cell *ip = arglist; ip != nil; ip = Cell::cdr(ip)) {
-    int i = car(ip)->IntValue();
+    int i = get_int(car(ip));
     product *= i;
     g = gcd2(g, i);
   }
@@ -648,7 +641,7 @@ Cell *null_p(Context *ctx, Cell *arglist) {
 Cell *zero_p(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
   if (a->is<intptr_t>())
-    return ctx->make_boolean(a->IntValue() == 0);
+    return ctx->make_boolean(get_int(a) == 0);
   else
     return ctx->make_boolean(a->RealValue() == 0.0);
 }
@@ -728,9 +721,9 @@ Cell *number_to_string(Context *ctx, Cell *arglist) {
   if (a->is<intptr_t>()) {
     int base = 10;
     if (cdr(arglist) != nil) {
-      base = cadr(arglist)->IntValue();
+      base = get_int(cadr(arglist));
     }
-    intptr_t val = a->IntValue();
+    intptr_t val = get_int(a);
     if (base == 10)
       return ctx->make_string(std::to_string(val));
     if (base == 16) {
@@ -795,7 +788,7 @@ Cell *string_to_list(Context *ctx, Cell *arglist) {
 Cell *sklist(Context *ctx, Cell *arglist) { return arglist; }
 
 Cell *skmake_string(Context *ctx, Cell *arglist) {
-  int n = car(arglist)->IntValue();
+  int n = get_int(car(arglist));
   char ch = ' ';
 
   if (cdr(arglist) != nil)
@@ -806,7 +799,7 @@ Cell *skmake_string(Context *ctx, Cell *arglist) {
 
 Cell *string_ref(Context *ctx, Cell *arglist) {
   Cell *pstr = car(arglist);
-  int ix = cadr(arglist)->IntValue();
+  int ix = get_int(cadr(arglist));
   int n = static_cast<int>(pstr->StringLength());
 
   if (ix < 0 || ix >= n)
@@ -943,7 +936,7 @@ Cell *string_to_number(Context *ctx, Cell *arglist) {
     return ctx->make_boolean(false);
 
   if (cdr(arglist) != nil)
-    base = cadr(arglist)->IntValue();
+    base = get_int(cadr(arglist));
 
   errno = 0;
   int i = strtol(s.c_str(), &t, base);
@@ -985,7 +978,7 @@ Cell *list_to_vector(Context *ctx, Cell *arglist) {
 Cell *string_set(Context *ctx, Cell *arglist) {
   Cell *pstr = car(arglist);
   std::string &s = pstr->mutable_string();
-  size_t ix = cadr(arglist)->IntValue();
+  size_t ix = get_int(cadr(arglist));
 
   if (ix >= s.length())
     error("string index out of bounds");
@@ -1019,8 +1012,8 @@ Cell *substring(Context *ctx, Cell *arglist) {
   Cell *pstr = car(arglist);
   const std::string &s = pstr->StringValue();
   int n = static_cast<int>(s.length());
-  int ix = cadr(arglist)->IntValue();
-  int iy = caddr(arglist)->IntValue();
+  int ix = get_int(cadr(arglist));
+  int iy = get_int(caddr(arglist));
 
   if (ix < 0 || iy < ix || n < iy)
     error("string index out of bounds");
@@ -1065,7 +1058,7 @@ Cell *close_output_port(Context *ctx, Cell *arglist) {
 }
 
 Cell *integer_to_char(Context *ctx, Cell *arglist) {
-  return ctx->make_char(car(arglist)->IntValue() & 255);
+  return ctx->make_char(get_int(car(arglist)) & 255);
 }
 
 Cell *char_to_integer(Context *ctx, Cell *arglist) {
@@ -1125,14 +1118,14 @@ Cell *reverse(Context *ctx, Cell *arglist) {
 Cell *exact_to_inexact(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
   if (a->is<intptr_t>())
-    return ctx->make_real((double)a->IntValue());
+    return ctx->make_real((double)get_int(a));
   return ctx->make_real(a->RealValue());
 }
 
 Cell *inexact_to_exact(Context *ctx, Cell *arglist) {
   Cell *a = car(arglist);
   if (a->is<intptr_t>())
-    return ctx->make_int(a->IntValue());
+    return ctx->make_int(get_int(a));
   return ctx->make_int(static_cast<intptr_t>(a->RealValue()));
 }
 
@@ -1221,8 +1214,8 @@ static Cell *expt(Context *ctx, Cell *arglist) {
 
     // A1:
 
-    int Z = car(arglist)->IntValue();
-    int N = cadr(arglist)->IntValue();
+    int Z = get_int(car(arglist));
+    int N = get_int(cadr(arglist));
     int Y = 1;
     int even;
 
@@ -1273,21 +1266,21 @@ static Cell *logand(Context *ctx, Cell *arglist) {
   int value = ~0;
 
   for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-    value &= car(a)->IntValue();
+    value &= get_int(car(a));
 
   return ctx->make_int(value);
 }
 
 static Cell *logbit_p(Context *ctx, Cell *arglist) {
   return ctx->make_boolean(
-      (cadr(arglist)->IntValue() & (1 << car(arglist)->IntValue())) != 0);
+      (get_int(cadr(arglist)) & (1 << get_int(car(arglist)))) != 0);
 }
 
 static Cell *logior(Context *ctx, Cell *arglist) {
   int value = 0;
 
   for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-    value |= car(a)->IntValue();
+    value |= get_int(car(a));
 
   return ctx->make_int(value);
 }
@@ -1296,13 +1289,13 @@ static Cell *logxor(Context *ctx, Cell *arglist) {
   int value = 0;
 
   for (Cell *a = arglist; a != nil; a = Cell::cdr(a))
-    value ^= car(a)->IntValue();
+    value ^= get_int(car(a));
 
   return ctx->make_int(value);
 }
 
 static Cell *lognot(Context *ctx, Cell *arglist) {
-  return ctx->make_int(~car(arglist)->IntValue());
+  return ctx->make_int(~get_int(car(arglist)));
 }
 
 static Cell *skerror(Context *ctx, Cell *arglist) {

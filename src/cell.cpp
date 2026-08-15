@@ -65,6 +65,11 @@ bool Cell::eq(Cell *that) {
     return false;
   if (!atomic(this) || !atomic(that))
     return false; // Conses must have the exact same pointer to be eq
+  if (auto *s1 = get_if<Symbol>()) {
+    if (auto *s2 = that->get_if<Symbol>())
+      return s1->s == s2->s;
+    return false;
+  }
   return val == that->val;
 }
 
@@ -249,7 +254,7 @@ void cellvector::make_cv(int size, int alloc) {
 
 Cell *&cellvector::operator[](int ix) {
   if (ix < 0 || ix >= sz)
-    vref_error();
+    vref_error("cellvector::operator[] out of bounds", ix);
 
   return v[ix];
 }
@@ -258,7 +263,7 @@ void cellvector::set(int ix, Cell *c)
 
 {
   if (ix < 0 || ix >= sz)
-    vref_error();
+    vref_error("cellvector::set out of bounds", ix);
 
   v[ix] = c;
 }
@@ -292,7 +297,15 @@ void cellvector::unshift(Cell *val) {
   v[0] = val;
 }
 
-void cellvector::vref_error() const { error("vector reference out of bounds"); }
+void cellvector::vref_error(const char *msg, int ix) const {
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%s (ix=%d, sz=%d, allocated=%d)", msg, ix, sz, allocated);
+  error(buf);
+}
+
+void cellvector::vref_error() const {
+  vref_error("vector reference out of bounds", -1);
+}
 
 void cellvector::clear() { sz = 0; }
 
@@ -375,25 +388,14 @@ public:
     // stiffed us with 4-aligned memory, we "burn" 4 bytes
     // of it.
 
-    int storage_size = slabsize * sizeof(Cell) + 4;
+    int storage_size = slabsize * sizeof(Cell) + 8;
     storage = (char *)malloc(storage_size);
 
     if (!storage)
       error("out of memory");
 
-    // Supposedly the ANSI library guarantees that storage
-    // is 4-aligned!
-
-    if ((reinterpret_cast<intptr_t>(storage)) & 3)
-      abort();
-
-    // But if it's not 8-aligned we can fix that using the
-    // extra 4 bytes we allocated.
-
-    if ((reinterpret_cast<intptr_t>(storage)) & 7)
-      start = reinterpret_cast<Cell *>(storage + 4);
-    else
-      start = reinterpret_cast<Cell *>(storage);
+    uintptr_t p = reinterpret_cast<uintptr_t>(storage);
+    start = reinterpret_cast<Cell *>((p + 7) & ~static_cast<uintptr_t>(7));
 
     memset(storage, 0, storage_size);
 

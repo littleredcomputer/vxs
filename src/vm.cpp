@@ -67,7 +67,7 @@ static constexpr auto n_vmops = std::size(optab);
 static bool exact_top_n(cellvector *cv, int n) {
   int sz = cv->size();
   for (int ix = sz - n; ix < sz; ++ix) {
-    if (!cv->get_unchecked(ix)->is<intptr_t>())
+    if (!Cell::is_int(cv->get_unchecked(ix)))
       return false;
   }
   return true;
@@ -205,7 +205,7 @@ PROC:
     insns = v->get(0)->unsafe_vector_value();
     literals = v->get(1)->unsafe_vector_value();
     r_envt = v->get(2);
-    pc = v->get(3)->IntValue();
+    pc = Cell::get_int_val(v->get(3));
   }
 
 XEQ:
@@ -471,7 +471,7 @@ XEQ:
       error("bad arguments to vector-set!");
     int ix = m_stack.size() - 1;
     cellvector *cv = m_stack.get(ix - 2)->VectorValue();
-    cv->set(m_stack.get(ix - 1)->IntValue(), m_stack.get(ix));
+    cv->set(Cell::get_int_val(m_stack.get(ix - 1)), m_stack.get(ix));
     m_stack.discard(3);
     f.push(unspecified);
     break;
@@ -480,7 +480,7 @@ XEQ:
     n_args = insn->InsnValue()->int_val();
     if (n_args != 2)
       error("bad arguments to vector-ref!");
-    intptr_t ix = f.pop()->IntValue();
+    intptr_t ix = Cell::get_int_val(f.pop());
     cellvector *cv = f.pop()->VectorValue();
     f.push(cv->get(ix));
     break;
@@ -494,7 +494,7 @@ XEQ:
   case 32: { // zero?
     Cell *c = f.pop();
     if (c->is<intptr_t>())
-      f.push(make_boolean(c->IntValue() == 0));
+      f.push(make_boolean(Cell::get_int_val(c) == 0));
     else if (c->is<double>())
       f.push(make_boolean(c->RealValue() == 0.0));
     else
@@ -507,13 +507,13 @@ XEQ:
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t sum = 0;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        sum += m_stack.get(ix)->IntValue();
+        sum += Cell::get_int_val(m_stack.get(ix));
       m_stack.discard(n_args);
       f.push(make_int(sum));
     } else {
       double sum = 0.0;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        sum += m_stack.get(ix)->asReal();
+        sum += Cell::as_real(m_stack.get(ix));
       m_stack.discard(n_args);
       f.push(make_real(sum));
     }
@@ -525,13 +525,13 @@ XEQ:
     if (exact_top_n(&m_stack, n_args)) {
       intptr_t product = 1;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        product *= m_stack.get(ix)->IntValue();
+        product *= Cell::get_int_val(m_stack.get(ix));
       m_stack.discard(n_args);
       f.push(make_int(product));
     } else {
       double product = 1.0;
       for (int ix = sz - n_args; ix < sz; ++ix)
-        product *= m_stack.get(ix)->asReal();
+        product *= Cell::as_real(m_stack.get(ix));
       m_stack.discard(n_args);
       f.push(make_real(product));
     }
@@ -540,8 +540,8 @@ XEQ:
   case 35: { // quotient
     if (insn->InsnValue()->int_val() != 2)
       error("wrong # args");
-    intptr_t d = f.pop()->IntValue();
-    intptr_t n = f.pop()->IntValue();
+    intptr_t d = Cell::get_int_val(f.pop());
+    intptr_t n = Cell::get_int_val(f.pop());
     if (d == 0)
       error("/0");
     f.push(make_int(n / d));
@@ -550,8 +550,8 @@ XEQ:
   case 36: { // remainder
     if (insn->InsnValue()->int_val() != 2)
       error("wrong # args");
-    intptr_t d = f.pop()->IntValue();
-    intptr_t n = f.pop()->IntValue();
+    intptr_t d = Cell::get_int_val(f.pop());
+    intptr_t n = Cell::get_int_val(f.pop());
     if (d == 0)
       error("/0");
     f.push(make_int(n % d));
@@ -562,21 +562,21 @@ XEQ:
     int sz = m_stack.size();
     if (exact_top_n(&m_stack, n_args)) {
       if (n_args == 1) {
-        f.push(make_int(-f.pop()->IntValue()));
+        f.push(make_int(-Cell::get_int_val(f.pop())));
       } else {
-        intptr_t difference = m_stack.get(sz - n_args)->IntValue();
+        intptr_t difference = Cell::get_int_val(m_stack.get(sz - n_args));
         for (int ix = sz - n_args + 1; ix < sz; ++ix)
-          difference -= m_stack.get(ix)->IntValue();
+          difference -= Cell::get_int_val(m_stack.get(ix));
         m_stack.discard(n_args);
         f.push(make_int(difference));
       }
     } else {
       if (n_args == 1) {
-        f.push(make_real(-f.pop()->asReal()));
+        f.push(make_real(-Cell::as_real(f.pop())));
       } else {
-        double difference = m_stack.get(sz - n_args)->asReal();
+        double difference = Cell::as_real(m_stack.get(sz - n_args));
         for (int ix = sz - n_args + 1; ix < sz; ++ix)
-          difference -= m_stack.get(ix)->asReal();
+          difference -= Cell::as_real(m_stack.get(ix));
         m_stack.discard(n_args);
         f.push(make_real(difference));
       }
@@ -589,9 +589,12 @@ XEQ:
   case 39: // null?
     f.push(f.pop() == &Cell::Nil ? &Cell::Bool_T : &Cell::Bool_F);
     break;
-  case 40: // eq?
-    f.push(f.pop()->eq(f.pop()) ? &Cell::Bool_T : &Cell::Bool_F);
+  case 40: { // eq?
+    Cell *b = f.pop();
+    Cell *a = f.pop();
+    f.push(a->eq(b) ? &Cell::Bool_T : &Cell::Bool_F);
     break;
+  }
   case 41: // pair?
     f.push(f.pop()->ispair() ? &Cell::Bool_T : &Cell::Bool_F);
     break;
@@ -712,11 +715,14 @@ Cell *Context::force_compiled_promise(Cell *promise) {
 // an instruction in list form (e.g., '(consti 99) ).
 
 static Cell *make_instruction(Context *ctx, Cell *arglist) {
-  // return ctx->make_instruction (car (arglist));
+  if (arglist != nil && cdr(arglist) == nil && car(arglist)->ispair())
+    return ctx->make_instruction(car(arglist));
   return ctx->make_instruction(arglist);
 }
 
 Cell *Context::make_instruction(Cell *insn) {
+  if (insn == nil || !car(insn)->is<Cell::Symbol>())
+    error("make_instruction: expected symbol opcode as first element");
   psymbol op = car(insn)->SymbolValue();
   int opcode = find_op(op);
   if (opcode < 0)
@@ -731,24 +737,31 @@ Cell *Context::make_instruction(int opcode, Cell *operands) {
 
   switch (optab[opcode].opnd_type) {
   case OP_INT:
-    payload = opnd->IntValue();
+    payload = opnd != nil ? Cell::get_int_val(opnd) : 0;
     break;
   case OP_SYMBOL:
-    payload = opnd->SymbolValue();
+    payload = (opnd != nil && opnd->is<Cell::Symbol>()) ? opnd->SymbolValue() : intern("");
     break;
   case OP_SUBR: {
-    int c = cadr(operands)->IntValue();
+    Cell *count_cell = (operands != nil && cdr(operands) != nil && cadr(operands) != nil) ? cadr(operands) : nil;
+    int c = count_cell != nil ? Cell::get_int_val(count_cell) : 0;
     if (c < 0 || c > 255)
       error("count too large to store in instruction field");
     count = c;
-    payload = opnd->SymbolValue();
+    payload = (opnd != nil && opnd->is<Cell::Symbol>()) ? opnd->SymbolValue() : intern("");
     break;
   }
   case OP_LEXADDR: {
-    int u1 = opnd->IntValue();
-    int u2 = cadr(operands)->IntValue();
-    if (u1 > 32767 || u2 > 32767 || u1 < -32768 || u2 < -32768)
-      error("lexical address too large");
+    int u1 = opnd ? Cell::get_int_val(opnd) : 0;
+    int u2 = (operands != nil && cdr(operands) != nil && cadr(operands) != nil) ? Cell::get_int_val(cadr(operands)) : 0;
+    if (u1 > 32767 || u2 > 32767 || u1 < -32768 || u2 < -32768) {
+      sstring ss;
+      operands->write(ss);
+      char buf[256];
+      snprintf(buf, sizeof(buf), "lexical address too large for op '%s': %s (u1=%d, u2=%d)",
+               optab[opcode].name, ss.str(), u1, u2);
+      error(buf);
+    }
     payload = Cell::LexAddr{static_cast<int16_t>(u1), static_cast<int16_t>(u2)};
     break;
   }
@@ -757,8 +770,8 @@ Cell *Context::make_instruction(int opcode, Cell *operands) {
   default:
     error("unhandled operand type");
   }
-
-  return alloc<Cell::Insn>(opcode, count, payload);
+  return alloc<Cell::Insn>(
+      Cell::Insn{static_cast<uint8_t>(opcode), static_cast<uint8_t>(count), payload});
 }
 
 static Cell *execute(Context *ctx, Cell *arglist) {
@@ -786,9 +799,8 @@ static Cell *write_compiled_procedure(Context *ctx, Cell *arglist) {
 //   GC disabled.
 
 Cell *Context::load_compiled_procedure(vm_cproc *cp) {
-  // We create a static argument list of two elements, which we reuse.
-  Cell *insns = load_instructions(cp);
-  Cell *literals = make_vector(cp->n_literals);
+  Cell *insns = gc_protect(load_instructions(cp));
+  Cell *literals = gc_protect(make_vector(cp->n_literals));
   cellvector *litv = literals->VectorValue();
   for (unsigned int ix = 0; ix < cp->n_literals; ++ix) {
     sstring litstr;
@@ -798,21 +810,26 @@ Cell *Context::load_compiled_procedure(vm_cproc *cp) {
       error("undecipherable literal", cp->literals[ix]);
     litv->set(ix, lit);
   }
-  return make_compiled_procedure(insns, literals, nil, cp->entry);
+  Cell *res = make_compiled_procedure(insns, literals, nil, cp->entry);
+  gc_unprotect(2);
+  return res;
 }
 
 Cell *Context::load_instructions(vm_cproc *cp) {
   Cell *zero = make_int(0);
   Cell *a1 = cons(zero, nil);
-  Cell *a0 = cons(zero, a1); // now a0 == '(0 0)
+  Cell *a0 = gc_protect(cons(zero, a1)); // now a0 == '(0 0)
 
-  Cell *insns = make_vector(cp->n_insns);
+  Cell *insns = gc_protect(make_vector(cp->n_insns));
   cellvector *insv = insns->VectorValue();
   for (unsigned int ix = 0; ix < cp->n_insns; ++ix) {
     vm_insn *insn = cp->insns + ix;
     int opcode = insn->opcode;
-    if (opcode > n_vmops)
-      error("bad opcode in stored proc");
+    if (opcode > n_vmops) {
+      char buf[128];
+      snprintf(buf, sizeof(buf), "bad opcode %d at ix=%u (max=%zu)", opcode, ix, n_vmops);
+      error(buf);
+    }
     Cell::setcar(a0, zero);
     Cell::setcar(a1, zero);
     switch (optab[opcode].opnd_type) {
@@ -824,9 +841,11 @@ Cell *Context::load_instructions(vm_cproc *cp) {
           a0, make_symbol(intern(static_cast<const char *>(insn->operand))));
       break;
     case OP_LEXADDR: {
-      int la = reinterpret_cast<intptr_t>(insn->operand);
-      Cell::setcar(a0, make_int(la >> 16));
-      Cell::setcar(a1, make_int(la & 0xffff));
+      uint32_t la = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(insn->operand));
+      int16_t e_skip = static_cast<int16_t>(la >> 16);
+      int16_t b_skip = static_cast<int16_t>(la & 0xffff);
+      Cell::setcar(a0, make_int(e_skip));
+      Cell::setcar(a1, make_int(b_skip));
       break;
     }
     case OP_SUBR:
@@ -839,6 +858,7 @@ Cell *Context::load_instructions(vm_cproc *cp) {
     }
     insv->set(ix, make_instruction(opcode, a0));
   }
+  gc_unprotect(2);
   return insns;
 }
 
@@ -868,7 +888,7 @@ Cell *Context::write_compiled_procedure(Cell *arglist) {
   cellvector *insns = cproc->get(0)->VectorValue();
   cellvector *literals = cproc->get(1)->VectorValue();
   cellvector *root_bindings = car(root_envt)->VectorValue();
-  int entry = cproc->get(3)->IntValue();
+  int entry = get_int(cproc->get(3));
   FILE *output = current_output()->OportValue();
   fprintf(output, "static vm_insn %s_insns[] = {\n", name.c_str());
   for (int ix = 0; ix < insns->size(); ++ix) {

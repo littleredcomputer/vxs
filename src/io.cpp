@@ -366,21 +366,30 @@ std::string Cell::real_to_string(double d) {
 }
 
 void Cell::write(FILE *out) const {
+  write(static_cast<const void *>(this), out);
+}
+
+void Cell::write(const void *c, FILE *out) {
   sstring output;
-  write(output);
+  write(c, output);
   fputs(output.str(), out);
 }
 
 void Cell::write(sstring &ss) const {
-  if (this == &Nil) {
+  write(static_cast<const void *>(this), ss);
+}
+
+void Cell::write(const void *c, sstring &ss) {
+  if (!c || c == &Nil) {
     ss.append("()");
     return;
   }
-  if (short_atom(this)) {
-    ss.append(std::to_string(IntValue()));
+  if (short_atom(c)) {
+    ss.append(std::to_string(get_int_val(c)));
     return;
   }
 
+  const Cell *self = static_cast<const Cell *>(c);
   std::visit(
       overloaded{
           [&](intptr_t i) {
@@ -411,17 +420,19 @@ void Cell::write(sstring &ss) const {
           [&](const Cell::Cons &) {
             const Cell *d;
             ss.append('(');
-            for (d = this; d->is<Cell::Cons>(); d = cdr(d)) {
+            for (d = self; d != nil && !short_atom(static_cast<const void *>(d)) && d->is<Cell::Cons>(); d = cdr(d)) {
               if (d == nil) {
                 ss.append(')');
                 return;
               }
-              car(d)->write(ss);
+              write(car(d), ss);
               if (cdr(d) != nil)
                 ss.append(' ');
             }
-            ss.append(". ");
-            d->write(ss);
+            if (d != nil) {
+              ss.append(". ");
+              write(d, ss);
+            }
             ss.append(')');
           },
           [&](const std::string &str) {
@@ -443,32 +454,32 @@ void Cell::write(sstring &ss) const {
             for (int ix = 0; ix < v.cv->size(); ++ix) {
               if (ix != 0)
                 ss.append(' ');
-              v.cv->get(ix)->write(ss);
+              write(v.cv->get(ix), ss);
             }
             ss.append(')');
           },
           [&](const Cell::Lambda &) {
-            Procedure proc = LambdaValue();
-            ss.append(flag(Flag::Macro) ? "#<macro " : "#<lambda ");
+            Procedure proc = self->LambdaValue();
+            ss.append(self->flag(Flag::Macro) ? "#<macro " : "#<lambda ");
             if (debug_flag(DebugFlag::PrintProcedures)) {
-              proc.arglist->write(ss);
+              write(proc.arglist, ss);
               ss.append(' ');
-              proc.body->write(ss);
+              write(proc.body, ss);
               ss.append('>');
             } else {
-              proc.arglist->write(ss);
+              write(proc.arglist, ss);
               ss.append(" ...>");
             }
           },
           [&](const Cell::Promise &p) {
             ss.append("#<promise ");
-            p.cv->get(0)->write(ss);
+            write(p.cv->get(0), ss);
             ss.append('>');
           },
           [&](const Cell::Cproc &) { ss.append("#<compiled-procedure>"); },
           [&](const Cell::Cpromise &p) {
-            if (flag(Flag::Forced))
-              p.cv->get(0)->write(ss);
+            if (self->flag(Flag::Forced))
+              write(p.cv->get(0), ss);
             else
               ss.append("#<compiled-promise>");
           },
@@ -476,7 +487,7 @@ void Cell::write(sstring &ss) const {
             if (fut.completed) {
               ss.append("#<future (completed) ");
               if (fut.result)
-                fut.result->write(ss);
+                write(fut.result, ss);
               ss.append('>');
             } else {
               ss.append("#<future (pending)>");
@@ -484,7 +495,7 @@ void Cell::write(sstring &ss) const {
           },
           [&](const Cell::Insn &) { ss.append("#<vm-instruction>"); },
           [&](const auto &) { ss.append("#<?>"); }},
-      val);
+      self->val);
 }
 
 void Cell::display(FILE *out) {
