@@ -50,6 +50,9 @@ std::string VM::format_value(Value v) const {
   if (v.is_symbol()) {
     return get_symbol_name(v.as_symbol_id());
   }
+  if (v.is_keyword()) {
+    return ":" + get_symbol_name(v.as_keyword_id());
+  }
   if (v.is_ptr()) {
     Obj *obj = v.as_ptr<Obj>();
     switch (obj->type) {
@@ -71,12 +74,22 @@ std::string VM::format_value(Value v) const {
       }
       case ObjType::Vector: {
         ObjVector *ov = obj->as<ObjVector>();
-        std::string s = "#(";
+        std::string s = "[";
         for (uint32_t i = 0; i < ov->size; ++i) {
           if (i > 0) s += " ";
           s += format_value(ov->get(i));
         }
-        s += ")";
+        s += "]";
+        return s;
+      }
+      case ObjType::Map: {
+        ObjMap *m = obj->as<ObjMap>();
+        std::string s = "{";
+        for (size_t i = 0; i < m->entries.size(); ++i) {
+          if (i > 0) s += " ";
+          s += format_value(m->entries[i].first) + " " + format_value(m->entries[i].second);
+        }
+        s += "}";
         return s;
       }
       case ObjType::String: {
@@ -396,6 +409,53 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
           frame = &f.frames.back();
           ip = frame->ip;
           chunk = frame->closure->chunk;
+        } else if (callee.is_keyword()) {
+          // Keyword as procedure: (:key map [default])
+          if (argc < 1) {
+            f.state = Fiber::State::Error;
+            f.error_message = "[VM Error] Keyword procedure requires at least 1 argument";
+            return StepResult::Error;
+          }
+          Value target = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = def_val;
+          if (Heap::is_map(target)) {
+            res = target.as_ptr<ObjMap>()->get(callee, def_val);
+          }
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
+        } else if (Heap::is_map(callee)) {
+          // Map as procedure: (map key [default])
+          if (argc < 1) {
+            f.state = Fiber::State::Error;
+            f.error_message = "[VM Error] Map procedure requires at least 1 argument";
+            return StepResult::Error;
+          }
+          ObjMap *m = callee.as_ptr<ObjMap>();
+          Value key = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = m->get(key, def_val);
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
+        } else if (Heap::is_vector(callee)) {
+          // Vector as procedure: (vector index [default])
+          if (argc < 1) {
+            f.state = Fiber::State::Error;
+            f.error_message = "[VM Error] Vector procedure requires at least 1 argument";
+            return StepResult::Error;
+          }
+          ObjVector *v = callee.as_ptr<ObjVector>();
+          Value ix_val = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = def_val;
+          if (ix_val.is_int()) {
+            int32_t ix = ix_val.as_int();
+            if (ix >= 0 && static_cast<uint32_t>(ix) < v->size) {
+              res = v->get(static_cast<uint32_t>(ix));
+            }
+          }
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
         } else {
           f.state = Fiber::State::Error;
           f.error_message = "[VM Error] Attempted to call non-procedure: " + format_value(callee);
@@ -434,6 +494,39 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
           frame->ip = closure->chunk->code.data();
           ip = frame->ip;
           chunk = frame->closure->chunk;
+        } else if (callee.is_keyword()) {
+          Value target = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = def_val;
+          if (Heap::is_map(target)) {
+            res = target.as_ptr<ObjMap>()->get(callee, def_val);
+          }
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
+        } else if (Heap::is_map(callee)) {
+          ObjMap *m = callee.as_ptr<ObjMap>();
+          Value key = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = m->get(key, def_val);
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
+        } else if (Heap::is_vector(callee)) {
+          ObjVector *v = callee.as_ptr<ObjVector>();
+          Value ix_val = f.stack[f.stack.size() - argc];
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value res = def_val;
+          if (ix_val.is_int()) {
+            int32_t ix = ix_val.as_int();
+            if (ix >= 0 && static_cast<uint32_t>(ix) < v->size) {
+              res = v->get(static_cast<uint32_t>(ix));
+            }
+          }
+          f.stack.resize(f.stack.size() - argc - 1);
+          f.push(res);
+        } else {
+          f.state = Fiber::State::Error;
+          f.error_message = "[VM Error] Attempted to call non-procedure: " + format_value(callee);
+          return StepResult::Error;
         }
         break;
       }
@@ -999,6 +1092,219 @@ void VM::init_primitives() {
     return Value::from_int(static_cast<int32_t>(vm.active_fibers.size()));
   };
   def_global("run-fibers", heap.make_subr("run-fibers", subr_run_fibers, 0, 1));
+
+  // ---------------------------------------------------------------------------
+  // Modern Collections: Vectors
+  // ---------------------------------------------------------------------------
+  auto subr_vector = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value vec = vm.heap.make_vector(argc);
+    ObjVector *ov = vec.as_ptr<ObjVector>();
+    for (uint32_t i = 0; i < argc; ++i) ov->set(i, args[i]);
+    return vec;
+  };
+  def_global("vector", heap.make_subr("vector", subr_vector, 0, UINT32_MAX));
+
+  auto subr_make_vector = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    uint32_t size = static_cast<uint32_t>(args[0].as_int());
+    Value fill = argc > 1 ? args[1] : Value::unspecified();
+    return vm.heap.make_vector(size, fill);
+  };
+  def_global("make-vector", heap.make_subr("make-vector", subr_make_vector, 1, 2));
+
+  auto subr_vector_ref = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_vector(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-ref: expected vector, got " + vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    ObjVector *ov = args[0].as_ptr<ObjVector>();
+    int32_t ix = args[1].as_int();
+    if (ix < 0 || static_cast<uint32_t>(ix) >= ov->size) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-ref: index " + std::to_string(ix) + " out of bounds";
+      }
+      return Value::unspecified();
+    }
+    return ov->get(static_cast<uint32_t>(ix));
+  };
+  def_global("vector-ref", heap.make_subr("vector-ref", subr_vector_ref, 2, 2));
+
+  auto subr_vector_set = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_vector(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-set!: expected vector, got " + vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    ObjVector *ov = args[0].as_ptr<ObjVector>();
+    int32_t ix = args[1].as_int();
+    if (ix < 0 || static_cast<uint32_t>(ix) >= ov->size) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-set!: index " + std::to_string(ix) + " out of bounds";
+      }
+      return Value::unspecified();
+    }
+    ov->set(static_cast<uint32_t>(ix), args[2]);
+    return Value::unspecified();
+  };
+  def_global("vector-set!", heap.make_subr("vector-set!", subr_vector_set, 3, 3));
+
+  def_global("vector-length", heap.make_subr("vector-length", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_vector(args[0])) return Value::from_int(0);
+    return Value::from_int(static_cast<int32_t>(args[0].as_ptr<ObjVector>()->size));
+  }, 1, 1));
+
+  def_global("vector?", heap.make_subr("vector?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_vector(args[0]));
+  }, 1, 1));
+
+  // ---------------------------------------------------------------------------
+  // Modern Collections: Associative Maps
+  // ---------------------------------------------------------------------------
+  auto subr_hash_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::vector<std::pair<Value, Value>> kvs;
+    for (uint32_t i = 0; i + 1 < argc; i += 2) {
+      kvs.push_back({args[i], args[i + 1]});
+    }
+    return vm.heap.make_map(std::move(kvs));
+  };
+  def_global("hash-map", heap.make_subr("hash-map", subr_hash_map, 0, UINT32_MAX));
+  def_global("make-hash-map", heap.make_subr("make-hash-map", [](VM &vm, uint32_t, Value *) -> Value {
+    return vm.heap.make_map({});
+  }, 0, 0));
+
+  auto subr_map_ref = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] map-ref: expected map, got " + vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    ObjMap *m = args[0].as_ptr<ObjMap>();
+    Value def_val = argc > 2 ? args[2] : Value::nil();
+    return m->get(args[1], def_val);
+  };
+  def_global("map-ref", heap.make_subr("map-ref", subr_map_ref, 2, 3));
+  def_global("hash-map-ref", heap.make_subr("hash-map-ref", subr_map_ref, 2, 3));
+
+  auto subr_map_set = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] map-set!: expected map, got " + vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    ObjMap *m = args[0].as_ptr<ObjMap>();
+    m->set(args[1], args[2]);
+    return args[0];
+  };
+  def_global("map-set!", heap.make_subr("map-set!", subr_map_set, 3, 3));
+  def_global("hash-map-set!", heap.make_subr("hash-map-set!", subr_map_set, 3, 3));
+
+  def_global("map-has?", heap.make_subr("map-has?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) return Value::boolean_false();
+    return Value::from_bool(args[0].as_ptr<ObjMap>()->has(args[1]));
+  }, 2, 2));
+  def_global("hash-map-has?", heap.make_subr("hash-map-has?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) return Value::boolean_false();
+    return Value::from_bool(args[0].as_ptr<ObjMap>()->has(args[1]));
+  }, 2, 2));
+
+  def_global("map-keys", heap.make_subr("map-keys", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) return Value::nil();
+    ObjMap *m = args[0].as_ptr<ObjMap>();
+    Value res = Value::nil();
+    for (auto it = m->entries.rbegin(); it != m->entries.rend(); ++it) {
+      res = vm.heap.cons(it->first, res);
+    }
+    return res;
+  }, 1, 1));
+
+  def_global("map-values", heap.make_subr("map-values", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) return Value::nil();
+    ObjMap *m = args[0].as_ptr<ObjMap>();
+    Value res = Value::nil();
+    for (auto it = m->entries.rbegin(); it != m->entries.rend(); ++it) {
+      res = vm.heap.cons(it->second, res);
+    }
+    return res;
+  }, 1, 1));
+
+  def_global("map-count", heap.make_subr("map-count", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) return Value::from_int(0);
+    return Value::from_int(static_cast<int32_t>(args[0].as_ptr<ObjMap>()->entries.size()));
+  }, 1, 1));
+
+  def_global("map?", heap.make_subr("map?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_map(args[0]));
+  }, 1, 1));
+  def_global("hash-map?", heap.make_subr("hash-map?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_map(args[0]));
+  }, 1, 1));
+
+  // ---------------------------------------------------------------------------
+  // Polymorphic get
+  // ---------------------------------------------------------------------------
+  auto subr_get = [](VM &, uint32_t argc, Value *args) -> Value {
+    Value coll = args[0];
+    Value key = args[1];
+    Value def_val = argc > 2 ? args[2] : Value::nil();
+    if (Heap::is_map(coll)) {
+      return coll.as_ptr<ObjMap>()->get(key, def_val);
+    }
+    if (Heap::is_vector(coll)) {
+      ObjVector *ov = coll.as_ptr<ObjVector>();
+      if (key.is_int()) {
+        int32_t ix = key.as_int();
+        if (ix >= 0 && static_cast<uint32_t>(ix) < ov->size) return ov->get(static_cast<uint32_t>(ix));
+      }
+      return def_val;
+    }
+    if (Heap::is_cons(coll)) {
+      if (key.is_int()) {
+        int32_t ix = key.as_int();
+        Value cur = coll;
+        while (ix > 0 && Heap::is_cons(cur)) {
+          cur = Heap::cdr(cur);
+          --ix;
+        }
+        if (ix == 0 && Heap::is_cons(cur)) return Heap::car(cur);
+      }
+      return def_val;
+    }
+    return def_val;
+  };
+  def_global("get", heap.make_subr("get", subr_get, 2, 3));
+
+  // ---------------------------------------------------------------------------
+  // Keywords
+  // ---------------------------------------------------------------------------
+  def_global("keyword?", heap.make_subr("keyword?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(args[0].is_keyword());
+  }, 1, 1));
+
+  def_global("symbol?", heap.make_subr("symbol?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(args[0].is_symbol());
+  }, 1, 1));
+
+  def_global("keyword->string", heap.make_subr("keyword->string", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_keyword()) return vm.heap.make_string("");
+    return vm.heap.make_string(vm.get_symbol_name(args[0].as_keyword_id()));
+  }, 1, 1));
+
+  def_global("string->keyword", heap.make_subr("string->keyword", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) return Value::unspecified();
+    std::string_view sv = args[0].as_ptr<ObjString>()->view();
+    uint32_t id = vm.intern(std::string(sv));
+    return Value::from_keyword_id(id);
+  }, 1, 1));
 }
 
 } // namespace vxs

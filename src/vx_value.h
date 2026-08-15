@@ -43,6 +43,7 @@ struct Value {
   static constexpr uint64_t TAG_SYMBOL    = 0xFFFD000000000000ULL;
   static constexpr uint64_t TAG_INT       = 0xFFFE000000000000ULL;
   static constexpr uint64_t TAG_PTR       = 0xFFFF000000000000ULL;
+  static constexpr uint64_t KEYWORD_BIT   = 0x0000000080000000ULL;
 
   // Constructors
   constexpr Value() : raw(TAG_UNDEF) {}
@@ -74,7 +75,12 @@ struct Value {
 
   // Symbol ID
   static constexpr inline Value from_symbol_id(uint32_t sym_id) {
-    return Value(TAG_SYMBOL | static_cast<uint64_t>(sym_id));
+    return Value(TAG_SYMBOL | (static_cast<uint64_t>(sym_id) & ~KEYWORD_BIT));
+  }
+
+  // Keyword ID
+  static constexpr inline Value from_keyword_id(uint32_t kw_id) {
+    return Value(TAG_SYMBOL | KEYWORD_BIT | (static_cast<uint64_t>(kw_id) & ~KEYWORD_BIT));
   }
 
   // Booleans
@@ -107,7 +113,11 @@ struct Value {
   }
 
   inline bool is_symbol() const {
-    return (raw & TAG_MASK) == TAG_SYMBOL;
+    return (raw & TAG_MASK) == TAG_SYMBOL && !(raw & KEYWORD_BIT);
+  }
+
+  inline bool is_keyword() const {
+    return (raw & TAG_MASK) == TAG_SYMBOL && (raw & KEYWORD_BIT);
   }
 
   inline bool is_bool() const {
@@ -162,7 +172,12 @@ struct Value {
 
   inline uint32_t as_symbol_id() const {
     assert(is_symbol() && "Value is not a symbol");
-    return static_cast<uint32_t>(raw & INT_MASK);
+    return static_cast<uint32_t>(raw & ~KEYWORD_BIT & INT_MASK);
+  }
+
+  inline uint32_t as_keyword_id() const {
+    assert(is_keyword() && "Value is not a keyword");
+    return static_cast<uint32_t>(raw & ~KEYWORD_BIT & INT_MASK);
   }
 
   inline bool as_bool() const {
