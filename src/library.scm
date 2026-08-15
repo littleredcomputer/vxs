@@ -74,3 +74,7 @@
          (close-input-port input)
          'ok)
       (eval form))))
+
+(define-macro (future . body)
+  `(make-future (lambda () ,@body)))
+

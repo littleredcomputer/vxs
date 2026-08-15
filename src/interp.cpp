@@ -23,12 +23,14 @@ psymbol s_case = intern("case");
 psymbol s_cond = intern("cond");
 psymbol s_define = intern("define");
 psymbol s_defmacro = intern("defmacro");
+psymbol s_define_macro = intern("define-macro");
 psymbol s_delay = intern("delay");
 psymbol s_do = intern("do");
 psymbol s_else = intern("else");
 psymbol s_eval = intern("eval");
 psymbol s_force = intern("force");
 psymbol s_foreach = intern("for-each");
+psymbol s_future = intern("future");
 psymbol s_if = intern("if");
 psymbol s_lambda = intern("lambda");
 psymbol s_let = intern("let");
@@ -479,9 +481,12 @@ TOP:
         GOTO(ev_quasiquote);
       } else if (s == s_yield)
         GOTO(ev_yield);
-      else if (s == s_lambda)
+      else if (s == s_future) {
+        Cell *thunk = make_procedure(r_env, r_unev, nil);
+        r_val = make_future(thunk);
+      } else if (s == s_lambda)
         r_val = make_procedure(r_env, cdr(r_unev), car(r_unev));
-      else if (s == s_defmacro) {
+      else if (s == s_defmacro || s == s_define_macro) {
         r_proc = make_macro(r_env, cdr(r_unev), cdar(r_unev));
         bind(r_env, caar(r_unev), r_proc);
         r_val = unspecified;
@@ -1478,12 +1483,14 @@ public:
         {"case", true},
         {"cond", true},
         {"define", true},
+        {"define-macro", true},
         {"defmacro", true},
         {"delay", true},
         {"do", true},
         {"eval", false},
         {"for-each", false},
         {"force", false},
+        {"future", true},
         {"if", true},
         {"lambda", true},
         {"let", true},

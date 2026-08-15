@@ -319,6 +319,8 @@ private:
   size_t m_pos = 0;
 };
 
+struct Fiber;
+
 //----------------------------------------------------------------------
 // class Cell
 //
@@ -488,6 +490,12 @@ public:
     Cell *next = nullptr;
     bool operator==(const Free &o) const { return next == o.next; }
   };
+  struct Future {
+    std::shared_ptr<Fiber> fiber;
+    Cell *result = nullptr;
+    bool completed = false;
+    bool operator==(const Future &o) const { return fiber == o.fiber; }
+  };
 
   using CellValue = std::variant<intptr_t,    // 0: Int
                                  Symbol,      // 1: Symbol
@@ -507,7 +515,8 @@ public:
                                  Cproc,       // 15: Cproc
                                  Cpromise,    // 16: Cpromise
                                  Free,        // 17: Free
-                                 Cons         // 18: Cons
+                                 Cons,        // 18: Cons
+                                 Future       // 19: Future
                                  >;
 
   CellValue val;
@@ -680,6 +689,7 @@ public:
   cellvector *CProcValue() const { return as<Cproc>().cv; }
   Cell *PromiseValue() const { return as<Promise>().cv->get(0); }
   Cell *CPromiseValue() const { return as<Cpromise>().cv->get(0); }
+  Cell *FutureResult() const { return as<Future>().result; }
   psymbol SymbolValue() const { return as<Symbol>().s; }
   psymbol BuiltinValue() const { return as<Builtin>().s; }
   Procedure LambdaValue() const {
@@ -928,6 +938,10 @@ public:
                                 int start);
   Cell *make_compiled_promise(Cell *procedure);
   Cell *force_compiled_promise(Cell *promise);
+  Cell *make_future(Cell *thunk);
+  Cell *touch_future(Cell *fut);
+  bool step_fibers();
+  void run_fibers();
   void print_insn(int pc, const Cell *insn);
   Cell *write_compiled_procedure(Cell *arglist);
   Cell *load_compiled_procedure(struct vm_cproc *);
@@ -972,8 +986,8 @@ private:
   void init_machine();
   void print_vm_state();
   void *xmalloc(size_t);
-
   std::vector<Fiber *> active_fibers;
+  Fiber *current_fiber = nullptr;
 
   // The assembled instructions to resume a saved continuation
   Cell *cc_procedure;
@@ -1126,6 +1140,8 @@ struct Fiber {
   Cell *r_envt = nullptr;
   Cell *r_cproc = nullptr;
 
+  Cell *m_future = nullptr;
+
   Step step;
 
   Fiber(Context &c, Cell *form);
@@ -1135,7 +1151,10 @@ struct Fiber {
   Fiber(const Fiber &) = delete;
   Fiber &operator=(const Fiber &) = delete;
 
-  bool next() { return step.next(); }
+  Cell *future() const { return m_future; }
+  void set_future(Cell *fut) { m_future = fut; }
+
+  bool next();
   bool done() const { return step.done(); }
 
   static Cell *tag_int(intptr_t i) {

@@ -106,6 +106,11 @@ bool Cell::equal(Cell *c) {
       return *d1 == *d2;
     return false;
   }
+  if (auto *f1 = get_if<Future>()) {
+    if (auto *f2 = c->get_if<Future>())
+      return f1->fiber == f2->fiber;
+    return false;
+  }
   return eq(c);
 }
 
@@ -167,6 +172,7 @@ const char *Cell::name() const {
                                [](const Cpromise &) { return "cpromise"; },
                                [](const Free &) { return "free"; },
                                [](const Cons &) { return "pair"; },
+                               [](const Future &) { return "future"; },
                                [](const auto &) { return "unknown"; }},
                     val);
 }
@@ -520,6 +526,10 @@ E2:
         ps->plist->gc_index = 0;
         T = P;
       }
+    } else if (auto *fut = P->get_if<Cell::Future>()) {
+      if (fut->result) {
+        mark(fut->result);
+      }
     }
     goto E6; // E3
   }
@@ -714,4 +724,18 @@ void *Context::xmalloc(size_t n) {
     exit(1);
   }
   return p;
+}
+
+Cell *Context::make_future(Cell *thunk) {
+  std::shared_ptr<Fiber> fib;
+  if (thunk->is<Cell::Cproc>()) {
+    fib = std::make_shared<Fiber>(*this, thunk, nil);
+  } else if (thunk->is<Cell::Lambda>() || thunk->is<Cell::Subr>()) {
+    fib = std::make_shared<Fiber>(*this, cons(thunk, nil));
+  } else {
+    fib = std::make_shared<Fiber>(*this, thunk);
+  }
+  Cell *c = alloc<Cell::Future>(Cell::Future{fib, nil, false});
+  fib->set_future(c);
+  return c;
 }

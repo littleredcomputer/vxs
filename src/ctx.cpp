@@ -121,6 +121,22 @@ Fiber::Fiber(Context &c, Cell *proc, Cell *args) : ctx(c) {
 
 Fiber::~Fiber() { ctx.unregister_fiber(this); }
 
+bool Fiber::next() {
+  Fiber *saved = ctx.current_fiber;
+  ctx.current_fiber = this;
+  bool running = step.next();
+  ctx.current_fiber = saved;
+  if (!running) {
+    if (m_future && m_future->is<Cell::Future>()) {
+      auto &fut = m_future->as<Cell::Future>();
+      fut.completed = true;
+      fut.result = r_val ? r_val : &Cell::Unspecified;
+    }
+    ctx.unregister_fiber(this);
+  }
+  return running;
+}
+
 Cell *Fiber::pop_list(int n) {
   r_tmp = nil;
   for (int ix = 0; ix < n; ++ix) {
@@ -159,6 +175,7 @@ void Fiber::mark_roots(Context *gc) {
   gc->mark(r_tmp);
   gc->mark(r_elt);
   gc->mark(r_nu);
+  gc->mark(m_future);
 
   for (int ix = 0; ix < m_stack.size(); ++ix) {
     Cell *p = m_stack[ix];
@@ -281,4 +298,60 @@ Cell *Context::RunMain() {
     return SchemeExtension::RunMain(this);
 
   return nullptr;
+}
+
+bool Context::step_fibers() {
+  auto fibers = active_fibers;
+  for (Fiber *fib : fibers) {
+    if (fib == current_fiber || !fib->future()) {
+      continue;
+    }
+    if (std::find(active_fibers.begin(), active_fibers.end(), fib) != active_fibers.end()) {
+      fib->next();
+    }
+  }
+  for (Fiber *fib : active_fibers) {
+    if (fib != current_fiber && fib->future())
+      return true;
+  }
+  return false;
+}
+
+void Context::run_fibers() {
+  while (true) {
+    bool has_other = false;
+    for (Fiber *fib : active_fibers) {
+      if (fib != current_fiber && fib->future()) {
+        has_other = true;
+        break;
+      }
+    }
+    if (!has_other)
+      break;
+    step_fibers();
+  }
+}
+
+Cell *Context::touch_future(Cell *fut) {
+  if (!fut || !fut->is<Cell::Future>()) {
+    error("touch: expected a future");
+  }
+  auto &f = fut->as<Cell::Future>();
+  if (f.completed) {
+    return f.result ? f.result : &Cell::Unspecified;
+  }
+  while (!f.completed) {
+    bool other_active = false;
+    for (Fiber *fib : active_fibers) {
+      if (fib != current_fiber && fib->future()) {
+        other_active = true;
+        break;
+      }
+    }
+    if (!other_active) {
+      break;
+    }
+    step_fibers();
+  }
+  return f.completed ? (f.result ? f.result : &Cell::Unspecified) : &Cell::Unspecified;
 }

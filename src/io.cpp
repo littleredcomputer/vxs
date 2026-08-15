@@ -472,6 +472,16 @@ void Cell::write(sstring &ss) const {
             else
               ss.append("#<compiled-promise>");
           },
+          [&](const Cell::Future &fut) {
+            if (fut.completed) {
+              ss.append("#<future (completed) ");
+              if (fut.result)
+                fut.result->write(ss);
+              ss.append('>');
+            } else {
+              ss.append("#<future (pending)>");
+            }
+          },
           [&](const Cell::Insn &) { ss.append("#<vm-instruction>"); },
           [&](const auto &) { ss.append("#<?>"); }},
       val);

@@ -71,7 +71,7 @@
 
   (define (builtin? proc)
     (memq proc '(if quote cond begin lambda or and let set! define letrec
-		    let* do case quasiquote delay defmacro define-macro yield)))
+		    let* do case quasiquote delay defmacro define-macro yield future)))
 
   ;; We provide two simplified replacements for the library function map
   ;; (one for one arguments, the other for two), neither of which uses
@@ -424,6 +424,12 @@
      ((eq? proc 'yield)
       (append '((yield))
 	      (form-returning unspecified more? val?)))
+     ((eq? proc 'future)
+      (append (compile-procedure-body #f '() args env #f #t)
+	      '((proc)
+		(subr make-future 1))
+	      (code-if (not val?) '(pop))
+	      (code-if (not more?) '(return))))
      (else
       (error "unknown builtin"))))
 

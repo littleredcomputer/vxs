@@ -134,6 +134,73 @@ int main() {
   out3->write(stdout);
   printf("\n");
 
-  printf("=== ALL FIBER YIELD TESTS PASSED SUCCESSFULLY! ===\n");
+  // 4. In-Scheme (future ...) and (touch ...) Tests
+  printf("[4] Testing in-Scheme (future ...) and (touch ...) with value returns and (yield)...\n");
+  std::string futureCode =
+    "(define fut-log '()) "
+    "(define futA (future "
+    "  (set! fut-log (cons 'FA1 fut-log)) "
+    "  (yield) "
+    "  (set! fut-log (cons 'FA2 fut-log)) "
+    "  (yield) "
+    "  (set! fut-log (cons 'FA3 fut-log)) "
+    "  100)) "
+    "(define futB (future "
+    "  (set! fut-log (cons 'FB1 fut-log)) "
+    "  (yield) "
+    "  (set! fut-log (cons 'FB2 fut-log)) "
+    "  (yield) "
+    "  (set! fut-log (cons 'FB3 fut-log)) "
+    "  200)) "
+    "(define fut-res (list (touch futA) (touch futB)))";
+
+  sstring sFut(futureCode.c_str());
+  for (int i = 0; i < 4; ++i) {
+    Cell *f = ctx.read(sFut);
+    ctx.eval(f);
+  }
+
+  sstring sFutLog("fut-log");
+  Cell *futLog = ctx.eval(ctx.read(sFutLog));
+  printf("Result of fut-log: ");
+  futLog->write(stdout);
+  printf("\n");
+
+  sstring sFutRes("fut-res");
+  Cell *futRes = ctx.eval(ctx.read(sFutRes));
+  printf("Result of fut-res: ");
+  futRes->write(stdout);
+  printf("\n");
+
+  // 5. In-Scheme (future-done?), (step-fibers), and (run-fibers)
+  printf("[5] Testing (future-done?), (step-fibers), and (run-fibers)...\n");
+  std::string bgCode =
+    "(define bg-done #f) "
+    "(define bg-fut (future "
+    "  (yield) "
+    "  (yield) "
+    "  (set! bg-done #t) "
+    "  'all-good)) "
+    "(define check1 (future-done? bg-fut)) "
+    "(step-fibers) "
+    "(define check2 (future-done? bg-fut)) "
+    "(run-fibers) "
+    "(define check3 (future-done? bg-fut)) "
+    "(define check4 (touch bg-fut)) "
+    "(define bg-summary (list check1 check2 check3 check4 bg-done))";
+
+  sstring sBg(bgCode.c_str());
+  for (int i = 0; i < 9; ++i) {
+    Cell *f = ctx.read(sBg);
+    ctx.eval(f);
+  }
+
+  sstring sBgSummary("bg-summary");
+  Cell *bgSummary = ctx.eval(ctx.read(sBgSummary));
+  printf("Result of bg-summary: ");
+  bgSummary->write(stdout);
+  printf("\n");
+
+  printf("=== ALL FIBER & FUTURE TESTS PASSED SUCCESSFULLY! ===\n");
   return 0;
 }

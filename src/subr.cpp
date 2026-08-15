@@ -1438,6 +1438,35 @@ static Cell *sk_chdir(Context *ctx, Cell *arglist) {
   return ctx->make_boolean(ok);
 }
 
+static Cell *skmake_future(Context *ctx, Cell *arglist) {
+  return ctx->make_future(car(arglist));
+}
+
+static Cell *sktouch(Context *ctx, Cell *arglist) {
+  return ctx->touch_future(car(arglist));
+}
+
+static Cell *skfuture_p(Context *ctx, Cell *arglist) {
+  return ctx->make_boolean(car(arglist)->is<Cell::Future>());
+}
+
+static Cell *skfuture_done_p(Context *ctx, Cell *arglist) {
+  Cell *c = car(arglist);
+  if (!c->is<Cell::Future>())
+    return &Cell::Bool_F;
+  return ctx->make_boolean(c->as<Cell::Future>().completed);
+}
+
+static Cell *skstep_fibers(Context *ctx, Cell *arglist) {
+  bool active = ctx->step_fibers();
+  return ctx->make_boolean(active);
+}
+
+static Cell *skrun_fibers(Context *ctx, Cell *arglist) {
+  ctx->run_fibers();
+  return &Cell::Bool_T;
+}
+
 //
 // INITIALIZATION
 //
@@ -1534,6 +1563,8 @@ void Context::provision() {
       {"exp", skexp},
       {"expt", expt},
       {"floor", skfloor},
+      {"future?", skfuture_p},
+      {"future-done?", skfuture_done_p},
       {"inexact->exact", inexact_to_exact},
       {"gcd", gcd},
       {"inexact?", inexact_p},
@@ -1553,6 +1584,7 @@ void Context::provision() {
       {"logior", logior},
       {"lognot", lognot},
       {"logxor", logxor},
+      {"make-future", skmake_future},
       {"make-string", skmake_string},
       {"make-vector", skmake_vector},
       {"max", skmax},
@@ -1583,10 +1615,12 @@ void Context::provision() {
       {"remainder", remainder},
       {"reverse", reverse},
       {"round", skround},
+      {"run-fibers", skrun_fibers},
       {"set-car!", set_car},
       {"set-cdr!", set_cdr},
       {"sin", sksin},
       {"sqrt", sksqrt},
+      {"step-fibers", skstep_fibers},
       {"string", string_chars},
       {"string-copy", string_copy},  // R5
       {"string-fill!", string_fill}, // R5
@@ -1612,6 +1646,7 @@ void Context::provision() {
       {"symbol->string", symbol_to_string},
       {"symbol?", symbol_p},
       {"tan", sktan},
+      {"touch", sktouch},
       {"truncate", sktruncate},
       {"vector", vector_from_list},
       {"vector->list", vector_to_list},
