@@ -9,7 +9,6 @@
 
 #include "vx-scheme.h"
 
-
 Cell *Context::make_int(intptr_t i) {
   // If the integer fits in 63 bits (1-bit tag ATOM = 0x1),
   // return an unboxed tagged immediate integer pointer.
@@ -299,7 +298,8 @@ void cellvector::unshift(Cell *val) {
 
 void cellvector::vref_error(const char *msg, int ix) const {
   char buf[256];
-  snprintf(buf, sizeof(buf), "%s (ix=%d, sz=%d, allocated=%d)", msg, ix, sz, allocated);
+  snprintf(buf, sizeof(buf), "%s (ix=%d, sz=%d, allocated=%d)", msg, ix, sz,
+           allocated);
   error(buf);
 }
 
