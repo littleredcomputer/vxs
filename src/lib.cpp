@@ -39,7 +39,9 @@ static Cell *time(Context *ctx, Cell *arglist) {
   ctx->gc_protect(val);
   Cell *d = ctx->make_real(t1 - t0);
   ctx->gc_protect(d);
-  return ctx->cons(d, val);
+  Cell *res = ctx->cons(d, val);
+  ctx->gc_unprotect(2);
+  return res;
 }
 
 // When call-with-current-continuation is used, the value supplied

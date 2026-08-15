@@ -86,17 +86,16 @@
     (let loop ((result '())
 	       (rest lst))
       (if (null? rest)
-	  result
-	  (loop (append result (list (func (car rest)))) (cdr rest)))))
+	  (reverse result)
+	  (loop (cons (func (car rest)) result) (cdr rest)))))
 
   (define (_map2 func lst1 lst2)
     (let loop ((result '())
 	       (rest1 lst1)
 	       (rest2 lst2))
       (if (null? rest1)
-	  result
-	  (loop (append result
-			(list (func (car rest1) (car rest2))))
+	  (reverse result)
+	  (loop (cons (func (car rest1) (car rest2)) result)
 		(cdr rest1) (cdr rest2)))))
 
   ;; starts-with: frequently used in [PAIP]; we define it here.
@@ -269,12 +268,12 @@
 	     (cond-clauses (let loop ((code '())
 				      (rest clauses))
 	       (if (null? rest)
-		   code
+		   (reverse code)
 		   (loop 
-		    (append code 
-			    (if (eq? (caar rest) 'else)
-				`((else ,@(cdar rest)))
-				`(((member ,value ',(caar rest)) ,@(cdar rest)))))
+		    (cons (if (eq? (caar rest) 'else)
+			      `(else ,@(cdar rest))
+			      `((member ,value ',(caar rest)) ,@(cdar rest)))
+			  code)
 		    (cdr rest)))))
 	     (augmented-code `(let ((,value ,selector)) 
 				(cond ,@cond-clauses))))
@@ -378,10 +377,10 @@
 		 `((gset ,target))))
 	       ((pair? target)         ; (define (f v...) x...)
 		(let ((proc (car target))
-		      (args (cdr target))
+		      (formals (cdr target))
 		      (body (cdr args)))
 		  (append
-		   (compile-procedure-body #f args body env #f #t)
+		   (compile-procedure-body #f formals body env #f #t)
 		   `((proc)
 		     (gset ,proc)))))
 	       (else (error "incomprehensible definition"))))
@@ -447,17 +446,16 @@
 				   (initializers '())
 				   (rest definitions))
 		   (if (null? rest)
-		       (cons variables initializers)
+		       (cons (reverse variables) (reverse initializers))
 		       (let ((clause (cdar rest))) ; skip past 'define
 			 (if (pair? (car clause))  ; procedure definition
 			     (clause-loop
-			      (append variables (list (caar clause)))
-			      (append initializers
-				      (list `(lambda ,(cdar clause) ,@(cdr clause))))
+			      (cons (caar clause) variables)
+			      (cons `(lambda ,(cdar clause) ,@(cdr clause)) initializers)
 			      (cdr rest))
 			     (clause-loop          ; scalar definition
-			      (append variables (list (car clause)))
-			      (append initializers (list (cadr clause)))
+			      (cons (car clause) variables)
+			      (cons (cadr clause) initializers)
 			      (cdr rest))))))))
 	    (compile-letrec (car items) (cdr items) simple-body env more? val?))
 	  ;; if no internal definitions, immediately delegate to
@@ -476,14 +474,14 @@
 	       (rest body))
       (cond
        ((null? rest)
-	(cons defines simple-body))
+	(cons (reverse defines) (reverse simple-body)))
        ((starts-with (car rest) 'define)
-	(loop (append defines (list (car rest)))
+	(loop (cons (car rest) defines)
 	      simple-body
 	      (cdr rest)))
        (else
 	(loop defines
-	      (append simple-body (list (car rest)))
+	      (cons (car rest) simple-body)
 	      (cdr rest))))))
 
   ;; compile-simple-sequence: compile a body sequence (list of forms)
@@ -598,11 +596,11 @@
 	       (flat '()))
       (cond
        ((null? rest)
-	(list regular-args #f flat))
+	(list regular-args #f (reverse flat)))
        ((pair? rest)
-	(loop (+ regular-args 1) (cdr rest) (append flat (list (car rest)))))
+	(loop (+ regular-args 1) (cdr rest) (cons (car rest) flat)))
        (else
-	(list regular-args #t (append flat (list rest)))))))
+	(list regular-args #t (reverse (cons rest flat)))))))
 
   ; compile-procedure-body
   ; 
@@ -685,15 +683,12 @@
       (let* ((increment (let loop ((rest bindings)
 				   (code '()))
 			  (if (null? rest)
-			      code
+			      (reverse code)
 			      (if (null? (cddar rest))
 				  (loop (cdr rest)
-					  ; no step-expression: continue with 
-					  ; variable name 
-					(append code (list (caar rest))))
+					(cons (caar rest) code))
 				  (loop (cdr rest)
-					  ; insert step expression
-					(append code (list (caddar rest))))))))
+					(cons (caddar rest) code))))))
 	     (augmented-body `((if ,test
 				  (begin ,@exit)
 				  (begin ,@iterate
@@ -719,11 +714,12 @@
 	   (let-bindings (let loop ((bindings '())
 				    (rest-formals formals)
 				    (rest-actuals args))
-			   (if (null? rest-formals) bindings
+			   (if (null? rest-formals)
+			       (reverse bindings)
 			       (loop
-				(append bindings
-					`((,(car rest-formals)
-					   (quote ,(car rest-actuals)))))
+				(cons `(,(car rest-formals)
+					(quote ,(car rest-actuals)))
+				      bindings)
 				(cdr rest-formals)
 				(cdr rest-actuals)))))
 	   (macro-form `(let ,let-bindings ,body))
@@ -837,12 +833,27 @@
 
 ;; XXX add instruction factory parameter and unify with link2.
 (define (link program)
-  (let ((output (make-vector 0))
-	(output-index 0)
-	(procedure-queue (make-vector 1 (cons program #f)))
-	(literal-queue (make-vector 0)))
+  (let* ((output (make-vector 0))
+	 (q-head (list (cons program #f)))
+	 (q-tail q-head)
+	 (literal-queue (make-vector 0)))
     (define (segment-relative-operand? opcode)
       (memq opcode '(save true? true?p false? false?p goto)))
+    (define (enqueue-proc! item)
+      (let ((node (list item)))
+	(if (null? q-head)
+	    (begin
+	      (set! q-head node)
+	      (set! q-tail node))
+	    (begin
+	      (set-cdr! q-tail node)
+	      (set! q-tail node)))))
+    (define (dequeue-proc!)
+      (let ((item (car q-head)))
+	(set! q-head (cdr q-head))
+	(if (null? q-head)
+	    (set! q-tail '()))
+	item))
     (define (process-one-procedure proc)
       (let* ((insns (car proc))
 	     (n-insns (vector-length insns))
@@ -872,8 +883,8 @@
 	      ;; patched later.  Leave a fixup token in this insn
 	      ;; slot.
 	      (vector-push! output 'fixup)
-	      (vector-push! procedure-queue (cons (cadr insn)
-						  (- (vector-length output) 1))))
+	      (enqueue-proc! (cons (cadr insn)
+				   (- (vector-length output) 1))))
 	     ((segment-relative-operand? opcode)
 	      ;; if it's a branch or save instruction, the operand
 	      ;; is an index relative to this segment, which must 
@@ -885,19 +896,34 @@
 	      (vector-push! output insn)))))))
     ;; while there are still procedures on the queue, process them.
     (let loop ()
-      (if (> (vector-length procedure-queue) 0)
+      (if (not (null? q-head))
 	  (begin
-	    (process-one-procedure (vector-shift! procedure-queue))
+	    (process-one-procedure (dequeue-proc!))
 	    (loop))))
     output))
 
 (define (link2 program)
-  (let ((output (make-vector 0))
-	(output-index 0)
-	(procedure-queue (make-vector 1 (cons program #f)))
-	(literal-queue (make-vector 0)))
+  (let* ((output (make-vector 0))
+	 (q-head (list (cons program #f)))
+	 (q-tail q-head)
+	 (literal-queue (make-vector 0)))
     (define (segment-relative-operand? opcode)
       (memq opcode '(save true? true?p false? false?p goto)))
+    (define (enqueue-proc! item)
+      (let ((node (list item)))
+	(if (null? q-head)
+	    (begin
+	      (set! q-head node)
+	      (set! q-tail node))
+	    (begin
+	      (set-cdr! q-tail node)
+	      (set! q-tail node)))))
+    (define (dequeue-proc!)
+      (let ((item (car q-head)))
+	(set! q-head (cdr q-head))
+	(if (null? q-head)
+	    (set! q-tail '()))
+	item))
     (define (add-literal literal-queue literal)
       ;; Add the given literal to the vector and return the index.
       ;; Re-use an entry if one is already there.  XXX: linear search.
@@ -942,9 +968,8 @@
 	      ;; patched later.  Leave a fixup token in this insn
 	      ;; slot.
 	      (vector-push! output 'fixup)
-	      (vector-push! procedure-queue
-			    (cons (cadr insn)
-				  (- (vector-length output) 1))))
+	      (enqueue-proc! (cons (cadr insn)
+				   (- (vector-length output) 1))))
 	     ((segment-relative-operand? opcode)
 	      ;; if it's a branch or save instruction, the operand
 	      ;; is an index relative to this segment, which must 
@@ -964,9 +989,9 @@
 	      (vector-push! output (apply make-instruction insn))))))))
     ;; while there are still procedures on the queue, process them.
     (let loop ()
-      (if (> (vector-length procedure-queue) 0)
+      (if (not (null? q-head))
 	  (begin
-	    (process-one-procedure (vector-shift! procedure-queue))
+	    (process-one-procedure (dequeue-proc!))
 	    (loop))))
     ;; The internal format of a compiled procedure is a vector 
     ;; containing the instruction vector and the literal pool.
