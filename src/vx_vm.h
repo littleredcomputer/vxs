@@ -123,6 +123,8 @@ struct VM {
   std::unordered_map<std::string, Value> globals;
   std::unordered_map<std::string, uint32_t> symbol_table;
   std::vector<std::string> symbol_names;
+  std::unordered_map<std::string, ObjClosure *> macros;
+  uint32_t next_gensym_id = 1;
 
   // Active concurrent fibers
   std::vector<Fiber *> active_fibers;
@@ -138,6 +140,35 @@ struct VM {
   ~VM() {
     for (Fiber *f : active_fibers) delete f;
     active_fibers.clear();
+  }
+
+  Value call_closure(ObjClosure *closure, const std::vector<Value> &args) {
+    Fiber f;
+    f.push(Value::from_ptr(closure));
+    if (closure->is_variadic) {
+      if (args.size() < closure->arity) {
+        last_error = "Variadic closure: expected at least " + std::to_string(closure->arity) + " args";
+        return Value::unspecified();
+      }
+      for (size_t i = 0; i < closure->arity; ++i) f.push(args[i]);
+      Value rest_list = Value::nil();
+      for (size_t i = args.size(); i > closure->arity; --i) {
+        rest_list = heap.cons(args[i - 1], rest_list);
+      }
+      f.push(rest_list);
+    } else {
+      for (Value a : args) f.push(a);
+    }
+    size_t actual_argc = closure->is_variadic ? (closure->arity + 1) : args.size();
+    size_t frame_slots = std::max<size_t>(actual_argc + 1, closure->max_locals);
+    f.stack.resize(frame_slots, Value::unspecified());
+    f.frames.push_back({closure, closure->chunk->code.data(), 0});
+    StepResult res = step_fiber(f, 10000000);
+    if (res == StepResult::Error || f.state == Fiber::State::Error) {
+      last_error = f.error_message;
+      return Value::unspecified();
+    }
+    return f.result;
   }
 
   // Symbol Interning

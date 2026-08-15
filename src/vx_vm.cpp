@@ -396,10 +396,27 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
           f.push(res);
         } else if (Heap::is_closure(callee)) {
           ObjClosure *closure = callee.as_ptr<ObjClosure>();
-          if (argc != closure->arity) {
-            f.state = Fiber::State::Error;
-            f.error_message = "[VM Error] Closure call: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
-            return StepResult::Error;
+          if (closure->is_variadic) {
+            if (argc < closure->arity) {
+              f.state = Fiber::State::Error;
+              f.error_message = "[VM Error] Variadic closure call: expected at least " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
+              return StepResult::Error;
+            }
+            Value rest_list = Value::nil();
+            for (size_t i = argc; i > closure->arity; --i) {
+              Value arg_val = f.stack[f.stack.size() - argc + (i - 1)];
+              rest_list = heap.cons(arg_val, rest_list);
+            }
+            size_t old_top = f.stack.size() - argc;
+            f.stack.resize(old_top + closure->arity);
+            f.push(rest_list);
+            argc = closure->arity + 1;
+          } else {
+            if (argc != closure->arity) {
+              f.state = Fiber::State::Error;
+              f.error_message = "[VM Error] Closure call: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
+              return StepResult::Error;
+            }
           }
           frame->ip = ip; // Save current IP
           size_t stack_base = f.stack.size() - argc - 1;
@@ -477,10 +494,27 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
           f.push(res);
         } else if (Heap::is_closure(callee)) {
           ObjClosure *closure = callee.as_ptr<ObjClosure>();
-          if (argc != closure->arity) {
-            f.state = Fiber::State::Error;
-            f.error_message = "[VM Error] Closure call: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
-            return StepResult::Error;
+          if (closure->is_variadic) {
+            if (argc < closure->arity) {
+              f.state = Fiber::State::Error;
+              f.error_message = "[VM Error] Variadic closure call: expected at least " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
+              return StepResult::Error;
+            }
+            Value rest_list = Value::nil();
+            for (size_t i = argc; i > closure->arity; --i) {
+              Value arg_val = f.stack[f.stack.size() - argc + (i - 1)];
+              rest_list = heap.cons(arg_val, rest_list);
+            }
+            size_t old_top = f.stack.size() - argc;
+            f.stack.resize(old_top + closure->arity);
+            f.push(rest_list);
+            argc = closure->arity + 1;
+          } else {
+            if (argc != closure->arity) {
+              f.state = Fiber::State::Error;
+              f.error_message = "[VM Error] Closure call: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(argc);
+              return StepResult::Error;
+            }
           }
           // Shift callee + arguments down to current frame's stack base
           size_t old_base = frame->stack_base;
@@ -1304,6 +1338,67 @@ void VM::init_primitives() {
     std::string_view sv = args[0].as_ptr<ObjString>()->view();
     uint32_t id = vm.intern(std::string(sv));
     return Value::from_keyword_id(id);
+  }, 1, 1));
+
+  // ---------------------------------------------------------------------------
+  // Metaprogramming & Macros
+  // ---------------------------------------------------------------------------
+  def_global("gensym", heap.make_subr("gensym", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::string pfx = "g";
+    if (argc > 0) {
+      if (Heap::is_string(args[0])) pfx = std::string(args[0].as_ptr<ObjString>()->view());
+      else if (args[0].is_symbol()) pfx = vm.get_symbol_name(args[0].as_symbol_id());
+    }
+    std::string sym = pfx + "_" + std::to_string(vm.next_gensym_id++);
+    return Value::from_symbol_id(vm.intern(sym));
+  }, 0, 1));
+
+  auto subr_macroexpand_1 = [](VM &vm, uint32_t, Value *args) -> Value {
+    Value form = args[0];
+    if (Heap::is_cons(form) && Heap::car(form).is_symbol()) {
+      std::string op = vm.get_symbol_name(Heap::car(form).as_symbol_id());
+      auto it = vm.macros.find(op);
+      if (it != vm.macros.end()) {
+        std::vector<Value> raw_args;
+        Value cur = Heap::cdr(form);
+        while (Heap::is_cons(cur)) {
+          raw_args.push_back(Heap::car(cur));
+          cur = Heap::cdr(cur);
+        }
+        return vm.call_closure(it->second, raw_args);
+      }
+    }
+    return form;
+  };
+  def_global("macroexpand-1", heap.make_subr("macroexpand-1", subr_macroexpand_1, 1, 1));
+
+  auto subr_macroexpand = [](VM &vm, uint32_t, Value *args) -> Value {
+    Value form = args[0];
+    while (Heap::is_cons(form) && Heap::car(form).is_symbol()) {
+      std::string op = vm.get_symbol_name(Heap::car(form).as_symbol_id());
+      auto it = vm.macros.find(op);
+      if (it != vm.macros.end()) {
+        std::vector<Value> raw_args;
+        Value cur = Heap::cdr(form);
+        while (Heap::is_cons(cur)) {
+          raw_args.push_back(Heap::car(cur));
+          cur = Heap::cdr(cur);
+        }
+        form = vm.call_closure(it->second, raw_args);
+      } else {
+        break;
+      }
+    }
+    return form;
+  };
+  def_global("macroexpand", heap.make_subr("macroexpand", subr_macroexpand, 1, 1));
+
+  def_global("macro?", heap.make_subr("macro?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (args[0].is_symbol()) {
+      std::string name = vm.get_symbol_name(args[0].as_symbol_id());
+      return Value::from_bool(vm.macros.find(name) != vm.macros.end());
+    }
+    return Value::boolean_false();
   }, 1, 1));
 }
 
