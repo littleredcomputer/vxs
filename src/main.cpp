@@ -1,89 +1,116 @@
 //----------------------------------------------------------------------
-// vx-scheme : Scheme interpreter.
-// Copyright (c) 2002,2003,2006 and onwards Colin Smith.
-//
-// You may distribute under the terms of the Artistic License,
-// as specified in the LICENSE file.
-//
-// main.cpp : startup code for UNIX environments.
+// vx-scheme : Modern 64-Bit NaN-Boxed Scheme Engine
+// Copyright (c) 2002-2026 Colin Smith and Antigravity contributors.
+//----------------------------------------------------------------------
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <chrono>
-#include <stdexcept>
-#include "vx-scheme.h"
+#include "vx_value.h"
+#include "vx_heap.h"
+#include "vx_vm.h"
+#include "vx_reader.h"
+#include "vx_compiler.h"
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
-//----------------------------------------------------------------------------
-//
-// SYSTEM ABSTRACTION
-//
-//----------------------------------------------------------------------------
+using namespace vxs;
 
-double vx_get_time() {
-  auto now = std::chrono::system_clock::now();
-  auto duration = now.time_since_epoch();
-  return std::chrono::duration<double>(duration).count();
+static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string &err_msg) {
+  try {
+    Reader reader(vm, code);
+    Value form = reader.read_all_forms();
+    Compiler compiler(vm);
+    ObjClosure *closure = compiler.compile_top_level(form);
+
+    Fiber fiber;
+    fiber.push(Value::from_ptr(closure));
+    size_t frame_slots = std::max<size_t>(1, closure->max_locals);
+    fiber.stack.resize(frame_slots, Value::unspecified());
+    fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
+
+    VM::StepResult res = vm.step_fiber(fiber, 100000000);
+    if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
+      ok = false;
+      err_msg = fiber.error_message.empty() ? "[VM Error] Execution error" : fiber.error_message;
+      return Value::unspecified();
+    }
+    ok = true;
+    return fiber.result;
+  } catch (const std::exception &e) {
+    ok = false;
+    err_msg = std::string("[Error] ") + e.what();
+    return Value::unspecified();
+  }
 }
 
-uint32_t debug_flags() {
-  static bool env_checked = false;
-  static uint32_t f = 0;
-  if (!env_checked) {
-    if (const char *c = getenv("T"))
-      f = strtoul(c, nullptr, 0);
-    env_checked = true;
+static void run_repl(VM &vm) {
+  std::cout << "Vx-Scheme 0.8 (64-bit NaN-Boxed Bytecode Engine)" << std::endl;
+  std::cout << "Type (exit) or Ctrl+D to quit." << std::endl;
+
+  std::string line;
+  while (true) {
+    std::cout << "vxs> ";
+    std::cout.flush();
+    if (!std::getline(std::cin, line)) break;
+
+    // Skip empty lines
+    if (line.empty()) continue;
+    if (line == "(exit)" || line == ":quit" || line == "quit") break;
+
+    bool ok = false;
+    std::string err;
+    Value res = eval_string(vm, line, ok, err);
+    if (ok) {
+      if (!res.is_unspecified()) {
+        std::cout << "=> " << vm.format_value(res) << std::endl;
+      }
+    } else {
+      std::cerr << err << std::endl;
+    }
   }
-  return f;
-}
-
-void interact(Context *ctx) {
-  bool interactive = (isatty(0) != 0);
-
-  while (ctx->read_eval_print(stdin, stdout, interactive))
-    ;
-
-  if (debug_flag(DebugFlag::MemstatsAtExit)) {
-    ctx->print_mem_stats(stdout);
-  }
-
-  exit(0);
 }
 
 int main(int argc, char **argv) {
-  Context ctx;
-  Cell *scheme_argv = ctx.gc_protect(ctx.make_vector(0));
-  cellvector *argvec = scheme_argv->VectorValue();
+  VM vm;
 
-  --argc;
-  ++argv;
-
-  while (argc > 0) {
-    argvec->push(ctx.make_string(*argv));
-    --argc;
-    ++argv;
-  }
-
-  // Establish *argv* in global environment
-
-  ctx.set_var(intern("*argv*"), scheme_argv);
-  ctx.gc_unprotect();
-
-  // See if we have a canned main procedure.
-
-  Cell *result = ctx.RunMain();
-  if (result) {
-    if (result != unspecified)
-      result->write(stdout);
-  } else {
-    // Interact
-
-    while (1) {
-      try {
-        interact(&ctx);
-      } catch (const std::exception &e) {
-        fprintf(stderr, "caught exception: %s\n", e.what());
+  if (argc > 1) {
+    std::string arg1 = argv[1];
+    if (arg1 == "-e" && argc > 2) {
+      bool ok = false;
+      std::string err;
+      Value res = eval_string(vm, argv[2], ok, err);
+      if (ok) {
+        if (!res.is_unspecified()) std::cout << vm.format_value(res) << std::endl;
+        return 0;
+      } else {
+        std::cerr << err << std::endl;
+        return 1;
       }
     }
+
+    // Treat as script file
+    std::ifstream file(arg1);
+    if (!file.is_open()) {
+      std::cerr << "Error: Cannot open file: " << arg1 << std::endl;
+      return 1;
+    }
+    std::stringstream buf;
+    buf << file.rdbuf();
+    bool ok = false;
+    std::string err;
+    Value res = eval_string(vm, buf.str(), ok, err);
+    if (!ok) {
+      std::cerr << err << std::endl;
+      return 1;
+    }
+    if (!res.is_unspecified()) {
+      std::cout << vm.format_value(res) << std::endl;
+    }
+    return 0;
   }
+
+  // Interactive REPL
+  run_repl(vm);
+  return 0;
 }
