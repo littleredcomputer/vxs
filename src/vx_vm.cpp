@@ -1,10 +1,12 @@
 #include "vx_vm.h"
 #include "vx_reader.h"
 #include "vx_compiler.h"
+#include <algorithm>
 #include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <cerrno>
 
 namespace vxs {
 
@@ -947,6 +949,22 @@ void VM::step_all_active_fibers(size_t instructions_per_fiber) {
   }
 }
 
+// Case-insensitive three-way compare, shared by the string-ci*? family.
+// A free function rather than a local lambda: NativeSubrFn is a plain
+// function pointer, so the subr lambdas below must stay capture-less —
+// calling this by name costs nothing, capturing it would forbid the
+// pointer conversion make_subr needs.
+static int ci_compare(std::string_view a, std::string_view b) {
+  size_t n = std::min(a.size(), b.size());
+  for (size_t i = 0; i < n; ++i) {
+    unsigned char ca = std::tolower(static_cast<unsigned char>(a[i]));
+    unsigned char cb = std::tolower(static_cast<unsigned char>(b[i]));
+    if (ca != cb) return ca < cb ? -1 : 1;
+  }
+  if (a.size() == b.size()) return 0;
+  return a.size() < b.size() ? -1 : 1;
+}
+
 // Builtin primitive registration
 void VM::init_primitives() {
   // 1. Math & Arithmetic
@@ -1753,15 +1771,27 @@ void VM::init_primitives() {
 
   def_global("string-ci=?", heap.make_subr("string-ci=?", [](VM &, uint32_t, Value *args) -> Value {
     if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
-    auto a = args[0].as_ptr<ObjString>()->view();
-    auto b = args[1].as_ptr<ObjString>()->view();
-    if (a.size() != b.size()) return Value::boolean_false();
-    for (size_t i = 0; i < a.size(); ++i) {
-      if (std::tolower(static_cast<unsigned char>(a[i])) !=
-          std::tolower(static_cast<unsigned char>(b[i])))
-        return Value::boolean_false();
-    }
-    return Value::boolean_true();
+    return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) == 0);
+  }, 2, 2));
+
+  def_global("string-ci<?", heap.make_subr("string-ci<?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
+    return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) < 0);
+  }, 2, 2));
+
+  def_global("string-ci<=?", heap.make_subr("string-ci<=?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
+    return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) <= 0);
+  }, 2, 2));
+
+  def_global("string-ci>?", heap.make_subr("string-ci>?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
+    return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) > 0);
+  }, 2, 2));
+
+  def_global("string-ci>=?", heap.make_subr("string-ci>=?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
+    return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) >= 0);
   }, 2, 2));
 
   // Display / Output
@@ -2502,7 +2532,28 @@ void VM::init_primitives() {
   }, 2, 2));
 
   // Strings
-  def_global("number->string", heap.make_subr("number->string", [](VM &vm, uint32_t, Value *args) -> Value {
+  def_global("number->string", heap.make_subr("number->string", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    int radix = 10;
+    if (argc > 1 && args[1].is_int()) radix = args[1].as_int();
+    if (args[0].is_int() && radix != 10 && radix >= 2 && radix <= 36) {
+      int32_t iv = args[0].as_int();
+      bool neg = iv < 0;
+      uint32_t uv = neg ? static_cast<uint32_t>(-static_cast<int64_t>(iv))
+                        : static_cast<uint32_t>(iv);
+      static const char DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+      std::string digits;
+      if (uv == 0) {
+        digits = "0";
+      } else {
+        while (uv > 0) {
+          digits.push_back(DIGITS[uv % static_cast<uint32_t>(radix)]);
+          uv /= static_cast<uint32_t>(radix);
+        }
+        std::reverse(digits.begin(), digits.end());
+      }
+      if (neg) digits.insert(digits.begin(), '-');
+      return vm.heap.make_string(digits);
+    }
     if (args[0].is_int()) {
       return vm.heap.make_string(std::to_string(args[0].as_int()));
     }
@@ -2518,16 +2569,35 @@ void VM::init_primitives() {
     return vm.heap.make_string("0");
   }, 1, 2));
 
-  def_global("string->number", heap.make_subr("string->number", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("string->number", heap.make_subr("string->number", [](VM &, uint32_t argc, Value *args) -> Value {
     if (!Heap::is_string(args[0])) return Value::boolean_false();
     std::string_view sv = args[0].as_ptr<ObjString>()->view();
+    if (sv.empty() || sv == "+" || sv == "-" || sv == ".") return Value::boolean_false();
+
+    int radix = 10;
+    if (argc > 1) {
+      if (!args[1].is_int()) return Value::boolean_false();
+      radix = args[1].as_int();
+      if (radix < 2 || radix > 36) return Value::boolean_false();
+    }
+
+    if (radix != 10) {
+      // R4RS only requires exact (integer) parsing outside radix 10.
+      char *end = nullptr;
+      errno = 0;
+      long long iv = std::strtoll(sv.data(), &end, radix);
+      if (end != sv.data() + sv.size() || errno == ERANGE) return Value::boolean_false();
+      return Value::from_int(static_cast<int32_t>(iv));
+    }
+
     char *end = nullptr;
     long long iv = std::strtoll(sv.data(), &end, 10);
     if (end == sv.data() + sv.size()) return Value::from_int(static_cast<int32_t>(iv));
+    end = nullptr;
     double dv = std::strtod(sv.data(), &end);
     if (end == sv.data() + sv.size()) return Value::from_double(dv);
     return Value::boolean_false();
-  }, 1, 1));
+  }, 1, 2));
 
   def_global("string-length", heap.make_subr("string-length", [](VM &, uint32_t, Value *args) -> Value {
     if (!Heap::is_string(args[0])) return Value::from_int(0);
