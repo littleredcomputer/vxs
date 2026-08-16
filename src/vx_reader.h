@@ -104,14 +104,14 @@ public:
         }
       }
       std::string_view name = src.substr(start, cursor - start);
-      if (name == "space")
-        return Value::from_char(' ');
-      if (name == "newline")
-        return Value::from_char('\n');
-      if (name == "tab")
-        return Value::from_char('\t');
-      if (name == "return")
-        return Value::from_char('\r');
+      // R4RS named character literals (#\Space, #\NEWLINE, ...) are
+      // case-insensitive, unlike everything else in this dialect.
+      if (name.size() > 1) {
+        if (iequals(name, "space")) return Value::from_char(' ');
+        if (iequals(name, "newline")) return Value::from_char('\n');
+        if (iequals(name, "tab")) return Value::from_char('\t');
+        if (iequals(name, "return")) return Value::from_char('\r');
+      }
       return Value::from_char(name[0]);
     }
 
@@ -132,6 +132,16 @@ public:
   }
 
 private:
+  static inline bool iequals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (std::tolower(static_cast<unsigned char>(a[i])) !=
+          std::tolower(static_cast<unsigned char>(b[i])))
+        return false;
+    }
+    return true;
+  }
+
   inline bool is_at_end() const { return cursor >= src.size(); }
 
   inline char peek() const {
