@@ -238,16 +238,31 @@ struct VM {
   // 2D Property table for (put sym prop val) and (get sym prop)
   std::map<std::pair<std::string, std::string>, Value> property_table;
 
-  // I/O Ports
-  std::ostream *current_out = nullptr;
-  std::vector<std::shared_ptr<std::ifstream>> open_input_ports;
+  // I/O Ports — current_in_port/current_out_port are what read/write/
+  // display/etc. use when not given an explicit port argument. They
+  // default to stdin_port/stdout_port and get temporarily rebound by
+  // things like with-output-to-file for the extent of a call.
+  Value stdin_port = Value::unspecified();
+  Value stdout_port = Value::unspecified();
+  Value current_in_port = Value::unspecified();
+  Value current_out_port = Value::unspecified();
+
+  inline std::ostream &out_stream() const {
+    return *current_out_port.as_ptr<ObjPort>()->out;
+  }
+  inline std::istream &in_stream() const {
+    return *current_in_port.as_ptr<ObjPort>()->in;
+  }
 
   // Hook for error diagnostics
   std::string last_error;
 
   VM() : current_fiber(nullptr) {
-    current_out = &std::cout;
     heap.set_vm(this);
+    stdin_port = heap.make_std_port(true, &std::cin, nullptr);
+    stdout_port = heap.make_std_port(false, nullptr, &std::cout);
+    current_in_port = stdin_port;
+    current_out_port = stdout_port;
     init_primitives();
   }
 
