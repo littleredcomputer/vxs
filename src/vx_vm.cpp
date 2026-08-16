@@ -1003,31 +1003,47 @@ void VM::init_primitives() {
   def_global("remainder", heap.make_subr("remainder", subr_rem, 2, 2));
   def_global("modulo", heap.make_subr("modulo", subr_rem, 2, 2));
 
-  // Comparisons
-  auto subr_num_eq = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(args[0].as_real() == args[1].as_real());
+  // Comparisons — R4RS numeric comparisons are N-ary: (< a1 a2 a3 ...) holds
+  // iff every consecutive pair satisfies the relation.
+  auto subr_num_eq = [](VM &, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!(args[i - 1].as_real() == args[i].as_real())) return Value::boolean_false();
+    }
+    return Value::boolean_true();
   };
-  def_global("=", heap.make_subr("=", subr_num_eq, 2, 2));
+  def_global("=", heap.make_subr("=", subr_num_eq, 1, UINT32_MAX));
 
-  auto subr_lt = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(args[0].as_real() < args[1].as_real());
+  auto subr_lt = [](VM &, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!(args[i - 1].as_real() < args[i].as_real())) return Value::boolean_false();
+    }
+    return Value::boolean_true();
   };
-  def_global("<", heap.make_subr("<", subr_lt, 2, 2));
+  def_global("<", heap.make_subr("<", subr_lt, 1, UINT32_MAX));
 
-  auto subr_le = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(args[0].as_real() <= args[1].as_real());
+  auto subr_le = [](VM &, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!(args[i - 1].as_real() <= args[i].as_real())) return Value::boolean_false();
+    }
+    return Value::boolean_true();
   };
-  def_global("<=", heap.make_subr("<=", subr_le, 2, 2));
+  def_global("<=", heap.make_subr("<=", subr_le, 1, UINT32_MAX));
 
-  auto subr_gt = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(args[0].as_real() > args[1].as_real());
+  auto subr_gt = [](VM &, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!(args[i - 1].as_real() > args[i].as_real())) return Value::boolean_false();
+    }
+    return Value::boolean_true();
   };
-  def_global(">", heap.make_subr(">", subr_gt, 2, 2));
+  def_global(">", heap.make_subr(">", subr_gt, 1, UINT32_MAX));
 
-  auto subr_ge = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(args[0].as_real() >= args[1].as_real());
+  auto subr_ge = [](VM &, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!(args[i - 1].as_real() >= args[i].as_real())) return Value::boolean_false();
+    }
+    return Value::boolean_true();
   };
-  def_global(">=", heap.make_subr(">=", subr_ge, 2, 2));
+  def_global(">=", heap.make_subr(">=", subr_ge, 1, UINT32_MAX));
 
   auto subr_not = [](VM &, uint32_t, Value *args) -> Value {
     return Value::from_bool(args[0].is_false());
@@ -1345,7 +1361,14 @@ void VM::init_primitives() {
     }
     if (Heap::is_subr(fn)) {
       ObjSubr *subr = fn.as_ptr<ObjSubr>();
-      return subr->fn(vm, static_cast<uint32_t>(flat_args.size()), flat_args.data());
+      uint32_t n = static_cast<uint32_t>(flat_args.size());
+      if (n < subr->min_args || n > subr->max_args) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] " + std::string(subr->name) + ": wrong number of arguments";
+        return Value::unspecified();
+      }
+      return subr->fn(vm, n, flat_args.data());
     }
     if (Heap::is_closure(fn)) {
       return vm.call_closure(fn.as_ptr<ObjClosure>(), flat_args);

@@ -409,13 +409,11 @@ private:
           }
 
           // Standard parallel let: ((lambda (v1 v2 ...) body...) e1 e2 ...)
+          // Always routed through compile_function (even with zero bindings)
+          // so internal (define ...) forms in the body get their own fresh
+          // scope via the letrec desugaring there, rather than leaking into
+          // the enclosing scope.
           auto pairs = parse_bindings(bindings);
-          if (pairs.empty()) {
-            Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-            compile_expr(vm.heap.cons(begin_sym, let_body), chunk, is_tail);
-            return;
-          }
-
           std::vector<Value> params;
           std::vector<Value> inits;
           for (const auto &p : pairs) {
@@ -445,12 +443,10 @@ private:
         if (op_name == "letrec") {
           Value bindings = Heap::car(rest);
           Value body = Heap::cdr(rest);
+          // Always desugar to `let` (even with zero bindings) so the body
+          // gets its own fresh scope for internal defines — see the `let`
+          // comment above.
           auto pairs = parse_bindings(bindings);
-          if (pairs.empty()) {
-            Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-            compile_expr(vm.heap.cons(begin_sym, body), chunk, is_tail);
-            return;
-          }
 
           Value let_sym = Value::from_symbol_id(vm.intern("let"));
           Value set_sym = Value::from_symbol_id(vm.intern("set!"));
@@ -475,12 +471,16 @@ private:
             binding_list = vm.heap.cons(*it, binding_list);
           }
 
+          // Wrap the original body in its own (let () ...) rather than
+          // splicing it after the set! initializers directly: the set!
+          // forms would otherwise occupy the "leading" position that
+          // compile_function scans for internal defines, so a (define ...)
+          // at the head of the user's body would stop being recognized as
+          // one and would fall through to a global define instead of
+          // shadowing within its own nested scope.
           std::vector<Value> full_body = set_exprs;
-          Value cur_b = body;
-          while (Heap::is_cons(cur_b)) {
-            full_body.push_back(Heap::car(cur_b));
-            cur_b = Heap::cdr(cur_b);
-          }
+          full_body.push_back(
+              vm.heap.cons(let_sym, vm.heap.cons(Value::nil(), body)));
 
           Value body_list = Value::nil();
           for (auto it = full_body.rbegin(); it != full_body.rend(); ++it) {
@@ -663,8 +663,10 @@ private:
 
           auto pairs = parse_bindings(bindings);
           if (pairs.empty()) {
-            Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-            compile_expr(vm.heap.cons(begin_sym, body), chunk, is_tail);
+            // (let () body...) — routes through the `let` handler above,
+            // which opens a fresh scope for internal defines.
+            compile_expr(vm.heap.cons(let_sym, vm.heap.cons(Value::nil(), body)),
+                        chunk, is_tail);
             return;
           }
 
@@ -1081,9 +1083,44 @@ private:
     return result;
   }
 
+  // Shared by both quasiquoted (vector ...) forms and raw [...] vector
+  // literals: builds (list->vector (append (list e1) (list e2) ... spliced))
+  Value expand_quasiquote_vector_elems(
+      const std::vector<Value> &elems,
+      std::unordered_map<std::string, Value> &gensym_map, int depth) {
+    std::vector<Value> v_parts;
+    for (Value elem : elems) {
+      if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
+          vm.get_symbol_name(Heap::car(elem).as_symbol_id()) ==
+              "unquote-splicing" &&
+          depth == 1) {
+        v_parts.push_back(Heap::car(Heap::cdr(elem)));
+      } else {
+        Value expanded_elem = expand_quasiquote(elem, gensym_map, depth);
+        v_parts.push_back(
+            vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+                         vm.heap.cons(expanded_elem, Value::nil())));
+      }
+    }
+    Value append_sym = Value::from_symbol_id(vm.intern("append"));
+    Value list_to_vec_sym = Value::from_symbol_id(vm.intern("list->vector"));
+    Value v_res_list = Value::nil();
+    for (auto it = v_parts.rbegin(); it != v_parts.rend(); ++it) {
+      v_res_list = vm.heap.cons(*it, v_res_list);
+    }
+    return vm.heap.cons(
+        list_to_vec_sym,
+        vm.heap.cons(vm.heap.cons(append_sym, v_res_list), Value::nil()));
+  }
+
   Value expand_quasiquote(Value form,
                           std::unordered_map<std::string, Value> &gensym_map,
                           int depth = 1) {
+    if (Heap::is_vector(form)) {
+      ObjVector *vec = form.as_ptr<ObjVector>();
+      std::vector<Value> elems(vec->data, vec->data + vec->size);
+      return expand_quasiquote_vector_elems(elems, gensym_map, depth);
+    }
     if (!Heap::is_cons(form)) {
       if (form.is_symbol()) {
         std::string sym_name = vm.get_symbol_name(form.as_symbol_id());
@@ -1136,33 +1173,13 @@ private:
         }
       }
       if (sym == "vector") {
-        std::vector<Value> v_parts;
+        std::vector<Value> elems;
         Value cur_v = rest;
         while (Heap::is_cons(cur_v)) {
-          Value elem = Heap::car(cur_v);
-          if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
-              vm.get_symbol_name(Heap::car(elem).as_symbol_id()) ==
-                  "unquote-splicing" &&
-              depth == 1) {
-            v_parts.push_back(Heap::car(Heap::cdr(elem)));
-          } else {
-            Value expanded_elem = expand_quasiquote(elem, gensym_map, depth);
-            v_parts.push_back(
-                vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
-                             vm.heap.cons(expanded_elem, Value::nil())));
-          }
+          elems.push_back(Heap::car(cur_v));
           cur_v = Heap::cdr(cur_v);
         }
-        Value append_sym = Value::from_symbol_id(vm.intern("append"));
-        Value list_to_vec_sym =
-            Value::from_symbol_id(vm.intern("list->vector"));
-        Value v_res_list = Value::nil();
-        for (auto it = v_parts.rbegin(); it != v_parts.rend(); ++it) {
-          v_res_list = vm.heap.cons(*it, v_res_list);
-        }
-        return vm.heap.cons(
-            list_to_vec_sym,
-            vm.heap.cons(vm.heap.cons(append_sym, v_res_list), Value::nil()));
+        return expand_quasiquote_vector_elems(elems, gensym_map, depth);
       }
     }
 
@@ -1170,6 +1187,16 @@ private:
     std::vector<Value> parts;
     Value cur = form;
     while (Heap::is_cons(cur)) {
+      // Dotted-tail unquote: `(a . ,b) reads as the cons chain (a unquote
+      // b), indistinguishable from a proper 3-element list at this point —
+      // per R4RS both forms mean the same thing. Stop consuming `cur` as an
+      // ordinary spine element so the tail handling below can hand
+      // (unquote b) to expand_quasiquote, which recognizes it directly.
+      if (Heap::car(cur).is_symbol() &&
+          vm.get_symbol_name(Heap::car(cur).as_symbol_id()) == "unquote" &&
+          Heap::is_cons(Heap::cdr(cur))) {
+        break;
+      }
       Value elem = Heap::car(cur);
       if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
           vm.get_symbol_name(Heap::car(elem).as_symbol_id()) ==
