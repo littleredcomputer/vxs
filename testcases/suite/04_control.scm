@@ -93,7 +93,12 @@
   (assert-equal "second force returns result" 42 (force p)))
 
 ;; Infinite lazy stream
-(define (stream-cons a b) (cons a (delay b)))
+;; Must be a macro, not a procedure: a procedure's arguments are evaluated
+;; eagerly at the call site, so (stream-cons n (integers-from (+ n 1)))
+;; would recurse infinitely before stream-cons ever got a chance to wrap
+;; the second argument in delay. Expanding to (cons a (delay b)) leaves b
+;; as the raw, unevaluated expression, so delay is what defers it.
+(defmacro stream-cons (a b) `(cons ,a (delay ,b)))
 (define (stream-car s) (car s))
 (define (stream-cdr s) (force (cdr s)))
 

@@ -156,8 +156,8 @@ void VM::display_value(Value v, std::ostream &os) const {
 
 void Heap::mark_fiber(Fiber *f) {
   if (!f) return;
-  for (Value v : f->stack) {
-    mark_value(v);
+  for (size_t i = 0; i < f->stack.size(); ++i) {
+    mark_value(f->stack[i]);
   }
   for (const CallFrame &frame : f->frames) {
     if (frame.closure) {
@@ -316,6 +316,13 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
     return StepResult::Completed;
   }
 
+  return run_dispatch(f, max_instructions, 0);
+}
+
+// The dispatch loop proper — see the declaration in vx_vm.h for how
+// stop_at_depth lets call_closure re-enter this on an already-running
+// fiber without going through step_fiber's setup again.
+VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth) {
   CallFrame *frame = &f.frames.back();
   const uint8_t *ip = frame->ip;
   const BytecodeChunk *chunk = frame->closure->chunk.get();
@@ -595,7 +602,17 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
             f.error_message = "[VM Error] " + std::string(subr->name) + ": wrong number of arguments";
             return StepResult::Error;
           }
-          Value *args = &f.stack[f.stack.size() - argc];
+          Value *args;
+          std::vector<Value> args_scratch;
+          size_t args_start = f.stack.size() - argc;
+          if (!f.stack.contiguous_range(args_start, argc, &args)) {
+            // Rare: this call's argument window straddles a slab
+            // boundary. Copy it into a scratch buffer so subr bodies can
+            // keep doing ordinary args[i] pointer arithmetic.
+            args_scratch.resize(argc);
+            for (uint8_t i = 0; i < argc; ++i) args_scratch[i] = f.stack[args_start + i];
+            args = args_scratch.data();
+          }
           Value res = subr->fn(*this, argc, args);
           if (f.state == Fiber::State::Error) return StepResult::Error;
           f.stack.resize(f.stack.size() - argc - 1);
@@ -697,9 +714,11 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
           f.stack.resize(frame->stack_base);
           f.frames.pop_back();
 
-          if (f.frames.empty()) {
+          if (f.frames.size() <= stop_at_depth) {
             f.result = res;
-            f.state = Fiber::State::Completed;
+            if (stop_at_depth == 0) {
+              f.state = Fiber::State::Completed;
+            }
             return false;
           }
 
@@ -717,7 +736,14 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
             f.error_message = "[VM Error] " + std::string(subr->name) + ": wrong number of arguments";
             return StepResult::Error;
           }
-          Value *args = &f.stack[f.stack.size() - argc];
+          Value *args;
+          std::vector<Value> args_scratch;
+          size_t args_start = f.stack.size() - argc;
+          if (!f.stack.contiguous_range(args_start, argc, &args)) {
+            args_scratch.resize(argc);
+            for (uint8_t i = 0; i < argc; ++i) args_scratch[i] = f.stack[args_start + i];
+            args = args_scratch.data();
+          }
           Value res = subr->fn(*this, argc, args);
           if (f.state == Fiber::State::Error) {
             return StepResult::Error;
@@ -800,9 +826,11 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
         f.stack.resize(frame->stack_base);
         f.frames.pop_back();
 
-        if (f.frames.empty()) {
+        if (f.frames.size() <= stop_at_depth) {
           f.result = res;
-          f.state = Fiber::State::Completed;
+          if (stop_at_depth == 0) {
+            f.state = Fiber::State::Completed;
+          }
           return StepResult::Completed;
         }
 
@@ -1723,6 +1751,19 @@ void VM::init_primitives() {
     return Value::from_bool(args[0].as_ptr<ObjString>()->view() >= args[1].as_ptr<ObjString>()->view());
   }, 2, 2));
 
+  def_global("string-ci=?", heap.make_subr("string-ci=?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0]) || !Heap::is_string(args[1])) return Value::boolean_false();
+    auto a = args[0].as_ptr<ObjString>()->view();
+    auto b = args[1].as_ptr<ObjString>()->view();
+    if (a.size() != b.size()) return Value::boolean_false();
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (std::tolower(static_cast<unsigned char>(a[i])) !=
+          std::tolower(static_cast<unsigned char>(b[i])))
+        return Value::boolean_false();
+    }
+    return Value::boolean_true();
+  }, 2, 2));
+
   // Display / Output
   auto subr_display = [](VM &vm, uint32_t, Value *args) -> Value {
     vm.display_value(args[0], *vm.current_out);
@@ -2641,20 +2682,10 @@ void VM::init_primitives() {
       if (form.is_eof()) break;
       Compiler compiler(vm);
       ObjClosure *closure = compiler.compile_top_level(form);
-      Fiber child;
-      child.push(Value::from_ptr(closure));
-      size_t frame_slots = std::max<size_t>(1, closure->max_locals);
-      child.stack.resize(frame_slots, Value::unspecified());
-      child.frames.push_back({closure, closure->chunk->code.data(), 0});
-      vm.step_fiber(child, 100000000);
-      if (child.state == Fiber::State::Error) {
-        if (vm.current_fiber) {
-          vm.current_fiber->state = Fiber::State::Error;
-          vm.current_fiber->error_message = child.error_message;
-        }
+      last_res = vm.call_closure(closure, {});
+      if (vm.current_fiber && vm.current_fiber->state == Fiber::State::Error) {
         return Value::unspecified();
       }
-      last_res = child.result;
     }
     return last_res;
   }, 1, 1));
