@@ -207,6 +207,14 @@ private:
     return result;
   }
 
+  // [e1 e2 ...] desugars to a (vector e1 e2 ...) call form, NOT a literal
+  // ObjVector like read_vector() below builds for #(...) — deliberately:
+  // Clojure-style bracket vectors evaluate their elements when used as an
+  // expression (e.g. `[(v 1) (:y a)]`), unlike R4RS's self-evaluating
+  // #(...) vectors. The compiler's `quote`/`quasiquote` handling
+  // recognizes (vector ...)-headed lists specially and materializes a
+  // real ObjVector out of them at quote time instead of leaving them as
+  // an inert call form — see quote_materialize in vx_compiler.h.
   Value read_bracket_vector() {
     advance(); // '['
     skip_whitespace_and_comments();
@@ -227,6 +235,8 @@ private:
     return vm.heap.cons(vec_sym, list);
   }
 
+  // {k1 v1 ...} desugars to a (hash-map k1 v1 ...) call form — same
+  // reasoning as read_bracket_vector above.
   Value read_brace_map() {
     advance(); // '{'
     skip_whitespace_and_comments();
