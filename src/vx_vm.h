@@ -3,11 +3,15 @@
 #include "vx_value.h"
 #include "vx_heap.h"
 #include <vector>
+#include <map>
+#include <memory>
+#include <fstream>
 #include <unordered_map>
 #include <string>
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <numeric>
 
 namespace vxs {
 
@@ -91,9 +95,10 @@ struct Fiber {
 
   // Continuation snapshot for call/cc
   std::vector<Value> saved_continuation;
+  Fiber *parent_fiber = nullptr;
 
   inline Fiber()
-      : state(State::Ready), result(Value::unspecified()) {
+      : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {
     stack.reserve(256);
     frames.reserve(32);
   }
@@ -130,10 +135,28 @@ struct VM {
   std::vector<Fiber *> active_fibers;
   Fiber *current_fiber;
 
+  // Ephemeral GC roots
+  std::vector<Value *> temp_roots;
+  std::vector<Obj **> temp_obj_roots;
+
+  inline void push_temp_root(Value *v) { temp_roots.push_back(v); }
+  inline void pop_temp_root() { if (!temp_roots.empty()) temp_roots.pop_back(); }
+  inline void push_temp_obj_root(Obj **o) { temp_obj_roots.push_back(o); }
+  inline void pop_temp_obj_root() { if (!temp_obj_roots.empty()) temp_obj_roots.pop_back(); }
+
+  // 2D Property table for (put sym prop val) and (get sym prop)
+  std::map<std::pair<std::string, std::string>, Value> property_table;
+
+  // I/O Ports
+  std::ostream *current_out = nullptr;
+  std::vector<std::shared_ptr<std::ifstream>> open_input_ports;
+
   // Hook for error diagnostics
   std::string last_error;
 
   VM() : current_fiber(nullptr) {
+    current_out = &std::cout;
+    heap.set_vm(this);
     init_primitives();
   }
 
@@ -141,6 +164,9 @@ struct VM {
     for (Fiber *f : active_fibers) delete f;
     active_fibers.clear();
   }
+
+  void mark_roots(Heap &h);
+  inline void collect_garbage() { heap.collect_garbage(); }
 
   Value call_closure(ObjClosure *closure, const std::vector<Value> &args) {
     Fiber f;
@@ -152,9 +178,11 @@ struct VM {
       }
       for (size_t i = 0; i < closure->arity; ++i) f.push(args[i]);
       Value rest_list = Value::nil();
+      push_temp_root(&rest_list);
       for (size_t i = args.size(); i > closure->arity; --i) {
         rest_list = heap.cons(args[i - 1], rest_list);
       }
+      pop_temp_root();
       f.push(rest_list);
     } else {
       for (Value a : args) f.push(a);

@@ -1,11 +1,11 @@
 #pragma once
 
-#include "vx_value.h"
 #include "vx_heap.h"
+#include "vx_value.h"
 #include "vx_vm.h"
-#include <string_view>
 #include <cctype>
 #include <sstream>
+#include <string_view>
 
 namespace vxs {
 
@@ -14,18 +14,21 @@ namespace vxs {
 //=============================================================================
 class Reader {
 public:
-  Reader(VM &vm, std::string_view source)
-      : vm(vm), src(source), cursor(0) {}
+  Reader(VM &vm, std::string_view source) : vm(vm), src(source), cursor(0) {}
 
   Value read_all_forms() {
+    GCGuard guard(vm.heap);
     std::vector<Value> forms;
     while (true) {
       skip_whitespace_and_comments();
-      if (is_at_end()) break;
+      if (is_at_end())
+        break;
       forms.push_back(read_form());
     }
-    if (forms.empty()) return Value::nil();
-    if (forms.size() == 1) return forms[0];
+    if (forms.empty())
+      return Value::nil();
+    if (forms.size() == 1)
+      return forms[0];
 
     // Wrap multiple forms in (begin ...)
     Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
@@ -37,8 +40,10 @@ public:
   }
 
   Value read_form() {
+    GCGuard guard(vm.heap);
     skip_whitespace_and_comments();
-    if (is_at_end()) return Value::eof_obj();
+    if (is_at_end())
+      return Value::eof_obj();
 
     char c = peek();
 
@@ -75,6 +80,37 @@ public:
       return read_brace_map();
     }
 
+    // Character literal #\c, #\space, #\newline, etc.
+    if (c == '#' && peek_next() == '\\') {
+      advance(); // hash
+      advance(); // backslash
+      if (is_at_end())
+        return Value::from_char('\0');
+      if (peek() == ' ') {
+        advance();
+        return Value::from_char(' ');
+      }
+      size_t start = cursor;
+      while (!is_at_end() &&
+             !std::isspace(static_cast<unsigned char>(peek())) &&
+             peek() != '(' && peek() != ')' && peek() != '[' && peek() != ']' &&
+             peek() != '{' && peek() != '}' && peek() != '"' && peek() != ';') {
+        advance();
+      }
+      std::string_view name = src.substr(start, cursor - start);
+      if (name == "space")
+        return Value::from_char(' ');
+      if (name == "newline")
+        return Value::from_char('\n');
+      if (name == "tab")
+        return Value::from_char('\t');
+      if (name == "return")
+        return Value::from_char('\r');
+      if (name.size() == 1)
+        return Value::from_char(name[0]);
+      return Value::from_char(name[0]);
+    }
+
     // Vector #( ... )
     if (c == '#' && peek_next() == '(') {
       advance(); // #
@@ -92,23 +128,21 @@ public:
   }
 
 private:
-  inline bool is_at_end() const {
-    return cursor >= src.size();
-  }
+  inline bool is_at_end() const { return cursor >= src.size(); }
 
   inline char peek() const {
-    if (is_at_end()) return '\0';
+    if (is_at_end())
+      return '\0';
     return src[cursor];
   }
 
   inline char peek_next() const {
-    if (cursor + 1 >= src.size()) return '\0';
+    if (cursor + 1 >= src.size())
+      return '\0';
     return src[cursor + 1];
   }
 
-  inline char advance() {
-    return src[cursor++];
-  }
+  inline char advance() { return src[cursor++]; }
 
   void skip_whitespace_and_comments() {
     while (!is_at_end()) {
@@ -151,13 +185,15 @@ private:
       }
 
       // Check for dotted pair '.'
-      if (peek() == '.' && std::isspace(static_cast<unsigned char>(peek_next()))) {
+      if (peek() == '.' &&
+          std::isspace(static_cast<unsigned char>(peek_next()))) {
         advance(); // '.'
         skip_whitespace_and_comments();
         tail = read_form();
         is_dotted = true;
         skip_whitespace_and_comments();
-        if (peek() == ')') advance();
+        if (peek() == ')')
+          advance();
         break;
       }
 
@@ -236,17 +272,24 @@ private:
       char c = advance();
       if (c == '\\' && !is_at_end()) {
         char esc = advance();
-        if (esc == 'n') s += '\n';
-        else if (esc == 't') s += '\t';
-        else if (esc == 'r') s += '\r';
-        else if (esc == '"') s += '"';
-        else if (esc == '\\') s += '\\';
-        else s += esc;
+        if (esc == 'n')
+          s += '\n';
+        else if (esc == 't')
+          s += '\t';
+        else if (esc == 'r')
+          s += '\r';
+        else if (esc == '"')
+          s += '"';
+        else if (esc == '\\')
+          s += '\\';
+        else
+          s += esc;
       } else {
         s += c;
       }
     }
-    if (peek() == '"') advance();
+    if (peek() == '"')
+      advance();
     return vm.heap.make_string(s);
   }
 
@@ -254,11 +297,9 @@ private:
     size_t start = cursor;
     while (!is_at_end()) {
       char c = peek();
-      if (std::isspace(static_cast<unsigned char>(c)) ||
-          c == '(' || c == ')' ||
-          c == '[' || c == ']' ||
-          c == '{' || c == '}' ||
-          c == '"' || c == ';') {
+      if (std::isspace(static_cast<unsigned char>(c)) || c == '(' || c == ')' ||
+          c == '[' || c == ']' || c == '{' || c == '}' || c == '"' ||
+          c == ';') {
         break;
       }
       advance();
@@ -267,8 +308,10 @@ private:
     std::string_view token = src.substr(start, cursor - start);
 
     // Booleans
-    if (token == "#t" || token == "#true") return Value::boolean_true();
-    if (token == "#f" || token == "#false") return Value::boolean_false();
+    if (token == "#t" || token == "#true")
+      return Value::boolean_true();
+    if (token == "#f" || token == "#false")
+      return Value::boolean_false();
 
     // Keywords (:foo)
     if (token.size() > 1 && token[0] == ':') {
@@ -280,7 +323,7 @@ private:
     // Number (Integer or Real)
     char *endptr = nullptr;
     const char *begin = token.data();
-    
+
     // Check if it looks like an integer
     long long int_val = std::strtoll(begin, &endptr, 10);
     if (endptr == begin + token.size()) {

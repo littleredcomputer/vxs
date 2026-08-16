@@ -24,7 +24,8 @@ enum class ObjType : uint8_t {
   Subr,
   Fiber,
   Future,
-  Map
+  Map,
+  Upvalue
 };
 
 // Base object header for all heap-allocated objects
@@ -75,7 +76,7 @@ struct ObjVector : Obj {
   uint32_t size;
   Value *data;
 
-  inline ObjVector(uint32_t sz, Value fill)
+  inline ObjVector(uint32_t sz, Value fill = Value::unspecified())
       : Obj(ObjType::Vector), size(sz), data(nullptr) {
     if (size > 0) {
       data = static_cast<Value *>(std::malloc(size * sizeof(Value)));
@@ -148,9 +149,10 @@ struct ObjSubr : Obj {
   NativeSubrFn fn;
   uint32_t min_args;
   uint32_t max_args; // UINT32_MAX for variadic
+  uint64_t user_data;
 
-  inline ObjSubr(const char *n, NativeSubrFn f, uint32_t min_a, uint32_t max_a)
-      : Obj(ObjType::Subr), name(n), fn(f), min_args(min_a), max_args(max_a) {}
+  inline ObjSubr(const char *n, NativeSubrFn f, uint32_t min_a, uint32_t max_a, uint64_t udata = 0)
+      : Obj(ObjType::Subr), name(n), fn(f), min_args(min_a), max_args(max_a), user_data(udata) {}
 };
 
 //-----------------------------------------------------------------------------
@@ -164,15 +166,15 @@ struct BytecodeChunk {
 
 struct ObjClosure : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Closure;
-  BytecodeChunk *chunk;
+  std::shared_ptr<BytecodeChunk> chunk;
   uint32_t arity;
   bool is_variadic;
   uint32_t env_size;
   uint32_t max_locals;
   Value *env; // Captured closure environment
 
-  inline ObjClosure(BytecodeChunk *ch, uint32_t ar, bool var, uint32_t e_sz = 0, uint32_t mx_loc = 1)
-      : Obj(ObjType::Closure), chunk(ch), arity(ar), is_variadic(var),
+  inline ObjClosure(std::shared_ptr<BytecodeChunk> ch, uint32_t ar, bool var, uint32_t e_sz = 0, uint32_t mx_loc = 1)
+      : Obj(ObjType::Closure), chunk(std::move(ch)), arity(ar), is_variadic(var),
         env_size(e_sz), max_locals(mx_loc), env(nullptr) {
     if (env_size > 0) {
       env = static_cast<Value *>(std::malloc(env_size * sizeof(Value)));
@@ -180,13 +182,14 @@ struct ObjClosure : Obj {
     }
   }
 
+  inline ObjClosure(BytecodeChunk *ch, uint32_t ar, bool var, uint32_t e_sz = 0, uint32_t mx_loc = 1)
+      : ObjClosure(std::shared_ptr<BytecodeChunk>(ch), ar, var, e_sz, mx_loc) {}
+
   inline ~ObjClosure() {
     if (env) std::free(env);
   }
 };
 
-//-----------------------------------------------------------------------------
-// 7. Future & Fiber Concurrency
 //-----------------------------------------------------------------------------
 // 7. Future & Fiber Concurrency
 //-----------------------------------------------------------------------------
@@ -236,16 +239,55 @@ struct ObjMap : Obj {
   }
 };
 
+//-----------------------------------------------------------------------------
+// 9. Upvalue Cell (Shared Mutable Box)
+//-----------------------------------------------------------------------------
+struct ObjUpvalue : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Upvalue;
+  Value value;
+
+  inline explicit ObjUpvalue(Value v = Value::unspecified())
+      : Obj(ObjType::Upvalue), value(v) {}
+};
+
 //=============================================================================
-// Heap & Slab Allocator
+// Heap & Slab Allocator with Mark-and-Sweep Garbage Collector
 //=============================================================================
 class Heap {
 public:
-  Heap() : head_obj(nullptr), bytes_allocated(0), gc_threshold(1024 * 1024) {}
+  Heap()
+      : head_obj(nullptr), bytes_allocated(0),
+        gc_threshold(512 * 1024), gc_paused_depth(0), vm(nullptr) {}
 
   ~Heap() {
     free_all();
   }
+
+  inline void set_vm(VM *v) { vm = v; }
+
+  inline void pause_gc() { ++gc_paused_depth; }
+  inline void resume_gc() {
+    if (gc_paused_depth > 0) --gc_paused_depth;
+  }
+  inline bool is_gc_paused() const { return gc_paused_depth > 0; }
+
+  // Marking helpers
+  inline void mark_value(Value v) {
+    if (v.is_ptr()) {
+      mark_obj(v.as_ptr<Obj>());
+    }
+  }
+
+  inline void mark_obj(Obj *obj) {
+    if (!obj || obj->gc_mark) return;
+    obj->gc_mark = true;
+    gray_stack.push_back(obj);
+  }
+
+  void mark_fiber(Fiber *f);
+  void blacken_obj(Obj *obj);
+  void collect_garbage();
+  size_t sweep();
 
   // Allocation helpers
   inline Value cons(Value car, Value cdr) {
@@ -268,9 +310,14 @@ public:
     return Value::from_ptr(s);
   }
 
-  inline Value make_subr(const char *name, NativeSubrFn fn, uint32_t min_a, uint32_t max_a) {
-    ObjSubr *subr = allocate<ObjSubr>(name, fn, min_a, max_a);
+  inline Value make_subr(const char *name, NativeSubrFn fn, uint32_t min_a, uint32_t max_a, uint64_t udata = 0) {
+    ObjSubr *subr = allocate<ObjSubr>(name, fn, min_a, max_a, udata);
     return Value::from_ptr(subr);
+  }
+
+  inline Value make_closure(std::shared_ptr<BytecodeChunk> chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
+    ObjClosure *cl = allocate<ObjClosure>(std::move(chunk), arity, is_variadic, env_size, max_locals);
+    return Value::from_ptr(cl);
   }
 
   inline Value make_closure(BytecodeChunk *chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
@@ -312,6 +359,10 @@ public:
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Future;
   }
 
+  static inline bool is_upvalue(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Upvalue;
+  }
+
   static inline Value car(Value v) {
     if (!is_cons(v)) return Value::nil();
     return v.as_ptr<ObjCons>()->car;
@@ -340,19 +391,42 @@ public:
     return count;
   }
 
+  static inline size_t obj_allocated_size(Obj *obj) {
+    switch (obj->type) {
+      case ObjType::Cons:    return sizeof(ObjCons);
+      case ObjType::Vector:  return sizeof(ObjVector) + static_cast<ObjVector*>(obj)->size * sizeof(Value);
+      case ObjType::String:  return sizeof(ObjString) + static_cast<ObjString*>(obj)->length + 1;
+      case ObjType::Symbol:  return sizeof(ObjSymbol);
+      case ObjType::Subr:    return sizeof(ObjSubr);
+      case ObjType::Closure: return sizeof(ObjClosure) + static_cast<ObjClosure*>(obj)->env_size * sizeof(Value);
+      case ObjType::Fiber:   return sizeof(Obj);
+      case ObjType::Future:  return sizeof(ObjFuture);
+      case ObjType::Map:     return sizeof(ObjMap) + static_cast<ObjMap*>(obj)->entries.capacity() * sizeof(std::pair<Value, Value>);
+      case ObjType::Upvalue: return sizeof(ObjUpvalue);
+    }
+    return sizeof(Obj);
+  }
+
   // Direct allocator
   template <typename T, typename... Args>
   inline T *allocate(Args &&...args) {
+    if (bytes_allocated > gc_threshold && vm && gc_paused_depth == 0) {
+      collect_garbage();
+    }
     void *mem = std::malloc(sizeof(T));
+    if (!mem) {
+      if (vm && gc_paused_depth == 0) collect_garbage();
+      mem = std::malloc(sizeof(T));
+      assert(mem && "Out of memory in Heap::allocate");
+    }
     T *obj = new (mem) T(std::forward<Args>(args)...);
     obj->next_all = head_obj;
     head_obj = obj;
-    bytes_allocated += sizeof(T);
+    bytes_allocated += obj_allocated_size(obj);
     return obj;
   }
 
 private:
-
   void free_all() {
     Obj *cur = head_obj;
     while (cur) {
@@ -362,6 +436,7 @@ private:
     }
     head_obj = nullptr;
     bytes_allocated = 0;
+    gray_stack.clear();
   }
 
   void destroy_obj(Obj *obj) {
@@ -375,6 +450,7 @@ private:
       case ObjType::Fiber:   break;
       case ObjType::Future:  static_cast<ObjFuture*>(obj)->~ObjFuture(); break;
       case ObjType::Map:     static_cast<ObjMap*>(obj)->~ObjMap(); break;
+      case ObjType::Upvalue: static_cast<ObjUpvalue*>(obj)->~ObjUpvalue(); break;
     }
     std::free(obj);
   }
@@ -382,6 +458,16 @@ private:
   Obj *head_obj;
   size_t bytes_allocated;
   size_t gc_threshold;
+  int gc_paused_depth;
+  VM *vm;
+  std::vector<Obj *> gray_stack;
+};
+
+// RAII Scope Guard for pausing GC
+struct GCGuard {
+  Heap &heap;
+  explicit GCGuard(Heap &h) : heap(h) { heap.pause_gc(); }
+  ~GCGuard() { heap.resume_gc(); }
 };
 
 } // namespace vxs

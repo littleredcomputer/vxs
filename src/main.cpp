@@ -13,30 +13,36 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 using namespace vxs;
 
 static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string &err_msg) {
   try {
     Reader reader(vm, code);
-    Value form = reader.read_all_forms();
-    Compiler compiler(vm);
-    ObjClosure *closure = compiler.compile_top_level(form);
+    Value last_res = Value::unspecified();
+    while (true) {
+      Value form = reader.read_form();
+      if (form.is_eof()) break;
+      Compiler compiler(vm);
+      ObjClosure *closure = compiler.compile_top_level(form);
 
-    Fiber fiber;
-    fiber.push(Value::from_ptr(closure));
-    size_t frame_slots = std::max<size_t>(1, closure->max_locals);
-    fiber.stack.resize(frame_slots, Value::unspecified());
-    fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
+      Fiber fiber;
+      fiber.push(Value::from_ptr(closure));
+      size_t frame_slots = std::max<size_t>(1, closure->max_locals);
+      fiber.stack.resize(frame_slots, Value::unspecified());
+      fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-    VM::StepResult res = vm.step_fiber(fiber, 100000000);
-    if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
-      ok = false;
-      err_msg = fiber.error_message.empty() ? "[VM Error] Execution error" : fiber.error_message;
-      return Value::unspecified();
+      VM::StepResult res = vm.step_fiber(fiber, 100000000);
+      if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
+        ok = false;
+        err_msg = fiber.error_message.empty() ? "[VM Error] Execution error" : fiber.error_message;
+        return Value::unspecified();
+      }
+      last_res = fiber.result;
     }
     ok = true;
-    return fiber.result;
+    return last_res;
   } catch (const std::exception &e) {
     ok = false;
     err_msg = std::string("[Error] ") + e.what();
@@ -44,23 +50,79 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
   }
 }
 
+static bool is_balanced(const std::string &code) {
+  int parens = 0;
+  int brackets = 0;
+  int braces = 0;
+  bool in_string = false;
+  bool in_comment = false;
+  bool escape = false;
+
+  for (size_t i = 0; i < code.size(); ++i) {
+    char c = code[i];
+    if (in_comment) {
+      if (c == '\n') in_comment = false;
+      continue;
+    }
+    if (in_string) {
+      if (escape) {
+        escape = false;
+      } else if (c == '\\') {
+        escape = true;
+      } else if (c == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (c == ';') {
+      in_comment = true;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      continue;
+    }
+    if (c == '(') ++parens;
+    else if (c == ')') --parens;
+    else if (c == '[') ++brackets;
+    else if (c == ']') --brackets;
+    else if (c == '{') ++braces;
+    else if (c == '}') --braces;
+  }
+  return parens <= 0 && brackets <= 0 && braces <= 0 && !in_string;
+}
+
 static void run_repl(VM &vm) {
   std::cout << "Vx-Scheme 0.8 (64-bit NaN-Boxed Bytecode Engine)" << std::endl;
   std::cout << "Type (exit) or Ctrl+D to quit." << std::endl;
 
-  std::string line;
+  std::string buffer;
   while (true) {
-    std::cout << "vxs> ";
+    if (buffer.empty()) {
+      std::cout << "vxs> ";
+    } else {
+      std::cout << "...> ";
+    }
     std::cout.flush();
+
+    std::string line;
     if (!std::getline(std::cin, line)) break;
 
-    // Skip empty lines
-    if (line.empty()) continue;
-    if (line == "(exit)" || line == ":quit" || line == "quit") break;
+    if (buffer.empty()) {
+      if (line.empty()) continue;
+      if (line == "(exit)" || line == ":quit" || line == "quit") break;
+    }
+
+    if (!buffer.empty()) buffer += "\n";
+    buffer += line;
+
+    if (!is_balanced(buffer)) {
+      continue;
+    }
 
     bool ok = false;
     std::string err;
-    Value res = eval_string(vm, line, ok, err);
+    Value res = eval_string(vm, buffer, ok, err);
     if (ok) {
       if (!res.is_unspecified()) {
         std::cout << "=> " << vm.format_value(res) << std::endl;
@@ -68,6 +130,7 @@ static void run_repl(VM &vm) {
     } else {
       std::cerr << err << std::endl;
     }
+    buffer.clear();
   }
 }
 
@@ -343,6 +406,23 @@ int main(int argc, char **argv) {
     }
     std::stringstream buf;
     buf << file.rdbuf();
+    bool ok = false;
+    std::string err;
+    Value res = eval_string(vm, buf.str(), ok, err);
+    if (!ok) {
+      std::cerr << err << std::endl;
+      return 1;
+    }
+    if (!res.is_unspecified()) {
+      std::cout << vm.format_value(res) << std::endl;
+    }
+    return 0;
+  }
+
+  // Non-interactive piped / redirected stdin (e.g. ./vx-scheme < script.scm)
+  if (!isatty(STDIN_FILENO)) {
+    std::stringstream buf;
+    buf << std::cin.rdbuf();
     bool ok = false;
     std::string err;
     Value res = eval_string(vm, buf.str(), ok, err);

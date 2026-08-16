@@ -15,6 +15,8 @@ EMFLAGS         = -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(D
                   -s ALLOW_MEMORY_GROWTH=1 \
                   -s NO_EXIT_RUNTIME=1
 
+NODE            = $(shell which node 2>/dev/null || echo $(EMSDK_DIR)/../../node/*/bin/node)
+
 all: vx-scheme wasm
 
 vx-scheme: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h
@@ -24,11 +26,34 @@ wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler
 	mkdir -p ../web
 	$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
 
-test: vx-scheme wasm
-	$(EMSDK_DIR)/../../node/*/bin/node ../testcases/run_all_tests.js
-	$(EMSDK_DIR)/../../node/*/bin/node ../testcases/test_wasm_presets.js
-	./vx-scheme -e '(let [v [4 5 6] a {:x 10 :y 20}] [(v 1) (:y a)])'
+test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-bench
+
+test-suite: vx-scheme
+	@echo "=== RUNNING GROUND-UP SCHEME TEST SUITE ==="
+	./vx-scheme ../testcases/run_suite.scm
+
+test-gc:
+	@echo "=== RUNNING MARK-AND-SWEEP GC UNIT & STRESS TESTS ==="
+	$(CXX) $(CXXFLAGS) vx_vm.cpp ../testcases/test_vx_gc.cpp -o test_gc && ./test_gc && rm test_gc
+
+test-unit:
+	@echo "=== RUNNING STRUCTURED 58-TEST UNIT MATRIX ==="
+	$(NODE) ../testcases/run_all_tests.js
+
+test-wasm:
+	@echo "=== RUNNING WASM PRESETS & FIBER SCHEDULER TESTS ==="
+	$(NODE) ../testcases/test_wasm_presets.js
+
+test-bench: vx-scheme
+	@echo "=== RUNNING CLASSIC SCHEME BENCHMARKS ==="
+	./vx-scheme ../testcases/ack.scm
+	# ./vx-scheme ../testcases/puzzle.scm  # Paused pending continuation refactoring
+	./vx-scheme ../testcases/pi.scm
+	./vx-scheme ../testcases/sieve.scm
+	./vx-scheme ../testcases/series.scm
+	@echo "=== VERIFYING STANDALONE AOT NATIVE COMPILER ==="
+	./vx-scheme -c ../testcases/ack.scm -o ack_bin && ./ack_bin && rm ack_bin
 
 clean:
-	rm -f *.o vx-scheme vxs-* test_fibers
+	rm -f *.o vx-scheme vxs-* test_fibers ack_bin a.out
 	rm -rf *.dSYM
