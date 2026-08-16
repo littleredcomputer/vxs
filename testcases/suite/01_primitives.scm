@@ -1,0 +1,138 @@
+;;----------------------------------------------------------------------
+;; Layer 01: Primitives & Core Data Structures
+;;----------------------------------------------------------------------
+
+(load "testcases/test_framework.scm")
+
+(test-suite "01_primitives: Core Data & Operations")
+
+;; 1. Numbers & Basic Arithmetic
+(assert-equal "addition 0-ary" 0 (+))
+(assert-equal "addition 1-ary" 42 (+ 42))
+(assert-equal "addition N-ary" 15 (+ 1 2 3 4 5))
+(assert-equal "subtraction 1-ary (negation)" -10 (- 10))
+(assert-equal "subtraction N-ary" 14 (- 20 2 4))
+(assert-equal "multiplication 0-ary" 1 (*))
+(assert-equal "multiplication N-ary" 120 (* 1 2 3 4 5))
+(assert-equal "float division" 2.5 (/ 5 2))
+(assert-equal "quotient" 3 (quotient 10 3))
+(assert-equal "remainder" 1 (remainder 10 3))
+(assert-equal "modulo" 1 (modulo 10 3))
+(assert-equal "abs positive" 42 (abs 42))
+(assert-equal "abs negative" 42 (abs -42))
+(assert-equal "sqrt exact" 4.0 (sqrt 16))
+
+;; 2. 64-Bit Integer & Overflow Promotion
+(assert-equal "64-bit addition overflow to double" 4000000000.0 (+ 2000000000 2000000000))
+(assert-equal "64-bit multiplication overflow to double" 1000000000000.0 (* 1000000 1000000))
+(assert-equal "large quotient" 1000000.0 (quotient (* 1000000 1000000) 1000000))
+(assert-equal "large remainder" 0 (remainder (* 1000000 1000000) 1000000))
+
+;; 3. Numeric Predicates & Comparisons
+(assert-true "zero? on 0" (zero? 0))
+(assert-false "zero? on 1" (zero? 1))
+(assert-true "positive? on 5" (positive? 5))
+(assert-false "positive? on -5" (positive? -5))
+(assert-true "negative? on -3" (negative? -3))
+(assert-false "negative? on 3" (negative? 3))
+(assert-true "even? on 8" (even? 8))
+(assert-false "even? on 9" (even? 9))
+(assert-true "odd? on 7" (odd? 7))
+(assert-false "odd? on 6" (odd? 6))
+
+(assert-true "numeric =" (= 10 10))
+(assert-false "numeric = mismatch" (= 10 20))
+(assert-true "numeric <" (< 5 10))
+(assert-false "numeric < false" (< 10 5))
+(assert-true "numeric <=" (<= 5 5))
+(assert-true "numeric >" (> 10 5))
+(assert-true "numeric >=" (>= 10 10))
+
+;; 4. Equality (eq?, eqv?, equal?)
+(assert-true "eq? on symbols" (eq? 'foo 'foo))
+(assert-false "eq? on distinct symbols" (eq? 'foo 'bar))
+(assert-true "eq? on booleans" (eq? #t #t))
+(assert-true "eq? on empty list" (eq? '() '()))
+(assert-true "equal? on deep lists" (equal? '(1 (2 3) 4) '(1 (2 3) 4)))
+(assert-false "equal? on different lists" (equal? '(1 2 3) '(1 2 4)))
+(assert-true "equal? on vectors" (equal? [1 2 3] [1 2 3]))
+(assert-false "equal? on different vectors" (equal? [1 2 3] [1 2 4]))
+(assert-true "equal? on strings" (equal? "hello" "hello"))
+(assert-false "equal? on different strings" (equal? "hello" "world"))
+
+;; 5. Booleans & Logic
+(assert-true "boolean? on #t" (boolean? #t))
+(assert-true "boolean? on #f" (boolean? #f))
+(assert-false "boolean? on 0" (boolean? 0))
+(assert-true "not on #f" (not #f))
+(assert-false "not on #t" (not #t))
+(assert-false "not on truthy number" (not 0))
+(assert-true "and all true" (and #t 1 'foo))
+(assert-false "and with false" (and #t #f 1))
+(assert-equal "or first truthy" 42 (or #f #f 42 #f))
+(assert-false "or all false" (or #f #f #f))
+
+;; 6. Pairs & Lists
+(assert-true "pair? on cons" (pair? (cons 1 2)))
+(assert-false "pair? on nil" (pair? '()))
+(assert-true "null? on nil" (null? '()))
+(assert-false "null? on pair" (null? (cons 1 2)))
+(assert-equal "car and cdr" '(1 . 2) (cons (car '(1 . 2)) (cdr '(1 . 2))))
+(assert-equal "cadr" 2 (cadr '(1 2 3)))
+(assert-equal "caddr" 3 (caddr '(1 2 3)))
+(assert-equal "caar" 1 (caar '((1 2) 3)))
+(assert-equal "cdar" '(2) (cdar '((1 2) 3)))
+(assert-equal "list length" 4 (length '(a b c d)))
+(assert-equal "list reverse" '(4 3 2 1) (reverse '(1 2 3 4)))
+(assert-equal "list append" '(1 2 3 4 5 6) (append '(1 2) '(3 4) '(5 6)))
+(assert-equal "memq found" '(b c) (memq 'b '(a b c)))
+(assert-false "memq not found" (memq 'z '(a b c)))
+(assert-equal "assq found" '(b 20) (assq 'b '((a 10) (b 20) (c 30))))
+(assert-false "assq not found" (assq 'z '((a 10) (b 20))))
+
+;; Mutating pairs
+(let ((p (cons 10 20)))
+  (set-car! p 99)
+  (set-cdr! p 100)
+  (assert-equal "set-car! & set-cdr!" '(99 . 100) p))
+
+;; 7. Vectors
+(assert-true "vector? on vector" (vector? [1 2 3]))
+(assert-false "vector? on list" (vector? '(1 2 3)))
+(assert-equal "vector constructor" 3 (vector-length (vector 10 20 30)))
+(assert-equal "make-vector initialized" [7 7 7 7] (make-vector 4 7))
+(assert-equal "vector-ref" 20 (vector-ref [10 20 30] 1))
+(let ((v (vector 1 2 3)))
+  (vector-set! v 1 999)
+  (assert-equal "vector-set!" [1 999 3] v))
+(assert-equal "vector as procedure call" 200 ([100 200 300] 1))
+
+;; 8. Strings & Characters
+(assert-equal "string-length" 5 (string-length "hello"))
+(assert-equal "string-ref" #\e (string-ref "hello" 1))
+(assert-equal "string-append" "hello world" (string-append "hello" " " "world"))
+(assert-equal "substring" "ell" (substring "hello" 1 4))
+(assert-equal "number->string int" "12345" (number->string 12345))
+(assert-equal "number->string float" "3.14" (number->string 3.14))
+(assert-equal "string->number int" 12345 (string->number "12345"))
+(assert-equal "string->number float" 3.14 (string->number "3.14"))
+(assert-true "char? on char" (char? #\A))
+(assert-false "char? on string" (char? "A"))
+(assert-true "char=?" (char=? #\A #\A))
+(assert-false "char=? mismatch" (char=? #\A #\B))
+(assert-equal "char->integer" 65 (char->integer #\A))
+(assert-equal "integer->char" #\A (integer->char 65))
+
+;; 9. Keywords & Associative Maps
+(assert-true "keyword? on :foo" (keyword? :foo))
+(assert-false "keyword? on symbol" (keyword? 'foo))
+(assert-equal "keyword->string" "foo" (keyword->string :foo))
+(assert-equal "string->keyword" :bar (string->keyword "bar"))
+
+(let ((m {:name "Vx-Scheme" :version 0.8 :fast? #t}))
+  (assert-true "map? on map" (map? m))
+  (assert-equal "get from map" "Vx-Scheme" (get m :name))
+  (assert-equal "map as procedure" 0.8 (m :version))
+  (assert-equal "keyword as procedure" #t (:fast? m)))
+
+(suite-summary)

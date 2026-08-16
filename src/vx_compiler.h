@@ -1,12 +1,12 @@
 #pragma once
 
-#include "vx_value.h"
 #include "vx_heap.h"
-#include "vx_vm.h"
 #include "vx_reader.h"
-#include <vector>
-#include <string>
+#include "vx_value.h"
+#include "vx_vm.h"
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace vxs {
 
@@ -27,14 +27,18 @@ public:
       : vm(vm), parent(parent), scope_depth(0), max_locals(1) {}
 
   ObjClosure *compile_top_level(Value form) {
+    GCGuard guard(vm.heap);
     BytecodeChunk *chunk = new BytecodeChunk();
     add_local("<top-level>");
     compile_expr(form, *chunk, false);
     chunk->code.push_back(OP_RETURN);
-    return vm.heap.allocate<ObjClosure>(chunk, 0, false, 0, static_cast<uint32_t>(max_locals));
+    return vm.heap.allocate<ObjClosure>(chunk, 0, false, 0,
+                                        static_cast<uint32_t>(max_locals));
   }
 
-  ObjClosure *compile_function(Value params, Value body, uint32_t &out_arity, std::vector<UpvalueDesc> &out_upvals, const std::string &self_name = "") {
+  ObjClosure *compile_function(Value params, Value body, uint32_t &out_arity,
+                               std::vector<UpvalueDesc> &out_upvals,
+                               const std::string &self_name = "") {
     BytecodeChunk *chunk = new BytecodeChunk();
     Compiler fn_compiler(vm, this);
     fn_compiler.scope_depth = 1;
@@ -70,29 +74,72 @@ public:
     }
     out_arity = arity;
 
-    // Compile body forms
+    // Scan leading internal defines: (define x e) or (define (f ...) ...)
     Value b = body;
-    if (b.is_nil()) {
-      chunk->code.push_back(OP_UNSPECIFIED);
-    } else {
-      while (Heap::is_cons(b)) {
-        bool is_last = Heap::cdr(b).is_nil();
-        fn_compiler.compile_expr(Heap::car(b), *chunk, is_last);
-        if (!is_last) {
-          chunk->code.push_back(OP_POP);
+    std::vector<std::pair<Value, Value>> internal_defs;
+    while (Heap::is_cons(b)) {
+      Value form = Heap::car(b);
+      if (Heap::is_cons(form) && Heap::car(form).is_symbol() &&
+          vm.get_symbol_name(Heap::car(form).as_symbol_id()) == "define") {
+        Value rest = Heap::cdr(form);
+        Value target = Heap::car(rest);
+        Value def_body = Heap::cdr(rest);
+        if (target.is_symbol()) {
+          internal_defs.push_back({target, Heap::car(def_body)});
+        } else if (Heap::is_cons(target)) {
+          Value fn_name = Heap::car(target);
+          Value fn_args = Heap::cdr(target);
+          Value lambda_form =
+              vm.heap.cons(Value::from_symbol_id(vm.intern("lambda")),
+                           vm.heap.cons(fn_args, def_body));
+          internal_defs.push_back({fn_name, lambda_form});
         }
         b = Heap::cdr(b);
+      } else {
+        break;
+      }
+    }
+
+    if (!internal_defs.empty()) {
+      // Desugar internal defines to (letrec ((v1 e1)...) b...)
+      Value bindings = Value::nil();
+      for (auto it = internal_defs.rbegin(); it != internal_defs.rend(); ++it) {
+        Value pair =
+            vm.heap.cons(it->first, vm.heap.cons(it->second, Value::nil()));
+        bindings = vm.heap.cons(pair, bindings);
+      }
+      Value letrec_form =
+          vm.heap.cons(Value::from_symbol_id(vm.intern("letrec")),
+                       vm.heap.cons(bindings, b));
+      fn_compiler.compile_expr(letrec_form, *chunk, true);
+    } else {
+      // Compile body forms
+      if (b.is_nil()) {
+        chunk->code.push_back(OP_UNSPECIFIED);
+      } else {
+        while (Heap::is_cons(b)) {
+          bool is_last = Heap::cdr(b).is_nil();
+          fn_compiler.compile_expr(Heap::car(b), *chunk, is_last);
+          if (!is_last) {
+            chunk->code.push_back(OP_POP);
+          }
+          b = Heap::cdr(b);
+        }
       }
     }
     chunk->code.push_back(OP_RETURN);
     out_upvals = fn_compiler.upvalues;
-    return vm.heap.allocate<ObjClosure>(chunk, arity, is_variadic, static_cast<uint32_t>(out_upvals.size()), static_cast<uint32_t>(fn_compiler.max_locals));
+    return vm.heap.allocate<ObjClosure>(
+        chunk, arity, is_variadic, static_cast<uint32_t>(out_upvals.size()),
+        static_cast<uint32_t>(fn_compiler.max_locals));
   }
 
 private:
   void compile_expr(Value form, BytecodeChunk &chunk, bool is_tail = false) {
     // 1. Self-evaluating literals
-    if (form.is_int() || form.is_double() || form.is_bool() || form.is_nil() || form.is_unspecified() || form.is_keyword() || Heap::is_string(form) || Heap::is_vector(form) || Heap::is_map(form)) {
+    if (form.is_int() || form.is_double() || form.is_bool() || form.is_nil() ||
+        form.is_unspecified() || form.is_keyword() || Heap::is_string(form) ||
+        Heap::is_vector(form) || Heap::is_map(form)) {
       emit_constant(form, chunk);
       return;
     }
@@ -141,12 +188,14 @@ private:
             chunk.code.push_back(OP_UNSPECIFIED);
             return;
           } else if (Heap::is_cons(target)) {
-            // (define (fn args...) body...) => (define fn (lambda (args...) body...))
+            // (define (fn args...) body...) => (define fn (lambda (args...)
+            // body...))
             Value fn_name = Heap::car(target);
             Value fn_args = Heap::cdr(target);
             uint32_t arity = 0;
             std::vector<UpvalueDesc> upvals;
-            ObjClosure *closure = compile_function(fn_args, def_body, arity, upvals);
+            ObjClosure *closure =
+                compile_function(fn_args, def_body, arity, upvals);
             emit_closure(closure, upvals, chunk);
             uint16_t name_ix = add_constant(fn_name, chunk);
             emit_op(OP_DEF_GLOBAL, name_ix, chunk);
@@ -199,7 +248,9 @@ private:
 
           // Patch jump_false
           size_t else_target = chunk.code.size();
-          patch_jump(jump_false_ix + 1, static_cast<uint16_t>(else_target - (jump_false_ix + 3)), chunk);
+          patch_jump(jump_false_ix + 1,
+                     static_cast<uint16_t>(else_target - (jump_false_ix + 3)),
+                     chunk);
 
           // Else branch
           if (Heap::is_cons(else_expr)) {
@@ -210,7 +261,9 @@ private:
 
           // Patch jump_exit
           size_t exit_target = chunk.code.size();
-          patch_jump(jump_exit_ix + 1, static_cast<uint16_t>(exit_target - (jump_exit_ix + 3)), chunk);
+          patch_jump(jump_exit_ix + 1,
+                     static_cast<uint16_t>(exit_target - (jump_exit_ix + 3)),
+                     chunk);
           return;
         }
 
@@ -232,6 +285,51 @@ private:
           return;
         }
 
+        // (delay expr) - Standard R4RS/R5RS Memoized Promise
+        if (op_name == "delay") {
+          Value done_sym = Value::from_symbol_id(
+              vm.intern("$done__" + std::to_string(vm.next_gensym_id++)));
+          Value res_sym = Value::from_symbol_id(
+              vm.intern("$res__" + std::to_string(vm.next_gensym_id++)));
+          Value expr = Heap::car(rest);
+
+          Value done_pair = vm.heap.cons(
+              done_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
+          Value res_pair = vm.heap.cons(
+              res_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
+          Value bindings =
+              vm.heap.cons(done_pair, vm.heap.cons(res_pair, Value::nil()));
+
+          Value not_done = vm.heap.cons(Value::from_symbol_id(vm.intern("not")),
+                                        vm.heap.cons(done_sym, Value::nil()));
+          Value set_res = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("set!")),
+              vm.heap.cons(res_sym, vm.heap.cons(expr, Value::nil())));
+          Value set_done = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("set!")),
+              vm.heap.cons(done_sym,
+                           vm.heap.cons(Value::boolean_true(), Value::nil())));
+          Value begin_update = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("begin")),
+              vm.heap.cons(set_res, vm.heap.cons(set_done, Value::nil())));
+          Value if_form = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("if")),
+              vm.heap.cons(not_done, vm.heap.cons(begin_update, Value::nil())));
+
+          Value lambda_body =
+              vm.heap.cons(if_form, vm.heap.cons(res_sym, Value::nil()));
+          Value lambda_form =
+              vm.heap.cons(Value::from_symbol_id(vm.intern("lambda")),
+                           vm.heap.cons(Value::nil(), lambda_body));
+
+          Value let_form = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("let")),
+              vm.heap.cons(bindings, vm.heap.cons(lambda_form, Value::nil())));
+
+          compile_expr(let_form, chunk, is_tail);
+          return;
+        }
+
         // (lambda (params...) body...)
         if (op_name == "lambda") {
           Value params = Heap::car(rest);
@@ -247,7 +345,8 @@ private:
         if (op_name == "future") {
           uint32_t arity = 0;
           std::vector<UpvalueDesc> upvals;
-          ObjClosure *closure = compile_function(Value::nil(), rest, arity, upvals);
+          ObjClosure *closure =
+              compile_function(Value::nil(), rest, arity, upvals);
           emit_closure(closure, upvals, chunk);
           chunk.code.push_back(OP_FUTURE);
           return;
@@ -272,7 +371,8 @@ private:
           Value bindings = Heap::car(rest);
           Value let_body = Heap::cdr(rest);
 
-          // Check if named let: (let loop ((v e)...) body...) or (let loop [v e ...] body...)
+          // Check if named let: (let loop ((v e)...) body...) or (let loop [v e
+          // ...] body...)
           if (bindings.is_symbol()) {
             Value loop_name = bindings;
             bindings = Heap::car(let_body);
@@ -294,7 +394,8 @@ private:
             uint32_t arity = 0;
             std::vector<UpvalueDesc> upvals;
             std::string loop_str = vm.get_symbol_name(loop_name.as_symbol_id());
-            ObjClosure *closure = compile_function(param_list, let_body, arity, upvals, loop_str);
+            ObjClosure *closure =
+                compile_function(param_list, let_body, arity, upvals, loop_str);
 
             // Push callee closure and initial arguments, then call
             emit_closure(closure, upvals, chunk);
@@ -306,26 +407,88 @@ private:
             return;
           }
 
-          // Standard let: compile initializers into local slots
-          size_t initial_locals = locals.size();
-
+          // Standard parallel let: ((lambda (v1 v2 ...) body...) e1 e2 ...)
           auto pairs = parse_bindings(bindings);
+          if (pairs.empty()) {
+            Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
+            compile_expr(vm.heap.cons(begin_sym, let_body), chunk, is_tail);
+            return;
+          }
+
+          std::vector<Value> params;
+          std::vector<Value> inits;
           for (const auto &p : pairs) {
-            compile_expr(p.val, chunk, false);
-            int slot = add_local(vm.get_symbol_name(p.var.as_symbol_id()));
-            emit_op(OP_SET_LOCAL, static_cast<uint16_t>(slot), chunk);
-            chunk.code.push_back(OP_POP);
+            params.push_back(p.var);
+            inits.push_back(p.val);
           }
 
-          Value cur_body = let_body;
-          while (Heap::is_cons(cur_body)) {
-            bool is_last = Heap::cdr(cur_body).is_nil();
-            compile_expr(Heap::car(cur_body), chunk, is_last && is_tail);
-            if (!is_last) chunk.code.push_back(OP_POP);
-            cur_body = Heap::cdr(cur_body);
+          Value param_list = Value::nil();
+          for (auto it = params.rbegin(); it != params.rend(); ++it) {
+            param_list = vm.heap.cons(*it, param_list);
           }
 
-          locals.resize(initial_locals);
+          uint32_t arity = 0;
+          std::vector<UpvalueDesc> upvals;
+          ObjClosure *closure =
+              compile_function(param_list, let_body, arity, upvals);
+          emit_closure(closure, upvals, chunk);
+          for (Value init_expr : inits) {
+            compile_expr(init_expr, chunk, false);
+          }
+          chunk.code.push_back(is_tail ? OP_TAIL_CALL : OP_CALL);
+          chunk.code.push_back(static_cast<uint8_t>(inits.size()));
+          return;
+        }
+
+        // (letrec ((v1 e1) (v2 e2)...) body...) or (letrec [v1 e1 ...] body...)
+        if (op_name == "letrec") {
+          Value bindings = Heap::car(rest);
+          Value body = Heap::cdr(rest);
+          auto pairs = parse_bindings(bindings);
+          if (pairs.empty()) {
+            Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
+            compile_expr(vm.heap.cons(begin_sym, body), chunk, is_tail);
+            return;
+          }
+
+          Value let_sym = Value::from_symbol_id(vm.intern("let"));
+          Value set_sym = Value::from_symbol_id(vm.intern("set!"));
+          Value void_sym = Value::from_symbol_id(vm.intern("void"));
+          Value void_call = vm.heap.cons(void_sym, Value::nil());
+
+          // Build (let ((v1 (void)) (v2 (void))...) (set! v1 e1) (set! v2
+          // e2)... body...)
+          std::vector<Value> init_bindings;
+          std::vector<Value> set_exprs;
+          for (const auto &p : pairs) {
+            init_bindings.push_back(
+                vm.heap.cons(p.var, vm.heap.cons(void_call, Value::nil())));
+            set_exprs.push_back(vm.heap.cons(
+                set_sym,
+                vm.heap.cons(p.var, vm.heap.cons(p.val, Value::nil()))));
+          }
+
+          Value binding_list = Value::nil();
+          for (auto it = init_bindings.rbegin(); it != init_bindings.rend();
+               ++it) {
+            binding_list = vm.heap.cons(*it, binding_list);
+          }
+
+          std::vector<Value> full_body = set_exprs;
+          Value cur_b = body;
+          while (Heap::is_cons(cur_b)) {
+            full_body.push_back(Heap::car(cur_b));
+            cur_b = Heap::cdr(cur_b);
+          }
+
+          Value body_list = Value::nil();
+          for (auto it = full_body.rbegin(); it != full_body.rend(); ++it) {
+            body_list = vm.heap.cons(*it, body_list);
+          }
+
+          Value desugared =
+              vm.heap.cons(let_sym, vm.heap.cons(binding_list, body_list));
+          compile_expr(desugared, chunk, is_tail);
           return;
         }
 
@@ -335,10 +498,12 @@ private:
           Value body_forms = Heap::cdr(rest);
           Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
           Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value desugared = vm.heap.cons(if_sym,
-            vm.heap.cons(test_expr,
-              vm.heap.cons(vm.heap.cons(begin_sym, body_forms),
-                vm.heap.cons(Value::unspecified(), Value::nil()))));
+          Value desugared = vm.heap.cons(
+              if_sym,
+              vm.heap.cons(test_expr,
+                           vm.heap.cons(vm.heap.cons(begin_sym, body_forms),
+                                        vm.heap.cons(Value::unspecified(),
+                                                     Value::nil()))));
           compile_expr(desugared, chunk, is_tail);
           return;
         }
@@ -349,10 +514,13 @@ private:
           Value body_forms = Heap::cdr(rest);
           Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
           Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value desugared = vm.heap.cons(if_sym,
-            vm.heap.cons(test_expr,
-              vm.heap.cons(Value::unspecified(),
-                vm.heap.cons(vm.heap.cons(begin_sym, body_forms), Value::nil()))));
+          Value desugared = vm.heap.cons(
+              if_sym,
+              vm.heap.cons(
+                  test_expr,
+                  vm.heap.cons(Value::unspecified(),
+                               vm.heap.cons(vm.heap.cons(begin_sym, body_forms),
+                                            Value::nil()))));
           compile_expr(desugared, chunk, is_tail);
           return;
         }
@@ -371,8 +539,10 @@ private:
           }
 
           Value if_sym = Value::from_symbol_id(vm.intern("if"));
+          Value let_sym = Value::from_symbol_id(vm.intern("let"));
           Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
           Value else_sym = Value::from_symbol_id(vm.intern("else"));
+          Value recipient_sym = Value::from_symbol_id(vm.intern("=>"));
 
           Value current = Value::unspecified();
 
@@ -380,19 +550,107 @@ private:
             Value clause = *it;
             Value test = Heap::car(clause);
             Value body = Heap::cdr(clause);
-            Value body_seq = vm.heap.cons(begin_sym, body);
+            Value recipient = Value::nil();
+            if (!body.is_nil() && Heap::car(body).is_symbol() &&
+                Heap::car(body).as_symbol_id() ==
+                    recipient_sym.as_symbol_id() &&
+                Heap::is_cons(Heap::cdr(body)) &&
+                Heap::cdr(Heap::cdr(body)) == Value::nil()) {
+              recipient = Heap::car(Heap::cdr(body));
+              body = Heap::cdr(Heap::cdr(body));
+            }
+            if (!recipient.is_nil()) {
+              Value test_sym = Value::from_symbol_id(
+                  vm.intern("$test__" + std::to_string(vm.next_gensym_id++)));
 
-            if (test.is_symbol() && test.as_symbol_id() == else_sym.as_symbol_id()) {
-              current = body_seq;
+              current = vm.heap.cons(
+                  let_sym,
+                  vm.heap.cons(
+                      vm.heap.cons(
+                          vm.heap.cons(test_sym,
+                                       vm.heap.cons(test, Value::nil())),
+                          Value::nil()),
+                      vm.heap.cons(
+                          vm.heap.cons(
+                              if_sym,
+                              vm.heap.cons(
+                                  test_sym,
+                                  vm.heap.cons(
+                                      vm.heap.cons(
+                                          recipient,
+                                          vm.heap.cons(test_sym, Value::nil())),
+                                      vm.heap.cons(current, Value::nil())))),
+                          Value::nil())));
             } else {
-              current = vm.heap.cons(if_sym,
-                          vm.heap.cons(test,
-                            vm.heap.cons(body_seq,
-                              vm.heap.cons(current, Value::nil()))));
+              Value body_seq = vm.heap.cons(begin_sym, body);
+
+              if (test.is_symbol() &&
+                  test.as_symbol_id() == else_sym.as_symbol_id()) {
+                current = body_seq;
+              } else {
+                current = vm.heap.cons(
+                    if_sym,
+                    vm.heap.cons(
+                        test,
+                        vm.heap.cons(body_seq,
+                                     vm.heap.cons(current, Value::nil()))));
+              }
             }
           }
 
           compile_expr(current, chunk, is_tail);
+          return;
+        }
+
+        // (case key ((d1 d2...) body...) ... (else body...))
+        if (op_name == "case") {
+          Value key_expr = Heap::car(rest);
+          Value clauses = Heap::cdr(rest);
+
+          Value let_sym = Value::from_symbol_id(vm.intern("let"));
+          Value cond_sym = Value::from_symbol_id(vm.intern("cond"));
+          Value memv_sym = Value::from_symbol_id(vm.intern("memv"));
+          Value quote_sym = Value::from_symbol_id(vm.intern("quote"));
+          Value else_sym = Value::from_symbol_id(vm.intern("else"));
+          Value tmp_sym = Value::from_symbol_id(vm.intern("$case_key"));
+
+          std::vector<Value> cond_clauses;
+          Value cur = clauses;
+          while (Heap::is_cons(cur)) {
+            Value clause = Heap::car(cur);
+            if (Heap::is_cons(clause)) {
+              Value datums = Heap::car(clause);
+              Value body = Heap::cdr(clause);
+              if (datums.is_symbol() &&
+                  datums.as_symbol_id() == else_sym.as_symbol_id()) {
+                cond_clauses.push_back(clause);
+              } else {
+                Value quoted_datums =
+                    vm.heap.cons(quote_sym, vm.heap.cons(datums, Value::nil()));
+                Value test = vm.heap.cons(
+                    memv_sym,
+                    vm.heap.cons(tmp_sym,
+                                 vm.heap.cons(quoted_datums, Value::nil())));
+                cond_clauses.push_back(vm.heap.cons(test, body));
+              }
+            }
+            cur = Heap::cdr(cur);
+          }
+
+          Value cond_clause_list = Value::nil();
+          for (auto it = cond_clauses.rbegin(); it != cond_clauses.rend();
+               ++it) {
+            cond_clause_list = vm.heap.cons(*it, cond_clause_list);
+          }
+
+          Value cond_form = vm.heap.cons(cond_sym, cond_clause_list);
+          Value binding = vm.heap.cons(
+              vm.heap.cons(tmp_sym, vm.heap.cons(key_expr, Value::nil())),
+              Value::nil());
+          Value desugared = vm.heap.cons(
+              let_sym,
+              vm.heap.cons(binding, vm.heap.cons(cond_form, Value::nil())));
+          compile_expr(desugared, chunk, is_tail);
           return;
         }
 
@@ -409,28 +667,43 @@ private:
             return;
           }
 
-          Value current = vm.heap.cons(let_sym,
-                            vm.heap.cons(vm.heap.cons(
-                              vm.heap.cons(pairs.back().var, vm.heap.cons(pairs.back().val, Value::nil())),
-                              Value::nil()), body));
+          Value current = vm.heap.cons(
+              let_sym,
+              vm.heap.cons(
+                  vm.heap.cons(vm.heap.cons(pairs.back().var,
+                                            vm.heap.cons(pairs.back().val,
+                                                         Value::nil())),
+                               Value::nil()),
+                  body));
 
           for (int i = static_cast<int>(pairs.size()) - 2; i >= 0; --i) {
-            current = vm.heap.cons(let_sym,
-                        vm.heap.cons(vm.heap.cons(
-                          vm.heap.cons(pairs[i].var, vm.heap.cons(pairs[i].val, Value::nil())),
-                          Value::nil()),
-                          vm.heap.cons(current, Value::nil())));
+            current = vm.heap.cons(
+                let_sym,
+                vm.heap.cons(
+                    vm.heap.cons(
+                        vm.heap.cons(pairs[i].var,
+                                     vm.heap.cons(pairs[i].val, Value::nil())),
+                        Value::nil()),
+                    vm.heap.cons(current, Value::nil())));
           }
 
           compile_expr(current, chunk, is_tail);
           return;
         }
 
-        // (do ((var init [step]) ...) (test expr...) cmd...) or (do [var init [step] ...] ...)
+        // (do ((var init [step]) ...) (test expr...) cmd...) or (do [var init
+        // [step] ...] ...)
         if (op_name == "do") {
           Value var_clauses = Heap::car(rest);
           Value test_clause = Heap::car(Heap::cdr(rest));
           Value commands = Heap::cdr(Heap::cdr(rest));
+
+          if (Heap::is_cons(test_clause) &&
+              Heap::car(test_clause).is_symbol() &&
+              vm.get_symbol_name(Heap::car(test_clause).as_symbol_id()) ==
+                  "vector") {
+            test_clause = Heap::cdr(test_clause);
+          }
 
           Value test_expr = Heap::car(test_clause);
           Value result_exprs = Heap::cdr(test_clause);
@@ -438,20 +711,25 @@ private:
           std::vector<Value> bindings;
           std::vector<Value> step_args;
 
-          if (Heap::is_cons(var_clauses) && Heap::car(var_clauses).is_symbol() &&
-              vm.get_symbol_name(Heap::car(var_clauses).as_symbol_id()) == "vector") {
+          if (Heap::is_cons(var_clauses) &&
+              Heap::car(var_clauses).is_symbol() &&
+              vm.get_symbol_name(Heap::car(var_clauses).as_symbol_id()) ==
+                  "vector") {
             Value elems = Heap::cdr(var_clauses);
             while (Heap::is_cons(elems)) {
               Value v_name = Heap::car(elems);
               elems = Heap::cdr(elems);
-              Value v_init = Heap::is_cons(elems) ? Heap::car(elems) : Value::unspecified();
-              if (Heap::is_cons(elems)) elems = Heap::cdr(elems);
+              Value v_init = Heap::is_cons(elems) ? Heap::car(elems)
+                                                  : Value::unspecified();
+              if (Heap::is_cons(elems))
+                elems = Heap::cdr(elems);
               Value v_step = v_name;
               if (Heap::is_cons(elems) && !Heap::car(elems).is_symbol()) {
                 v_step = Heap::car(elems);
                 elems = Heap::cdr(elems);
               }
-              bindings.push_back(vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
+              bindings.push_back(
+                  vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
               step_args.push_back(v_step);
             }
           } else {
@@ -460,10 +738,12 @@ private:
               Value item = Heap::car(vc);
               Value v_name = Heap::car(item);
               Value v_init = Heap::car(Heap::cdr(item));
-              Value v_step = Heap::is_cons(Heap::cdr(Heap::cdr(item))) ?
-                             Heap::car(Heap::cdr(Heap::cdr(item))) : v_name;
+              Value v_step = Heap::is_cons(Heap::cdr(Heap::cdr(item)))
+                                 ? Heap::car(Heap::cdr(Heap::cdr(item)))
+                                 : v_name;
 
-              bindings.push_back(vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
+              bindings.push_back(
+                  vm.heap.cons(v_name, vm.heap.cons(v_init, Value::nil())));
               step_args.push_back(v_step);
               vc = Heap::cdr(vc);
             }
@@ -486,7 +766,8 @@ private:
 
           Value loop_call = vm.heap.cons(loop_sym, step_list);
 
-          Value else_branch = vm.heap.cons(begin_sym, vm.heap.cons(loop_call, Value::nil()));
+          Value else_branch =
+              vm.heap.cons(begin_sym, vm.heap.cons(loop_call, Value::nil()));
           if (Heap::is_cons(commands)) {
             std::vector<Value> cmd_vec;
             Value c = commands;
@@ -504,15 +785,17 @@ private:
 
           Value then_branch = vm.heap.cons(begin_sym, result_exprs);
 
-          Value if_form = vm.heap.cons(if_sym,
-                            vm.heap.cons(test_expr,
-                              vm.heap.cons(then_branch,
-                                vm.heap.cons(else_branch, Value::nil()))));
+          Value if_form = vm.heap.cons(
+              if_sym, vm.heap.cons(test_expr,
+                                   vm.heap.cons(then_branch,
+                                                vm.heap.cons(else_branch,
+                                                             Value::nil()))));
 
-          Value desugared = vm.heap.cons(let_sym,
-                              vm.heap.cons(loop_sym,
-                                vm.heap.cons(binding_list,
-                                  vm.heap.cons(if_form, Value::nil()))));
+          Value desugared = vm.heap.cons(
+              let_sym,
+              vm.heap.cons(loop_sym,
+                           vm.heap.cons(binding_list,
+                                        vm.heap.cons(if_form, Value::nil()))));
 
           compile_expr(desugared, chunk, is_tail);
           return;
@@ -535,10 +818,12 @@ private:
           Value current = exprs.back();
 
           for (int i = static_cast<int>(exprs.size()) - 2; i >= 0; --i) {
-            current = vm.heap.cons(if_sym,
-                        vm.heap.cons(exprs[i],
-                          vm.heap.cons(current,
-                            vm.heap.cons(Value::boolean_false(), Value::nil()))));
+            current = vm.heap.cons(
+                if_sym,
+                vm.heap.cons(
+                    exprs[i],
+                    vm.heap.cons(current, vm.heap.cons(Value::boolean_false(),
+                                                       Value::nil()))));
           }
 
           compile_expr(current, chunk, is_tail);
@@ -558,14 +843,24 @@ private:
             cur = Heap::cdr(cur);
           }
 
+          Value let_sym = Value::from_symbol_id(vm.intern("let"));
           Value if_sym = Value::from_symbol_id(vm.intern("if"));
           Value current = exprs.back();
 
           for (int i = static_cast<int>(exprs.size()) - 2; i >= 0; --i) {
-            current = vm.heap.cons(if_sym,
-                        vm.heap.cons(exprs[i],
-                          vm.heap.cons(Value::boolean_true(),
-                            vm.heap.cons(current, Value::nil()))));
+            Value tmp_sym =
+                Value::from_symbol_id(vm.intern("$or_" + std::to_string(i)));
+            Value binding = vm.heap.cons(
+                vm.heap.cons(tmp_sym, vm.heap.cons(exprs[i], Value::nil())),
+                Value::nil());
+            Value if_expr = vm.heap.cons(
+                if_sym, vm.heap.cons(
+                            tmp_sym,
+                            vm.heap.cons(tmp_sym,
+                                         vm.heap.cons(current, Value::nil()))));
+            current = vm.heap.cons(
+                let_sym,
+                vm.heap.cons(binding, vm.heap.cons(if_expr, Value::nil())));
           }
 
           compile_expr(current, chunk, is_tail);
@@ -580,7 +875,8 @@ private:
           return;
         }
 
-        // (defmacro name (args...) body...) or (defmacro (name args...) body...)
+        // (defmacro name (args...) body...) or (defmacro (name args...)
+        // body...)
         if (op_name == "defmacro" || op_name == "define-macro") {
           Value name_val;
           Value params_val;
@@ -601,7 +897,8 @@ private:
           std::string macro_name = vm.get_symbol_name(name_val.as_symbol_id());
           uint32_t arity = 0;
           std::vector<UpvalueDesc> upvals;
-          ObjClosure *transformer = compile_function(params_val, body_val, arity, upvals, macro_name);
+          ObjClosure *transformer =
+              compile_function(params_val, body_val, arity, upvals, macro_name);
           vm.macros[macro_name] = transformer;
           chunk.code.push_back(OP_UNSPECIFIED);
           return;
@@ -619,7 +916,8 @@ private:
           }
           Value expanded = vm.call_closure(transformer, raw_args);
           if (expanded.is_unspecified() && !vm.last_error.empty()) {
-            std::cerr << "[Macro Error in " << op_name << "] " << vm.last_error << std::endl;
+            std::cerr << "[Macro Error in " << op_name << "] " << vm.last_error
+                      << std::endl;
           }
           compile_expr(expanded, chunk, is_tail);
           return;
@@ -661,7 +959,8 @@ private:
     }
   }
 
-  void emit_closure(ObjClosure *proto, const std::vector<UpvalueDesc> &upvals, BytecodeChunk &chunk) {
+  void emit_closure(ObjClosure *proto, const std::vector<UpvalueDesc> &upvals,
+                    BytecodeChunk &chunk) {
     uint16_t const_ix = add_constant(Value::from_ptr(proto), chunk);
     chunk.code.push_back(OP_CLOSURE);
     chunk.code.push_back(static_cast<uint8_t>((const_ix >> 8) & 0xFF));
@@ -679,26 +978,30 @@ private:
     chunk.code.push_back(static_cast<uint8_t>(operand & 0xFF));
   }
 
-  void patch_jump(size_t offset_index, uint16_t jump_amount, BytecodeChunk &chunk) {
+  void patch_jump(size_t offset_index, uint16_t jump_amount,
+                  BytecodeChunk &chunk) {
     chunk.code[offset_index] = static_cast<uint8_t>((jump_amount >> 8) & 0xFF);
     chunk.code[offset_index + 1] = static_cast<uint8_t>(jump_amount & 0xFF);
   }
 
   int add_local(const std::string &name) {
     locals.push_back({name, scope_depth, false});
-    if (locals.size() > max_locals) max_locals = locals.size();
+    if (locals.size() > max_locals)
+      max_locals = locals.size();
     return static_cast<int>(locals.size() - 1);
   }
 
   int resolve_local(const std::string &name) {
     for (int i = static_cast<int>(locals.size()) - 1; i >= 0; --i) {
-      if (locals[i].name == name) return i;
+      if (locals[i].name == name)
+        return i;
     }
     return -1;
   }
 
   int resolve_upvalue(const std::string &name) {
-    if (!parent) return -1;
+    if (!parent)
+      return -1;
 
     int local = parent->resolve_local(name);
     if (local != -1) {
@@ -731,17 +1034,32 @@ private:
 
   std::vector<BindingPair> parse_bindings(Value bindings) {
     std::vector<BindingPair> result;
-    if (bindings.is_nil()) return result;
+    if (bindings.is_nil())
+      return result;
 
-    // Check if bracketed vector: (vector var1 val1 var2 val2 ...)
+    // Check if direct ObjVector: [var1 val1 var2 val2 ...]
+    if (Heap::is_vector(bindings)) {
+      ObjVector *vec = bindings.as_ptr<ObjVector>();
+      for (uint32_t i = 0; i < vec->size; i += 2) {
+        Value var = vec->get(i);
+        Value val =
+            (i + 1 < vec->size) ? vec->get(i + 1) : Value::unspecified();
+        result.push_back({var, val});
+      }
+      return result;
+    }
+
+    // Check if bracketed vector AST: (vector var1 val1 var2 val2 ...)
     if (Heap::is_cons(bindings) && Heap::car(bindings).is_symbol() &&
         vm.get_symbol_name(Heap::car(bindings).as_symbol_id()) == "vector") {
       Value elems = Heap::cdr(bindings);
       while (Heap::is_cons(elems)) {
         Value var = Heap::car(elems);
         elems = Heap::cdr(elems);
-        Value val = Heap::is_cons(elems) ? Heap::car(elems) : Value::unspecified();
-        if (Heap::is_cons(elems)) elems = Heap::cdr(elems);
+        Value val =
+            Heap::is_cons(elems) ? Heap::car(elems) : Value::unspecified();
+        if (Heap::is_cons(elems))
+          elems = Heap::cdr(elems);
         result.push_back({var, val});
       }
       return result;
@@ -753,7 +1071,8 @@ private:
       Value pair = Heap::car(b);
       if (Heap::is_cons(pair)) {
         Value var = Heap::car(pair);
-        Value val = Heap::is_cons(Heap::cdr(pair)) ? Heap::car(Heap::cdr(pair)) : Value::unspecified();
+        Value val = Heap::is_cons(Heap::cdr(pair)) ? Heap::car(Heap::cdr(pair))
+                                                   : Value::unspecified();
         result.push_back({var, val});
       }
       b = Heap::cdr(b);
@@ -761,7 +1080,9 @@ private:
     return result;
   }
 
-  Value expand_quasiquote(Value form, std::unordered_map<std::string, Value> &gensym_map, int depth = 1) {
+  Value expand_quasiquote(Value form,
+                          std::unordered_map<std::string, Value> &gensym_map,
+                          int depth = 1) {
     if (!Heap::is_cons(form)) {
       if (form.is_symbol()) {
         std::string sym_name = vm.get_symbol_name(form.as_symbol_id());
@@ -769,7 +1090,8 @@ private:
           auto it = gensym_map.find(sym_name);
           if (it == gensym_map.end()) {
             std::string base = sym_name.substr(0, sym_name.size() - 1);
-            std::string generated = base + "__" + std::to_string(vm.next_gensym_id++) + "__auto__";
+            std::string generated =
+                base + "__" + std::to_string(vm.next_gensym_id++) + "__auto__";
             Value gen_sym = Value::from_symbol_id(vm.intern(generated));
             gensym_map[sym_name] = gen_sym;
             return vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
@@ -790,20 +1112,56 @@ private:
     if (head.is_symbol()) {
       std::string sym = vm.get_symbol_name(head.as_symbol_id());
       if (sym == "quasiquote") {
-        return vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
-          vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
-                                    vm.heap.cons(head, Value::nil())),
-            vm.heap.cons(expand_quasiquote(Heap::car(rest), gensym_map, depth + 1), Value::nil())));
+        return vm.heap.cons(
+            Value::from_symbol_id(vm.intern("list")),
+            vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                                      vm.heap.cons(head, Value::nil())),
+                         vm.heap.cons(expand_quasiquote(Heap::car(rest),
+                                                        gensym_map, depth + 1),
+                                      Value::nil())));
       }
       if (sym == "unquote") {
         if (depth == 1) {
           return Heap::car(rest);
         } else {
-          return vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
-            vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
-                                      vm.heap.cons(head, Value::nil())),
-              vm.heap.cons(expand_quasiquote(Heap::car(rest), gensym_map, depth - 1), Value::nil())));
+          return vm.heap.cons(
+              Value::from_symbol_id(vm.intern("list")),
+              vm.heap.cons(
+                  vm.heap.cons(Value::from_symbol_id(vm.intern("quote")),
+                               vm.heap.cons(head, Value::nil())),
+                  vm.heap.cons(
+                      expand_quasiquote(Heap::car(rest), gensym_map, depth - 1),
+                      Value::nil())));
         }
+      }
+      if (sym == "vector") {
+        std::vector<Value> v_parts;
+        Value cur_v = rest;
+        while (Heap::is_cons(cur_v)) {
+          Value elem = Heap::car(cur_v);
+          if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
+              vm.get_symbol_name(Heap::car(elem).as_symbol_id()) ==
+                  "unquote-splicing" &&
+              depth == 1) {
+            v_parts.push_back(Heap::car(Heap::cdr(elem)));
+          } else {
+            Value expanded_elem = expand_quasiquote(elem, gensym_map, depth);
+            v_parts.push_back(
+                vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+                             vm.heap.cons(expanded_elem, Value::nil())));
+          }
+          cur_v = Heap::cdr(cur_v);
+        }
+        Value append_sym = Value::from_symbol_id(vm.intern("append"));
+        Value list_to_vec_sym =
+            Value::from_symbol_id(vm.intern("list->vector"));
+        Value v_res_list = Value::nil();
+        for (auto it = v_parts.rbegin(); it != v_parts.rend(); ++it) {
+          v_res_list = vm.heap.cons(*it, v_res_list);
+        }
+        return vm.heap.cons(
+            list_to_vec_sym,
+            vm.heap.cons(vm.heap.cons(append_sym, v_res_list), Value::nil()));
       }
     }
 
@@ -813,12 +1171,15 @@ private:
     while (Heap::is_cons(cur)) {
       Value elem = Heap::car(cur);
       if (Heap::is_cons(elem) && Heap::car(elem).is_symbol() &&
-          vm.get_symbol_name(Heap::car(elem).as_symbol_id()) == "unquote-splicing" && depth == 1) {
+          vm.get_symbol_name(Heap::car(elem).as_symbol_id()) ==
+              "unquote-splicing" &&
+          depth == 1) {
         parts.push_back(Heap::car(Heap::cdr(elem)));
       } else {
         Value expanded_elem = expand_quasiquote(elem, gensym_map, depth);
-        parts.push_back(vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
-                                     vm.heap.cons(expanded_elem, Value::nil())));
+        parts.push_back(
+            vm.heap.cons(Value::from_symbol_id(vm.intern("list")),
+                         vm.heap.cons(expanded_elem, Value::nil())));
       }
       cur = Heap::cdr(cur);
     }

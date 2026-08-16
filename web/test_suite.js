@@ -8,7 +8,7 @@ const TEST_DEFINITIONS = [
   { id: 'math-mul', name: 'N-ary Multiplication', code: '(* 2 3 4 5)', expectOk: true, expectResult: '120' },
   { id: 'math-div', name: 'Float Division', code: '(/ 100 4 5)', expectOk: true, expectResult: '5.0' },
   { id: 'math-rem', name: 'Integer Remainder', code: '(remainder 17 5)', expectOk: true, expectResult: '2' },
-  { id: 'math-mod', name: 'Modulo Operation', code: '(modulo -17 5)', expectOk: true, expectResult: '-2' },
+  { id: 'math-mod', name: 'Modulo Operation', code: '(modulo -17 5)', expectOk: true, expectResult: '3' },
   { id: 'math-abs', name: 'Absolute Value', code: '(abs -42)', expectOk: true, expectResult: '42' },
   { id: 'math-sqrt', name: 'Square Root', code: '(sqrt 16.0)', expectOk: true, expectResult: '4.0' },
 
