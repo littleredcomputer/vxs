@@ -8,6 +8,9 @@
 #include <vector>
 #include <string_view>
 #include <functional>
+#include <fstream>
+#include <iostream>
+#include <memory>
 
 namespace vxs {
 
@@ -25,7 +28,8 @@ enum class ObjType : uint8_t {
   Fiber,
   Future,
   Map,
-  Upvalue
+  Upvalue,
+  Port
 };
 
 // Base object header for all heap-allocated objects
@@ -250,6 +254,31 @@ struct ObjUpvalue : Obj {
       : Obj(ObjType::Upvalue), value(v) {}
 };
 
+//-----------------------------------------------------------------------------
+// 10. Port (unified input/output — one type, an is_input flag, matching
+// how every other port-consuming primitive already just wants "a stream
+// to read from or write to" rather than two unrelated representations)
+//-----------------------------------------------------------------------------
+struct ObjPort : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Port;
+  bool is_input;
+  bool closed = false;
+  bool owns_stream = false; // true for opened files; false for stdin/stdout
+  std::unique_ptr<std::ifstream> ifs; // owned storage for a file input port
+  std::unique_ptr<std::ofstream> ofs; // owned storage for a file output port
+  std::istream *in = nullptr;  // the stream to actually read from
+  std::ostream *out = nullptr; // the stream to actually write to
+
+  inline explicit ObjPort(bool input) : Obj(ObjType::Port), is_input(input) {}
+
+  inline void close_port() {
+    if (closed) return;
+    if (ifs) ifs->close();
+    if (ofs) ofs->close();
+    closed = true;
+  }
+};
+
 //=============================================================================
 // Heap & Slab Allocator with Mark-and-Sweep Garbage Collector
 //=============================================================================
@@ -310,6 +339,31 @@ public:
     return Value::from_ptr(s);
   }
 
+  // Wraps std::cin/std::cout — not owned, closing this port is a no-op
+  // on the underlying stream (see ObjPort::owns_stream).
+  inline Value make_std_port(bool is_input, std::istream *std_in, std::ostream *std_out) {
+    ObjPort *p = allocate<ObjPort>(is_input);
+    p->in = std_in;
+    p->out = std_out;
+    return Value::from_ptr(p);
+  }
+
+  inline Value make_input_file_port(std::unique_ptr<std::ifstream> f) {
+    ObjPort *p = allocate<ObjPort>(true);
+    p->owns_stream = true;
+    p->in = f.get();
+    p->ifs = std::move(f);
+    return Value::from_ptr(p);
+  }
+
+  inline Value make_output_file_port(std::unique_ptr<std::ofstream> f) {
+    ObjPort *p = allocate<ObjPort>(false);
+    p->owns_stream = true;
+    p->out = f.get();
+    p->ofs = std::move(f);
+    return Value::from_ptr(p);
+  }
+
   inline Value make_subr(const char *name, NativeSubrFn fn, uint32_t min_a, uint32_t max_a, uint64_t udata = 0) {
     ObjSubr *subr = allocate<ObjSubr>(name, fn, min_a, max_a, udata);
     return Value::from_ptr(subr);
@@ -363,6 +417,10 @@ public:
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Upvalue;
   }
 
+  static inline bool is_port(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Port;
+  }
+
   static inline Value car(Value v) {
     if (!is_cons(v)) return Value::nil();
     return v.as_ptr<ObjCons>()->car;
@@ -403,6 +461,7 @@ public:
       case ObjType::Future:  return sizeof(ObjFuture);
       case ObjType::Map:     return sizeof(ObjMap) + static_cast<ObjMap*>(obj)->entries.capacity() * sizeof(std::pair<Value, Value>);
       case ObjType::Upvalue: return sizeof(ObjUpvalue);
+      case ObjType::Port:    return sizeof(ObjPort);
     }
     return sizeof(Obj);
   }
@@ -451,6 +510,7 @@ private:
       case ObjType::Future:  static_cast<ObjFuture*>(obj)->~ObjFuture(); break;
       case ObjType::Map:     static_cast<ObjMap*>(obj)->~ObjMap(); break;
       case ObjType::Upvalue: static_cast<ObjUpvalue*>(obj)->~ObjUpvalue(); break;
+      case ObjType::Port:    static_cast<ObjPort*>(obj)->~ObjPort(); break;
     }
     std::free(obj);
   }

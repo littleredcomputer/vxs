@@ -137,6 +137,11 @@ std::string VM::format_value(Value v) const {
         ObjUpvalue *uv = obj->as<ObjUpvalue>();
         return format_value(uv->value);
       }
+      case ObjType::Port: {
+        ObjPort *p = obj->as<ObjPort>();
+        return std::string("#<") + (p->is_input ? "input" : "output") +
+               "-port" + (p->closed ? " (closed)" : "") + ">";
+      }
     }
   }
   return "#<unknown>";
@@ -225,12 +230,17 @@ void Heap::blacken_obj(Obj *obj) {
     case ObjType::Symbol:
     case ObjType::Subr:
     case ObjType::Fiber:
+    case ObjType::Port:
       // Leaf objects - no child references
       break;
   }
 }
 
 void VM::mark_roots(Heap &h) {
+  h.mark_value(stdin_port);
+  h.mark_value(stdout_port);
+  h.mark_value(current_in_port);
+  h.mark_value(current_out_port);
   for (const auto &kv : globals) {
     h.mark_value(kv.second);
   }
@@ -965,6 +975,38 @@ static int ci_compare(std::string_view a, std::string_view b) {
   return a.size() < b.size() ? -1 : 1;
 }
 
+// Resolves the optional trailing port argument I/O primitives take
+// (e.g. (display obj [port]), (read-char [port])) — falls back to the
+// VM's current in/out port when absent, ignores a wrong-direction or
+// closed port rather than crashing on it.
+static std::ostream *resolve_out(VM &vm, uint32_t argc, Value *args, uint32_t port_arg_index) {
+  if (argc > port_arg_index && Heap::is_port(args[port_arg_index])) {
+    ObjPort *p = args[port_arg_index].as_ptr<ObjPort>();
+    if (!p->is_input && !p->closed && p->out) return p->out;
+  }
+  return &vm.out_stream();
+}
+
+static std::istream *resolve_in(VM &vm, uint32_t argc, Value *args, uint32_t port_arg_index) {
+  if (argc > port_arg_index && Heap::is_port(args[port_arg_index])) {
+    ObjPort *p = args[port_arg_index].as_ptr<ObjPort>();
+    if (p->is_input && !p->closed && p->in) return p->in;
+  }
+  return &vm.in_stream();
+}
+
+// Tries filename, then testcases/filename, ../testcases/filename,
+// ../filename — the same search order `load` already used, so scripts
+// run from either the repo root or src/ can find testcases/ files.
+static std::unique_ptr<std::ifstream> open_input_with_fallback(const std::string &filename) {
+  auto ifs = std::make_unique<std::ifstream>(filename);
+  if (!ifs->is_open()) ifs->open("testcases/" + filename);
+  if (!ifs->is_open()) ifs->open("../testcases/" + filename);
+  if (!ifs->is_open()) ifs->open("../" + filename);
+  if (!ifs->is_open()) return nullptr;
+  return ifs;
+}
+
 // Builtin primitive registration
 void VM::init_primitives() {
   // 1. Math & Arithmetic
@@ -1540,19 +1582,22 @@ void VM::init_primitives() {
   }, 2, 2));
 
   def_global("read", heap.make_subr("read", [](VM &vm, uint32_t argc, Value *args) -> Value {
-    std::istream *is = &std::cin;
-    if (argc > 0 && args[0].is_int()) {
-      int32_t id = args[0].as_int();
-      if (id >= 0 && static_cast<size_t>(id) < vm.open_input_ports.size() && vm.open_input_ports[id]) {
-        is = vm.open_input_ports[id].get();
-      }
-    }
+    std::istream *is = resolve_in(vm, argc, args, 0);
+    std::streampos start = is->tellg();
     std::string s;
     char c;
     while (is->get(c)) s += c;
     if (s.empty()) return Value::eof_obj();
     Reader reader(vm, s);
-    return reader.read_form();
+    Value form = reader.read_form();
+    // Only the reader's own single form should be consumed from the
+    // stream — rewind past whatever it actually read (not the whole
+    // remaining stream, which was just slurped above to give it
+    // something to parse from) so a subsequent read continues from the
+    // right place instead of hitting EOF immediately.
+    is->clear();
+    is->seekg(start + static_cast<std::streamoff>(reader.position()));
+    return form;
   }, 0, 1));
 
   auto subr_filter = [](VM &vm, uint32_t argc, Value *args) -> Value {
@@ -1794,38 +1839,39 @@ void VM::init_primitives() {
     return Value::from_bool(ci_compare(args[0].as_ptr<ObjString>()->view(), args[1].as_ptr<ObjString>()->view()) >= 0);
   }, 2, 2));
 
-  // Display / Output
-  auto subr_display = [](VM &vm, uint32_t, Value *args) -> Value {
-    vm.display_value(args[0], *vm.current_out);
+  // Display / Output — all take an optional trailing port argument,
+  // defaulting to the VM's current output port (ordinarily stdout,
+  // unless within-output-to-file has temporarily rebound it).
+  def_global("display", heap.make_subr("display", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    vm.display_value(args[0], *resolve_out(vm, argc, args, 1));
     return Value::unspecified();
-  };
-  def_global("display", heap.make_subr("display", subr_display, 1, 1));
+  }, 1, 2));
 
-  auto subr_newline = [](VM &vm, uint32_t, Value *) -> Value {
-    *vm.current_out << std::endl;
+  def_global("newline", heap.make_subr("newline", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    *resolve_out(vm, argc, args, 0) << std::endl;
     return Value::unspecified();
-  };
-  def_global("newline", heap.make_subr("newline", subr_newline, 0, 0));
+  }, 0, 1));
 
-  def_global("write-char", heap.make_subr("write-char", [](VM &vm, uint32_t, Value *args) -> Value {
+  def_global("write-char", heap.make_subr("write-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (args[0].is_char()) {
-      vm.current_out->put(args[0].as_char());
+      resolve_out(vm, argc, args, 1)->put(args[0].as_char());
     }
     return Value::unspecified();
-  }, 1, 1));
+  }, 1, 2));
 
-  def_global("write", heap.make_subr("write", [](VM &vm, uint32_t, Value *args) -> Value {
-    *vm.current_out << vm.format_value(args[0]);
+  def_global("write", heap.make_subr("write", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    *resolve_out(vm, argc, args, 1) << vm.format_value(args[0]);
     return Value::unspecified();
-  }, 1, 1));
+  }, 1, 2));
 
   def_global("with-output-to-file", heap.make_subr("with-output-to-file", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_string(args[0])) return Value::unspecified();
     std::string filename = std::string(args[0].as_ptr<ObjString>()->view());
-    std::ofstream ofs(filename);
-    if (!ofs.is_open()) return Value::unspecified();
-    std::ostream *prev = vm.current_out;
-    vm.current_out = &ofs;
+    auto ofs = std::make_unique<std::ofstream>(filename);
+    if (!ofs->is_open()) return Value::unspecified();
+    Value port = vm.heap.make_output_file_port(std::move(ofs));
+    Value prev = vm.current_out_port;
+    vm.current_out_port = port;
     Value thunk = args[1];
     Value res = Value::unspecified();
     if (Heap::is_closure(thunk)) {
@@ -1833,44 +1879,66 @@ void VM::init_primitives() {
     } else if (Heap::is_subr(thunk)) {
       res = thunk.as_ptr<ObjSubr>()->fn(vm, 0, nullptr);
     }
-    vm.current_out = prev;
+    vm.current_out_port = prev;
+    port.as_ptr<ObjPort>()->close_port();
     return res;
   }, 2, 2));
 
   def_global("open-input-file", heap.make_subr("open-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_string(args[0])) return Value::boolean_false();
-    std::string filename = std::string(args[0].as_ptr<ObjString>()->view());
-    auto ifs = std::make_shared<std::ifstream>(filename);
-    if (!ifs->is_open()) ifs->open("testcases/" + filename);
-    if (!ifs->is_open()) ifs->open("../testcases/" + filename);
-    if (!ifs->is_open()) ifs->open("../" + filename);
-    if (!ifs->is_open()) return Value::boolean_false();
-    uint32_t id = static_cast<uint32_t>(vm.open_input_ports.size());
-    vm.open_input_ports.push_back(ifs);
-    return Value::from_int(static_cast<int32_t>(id));
+    auto ifs = open_input_with_fallback(std::string(args[0].as_ptr<ObjString>()->view()));
+    if (!ifs) return Value::boolean_false();
+    return vm.heap.make_input_file_port(std::move(ifs));
   }, 1, 1));
 
-  def_global("read-char", heap.make_subr("read-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
-    std::istream *is = &std::cin;
-    if (argc > 0 && args[0].is_int()) {
-      int32_t id = args[0].as_int();
-      if (id >= 0 && static_cast<size_t>(id) < vm.open_input_ports.size() && vm.open_input_ports[id]) {
-        is = vm.open_input_ports[id].get();
-      }
+  def_global("open-output-file", heap.make_subr("open-output-file", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) return Value::boolean_false();
+    auto ofs = std::make_unique<std::ofstream>(std::string(args[0].as_ptr<ObjString>()->view()));
+    if (!ofs->is_open()) return Value::boolean_false();
+    return vm.heap.make_output_file_port(std::move(ofs));
+  }, 1, 1));
+
+  def_global("call-with-input-file", heap.make_subr("call-with-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) return Value::boolean_false();
+    auto ifs = open_input_with_fallback(std::string(args[0].as_ptr<ObjString>()->view()));
+    if (!ifs) return Value::boolean_false();
+    Value port = vm.heap.make_input_file_port(std::move(ifs));
+    Value proc = args[1];
+    Value res = Value::unspecified();
+    if (Heap::is_closure(proc)) {
+      res = vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
+    } else if (Heap::is_subr(proc)) {
+      res = proc.as_ptr<ObjSubr>()->fn(vm, 1, &port);
     }
+    port.as_ptr<ObjPort>()->close_port();
+    return res;
+  }, 2, 2));
+
+  def_global("call-with-output-file", heap.make_subr("call-with-output-file", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) return Value::boolean_false();
+    auto ofs = std::make_unique<std::ofstream>(std::string(args[0].as_ptr<ObjString>()->view()));
+    if (!ofs->is_open()) return Value::boolean_false();
+    Value port = vm.heap.make_output_file_port(std::move(ofs));
+    Value proc = args[1];
+    Value res = Value::unspecified();
+    if (Heap::is_closure(proc)) {
+      res = vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
+    } else if (Heap::is_subr(proc)) {
+      res = proc.as_ptr<ObjSubr>()->fn(vm, 1, &port);
+    }
+    port.as_ptr<ObjPort>()->close_port();
+    return res;
+  }, 2, 2));
+
+  def_global("read-char", heap.make_subr("read-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::istream *is = resolve_in(vm, argc, args, 0);
     int c = is->get();
     if (c == EOF) return Value::eof_obj();
     return Value::from_char(static_cast<char>(c));
   }, 0, 1));
 
   def_global("peek-char", heap.make_subr("peek-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
-    std::istream *is = &std::cin;
-    if (argc > 0 && args[0].is_int()) {
-      int32_t id = args[0].as_int();
-      if (id >= 0 && static_cast<size_t>(id) < vm.open_input_ports.size() && vm.open_input_ports[id]) {
-        is = vm.open_input_ports[id].get();
-      }
-    }
+    std::istream *is = resolve_in(vm, argc, args, 0);
     int c = is->peek();
     if (c == EOF) return Value::eof_obj();
     return Value::from_char(static_cast<char>(c));
@@ -1880,23 +1948,37 @@ void VM::init_primitives() {
     return Value::from_bool(args[0].is_eof());
   }, 1, 1));
 
-  def_global("close-input-port", heap.make_subr("close-input-port", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (args[0].is_int()) {
-      int32_t id = args[0].as_int();
-      if (id >= 0 && static_cast<size_t>(id) < vm.open_input_ports.size() && vm.open_input_ports[id]) {
-        vm.open_input_ports[id]->close();
-        vm.open_input_ports[id] = nullptr;
-      }
+  def_global("input-port?", heap.make_subr("input-port?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_port(args[0]) && args[0].as_ptr<ObjPort>()->is_input);
+  }, 1, 1));
+
+  def_global("output-port?", heap.make_subr("output-port?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_port(args[0]) && !args[0].as_ptr<ObjPort>()->is_input);
+  }, 1, 1));
+
+  def_global("current-input-port", heap.make_subr("current-input-port", [](VM &vm, uint32_t, Value *) -> Value {
+    return vm.current_in_port;
+  }, 0, 0));
+
+  def_global("current-output-port", heap.make_subr("current-output-port", [](VM &vm, uint32_t, Value *) -> Value {
+    return vm.current_out_port;
+  }, 0, 0));
+
+  def_global("close-input-port", heap.make_subr("close-input-port", [](VM &, uint32_t, Value *args) -> Value {
+    if (Heap::is_port(args[0]) && args[0].as_ptr<ObjPort>()->is_input) {
+      args[0].as_ptr<ObjPort>()->close_port();
     }
     return Value::unspecified();
   }, 1, 1));
-  def_global("close-input-file", heap.make_subr("close-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (args[0].is_int()) {
-      int32_t id = args[0].as_int();
-      if (id >= 0 && static_cast<size_t>(id) < vm.open_input_ports.size() && vm.open_input_ports[id]) {
-        vm.open_input_ports[id]->close();
-        vm.open_input_ports[id] = nullptr;
-      }
+  def_global("close-input-file", heap.make_subr("close-input-file", [](VM &, uint32_t, Value *args) -> Value {
+    if (Heap::is_port(args[0]) && args[0].as_ptr<ObjPort>()->is_input) {
+      args[0].as_ptr<ObjPort>()->close_port();
+    }
+    return Value::unspecified();
+  }, 1, 1));
+  def_global("close-output-port", heap.make_subr("close-output-port", [](VM &, uint32_t, Value *args) -> Value {
+    if (Heap::is_port(args[0]) && !args[0].as_ptr<ObjPort>()->is_input) {
+      args[0].as_ptr<ObjPort>()->close_port();
     }
     return Value::unspecified();
   }, 1, 1));
@@ -2693,11 +2775,6 @@ void VM::init_primitives() {
     vm.collect_garbage();
     return Value::unspecified();
   }, 0, 0));
-
-  def_global("write", heap.make_subr("write", [](VM &vm, uint32_t, Value *args) -> Value {
-    vm.display_value(args[0], std::cout);
-    return Value::unspecified();
-  }, 1, 1));
 
   auto subr_procedure_p = [](VM &, uint32_t, Value *args) -> Value {
     Value v = args[0];

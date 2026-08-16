@@ -16,6 +16,12 @@ class Reader {
 public:
   Reader(VM &vm, std::string_view source) : vm(vm), src(source), cursor(0) {}
 
+  // How many bytes of `source` this reader has consumed so far — lets a
+  // caller that fed it more than one form's worth of text (e.g. `read`
+  // slurping a whole port's remaining stream to parse just one form)
+  // know how far to rewind the underlying stream afterward.
+  size_t position() const { return cursor; }
+
   Value read_all_forms() {
     GCGuard guard(vm.heap);
     std::vector<Value> forms;
