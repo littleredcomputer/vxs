@@ -86,16 +86,22 @@ public:
       advance(); // backslash
       if (is_at_end())
         return Value::from_char('\0');
-      if (peek() == ' ') {
-        advance();
-        return Value::from_char(' ');
-      }
+      // The character immediately after #\ is always the literal itself —
+      // #\; #\( #\) #\space all just mean "that character" — regardless
+      // of whether it looks like a delimiter elsewhere in the grammar.
+      // Only when it's alphabetic can it possibly be the start of a
+      // multi-character name like #\space or #\newline, so only then do
+      // we keep scanning. (Previously the scan loop excluded delimiter
+      // characters up front, so #\; produced an empty name — undefined
+      // behavior on name[0] — and never consumed the ';', which then got
+      // swallowed as a line comment by the next read, eating everything
+      // up to the next newline including any closing parens.)
       size_t start = cursor;
-      while (!is_at_end() &&
-             !std::isspace(static_cast<unsigned char>(peek())) &&
-             peek() != '(' && peek() != ')' && peek() != '[' && peek() != ']' &&
-             peek() != '{' && peek() != '}' && peek() != '"' && peek() != ';') {
-        advance();
+      char first = advance();
+      if (std::isalpha(static_cast<unsigned char>(first))) {
+        while (!is_at_end() && std::isalpha(static_cast<unsigned char>(peek()))) {
+          advance();
+        }
       }
       std::string_view name = src.substr(start, cursor - start);
       if (name == "space")
@@ -106,8 +112,6 @@ public:
         return Value::from_char('\t');
       if (name == "return")
         return Value::from_char('\r');
-      if (name.size() == 1)
-        return Value::from_char(name[0]);
       return Value::from_char(name[0]);
     }
 
