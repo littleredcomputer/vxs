@@ -3,6 +3,7 @@
 #include "vx_value.h"
 #include "vx_heap.h"
 #include <vector>
+#include <deque>
 #include <map>
 #include <memory>
 #include <fstream>
@@ -76,6 +77,99 @@ struct CallFrame {
 };
 
 //=============================================================================
+// SlabStack: a Value stack chunked into fixed-size, individually-owned
+// slabs rather than one contiguous, reallocating buffer.
+//
+// Growth only ever appends a new slab — it never moves a slab that's
+// already been handed out. That's what lets call_closure push a nested
+// call's frame directly onto the *caller's own* fiber (rather than
+// spinning up an isolated Fiber per call, see the VM's call_closure) and
+// what lets a native subr hold a raw Value* into the stack for the
+// duration of its call: nothing already allocated ever relocates, no
+// matter how much gets pushed above it in the meantime.
+//
+// operator[] is index-based (does a slab lookup), so ordinary single-slot
+// access (locals, upvalue capture, etc.) works exactly as it did against
+// a flat std::vector<Value> — no caller needs to change. The one thing a
+// chunked buffer *can't* give you for free is raw pointer arithmetic over
+// a multi-slot contiguous window, which is exactly what a subr's
+// `Value *args` parameter is. contiguous_range() answers "does this
+// range live in one slab" so the two call sites that hand a subr a raw
+// pointer (OP_CALL/OP_TAIL_CALL) can take the fast path (direct pointer,
+// the overwhelmingly common case) or fall back to copying that call's
+// argc-sized window into a scratch buffer on the rare occasion it
+// straddles a slab boundary.
+//=============================================================================
+class SlabStack {
+public:
+  static constexpr size_t SLAB_BITS = 12;           // 4096 Values/slab (32 KB)
+  static constexpr size_t SLAB_SIZE = size_t(1) << SLAB_BITS;
+  static constexpr size_t SLAB_MASK = SLAB_SIZE - 1;
+
+  inline size_t size() const { return sz; }
+  inline bool empty() const { return sz == 0; }
+
+  inline Value &operator[](size_t i) {
+    return slabs[i >> SLAB_BITS][i & SLAB_MASK];
+  }
+  inline const Value &operator[](size_t i) const {
+    return slabs[i >> SLAB_BITS][i & SLAB_MASK];
+  }
+
+  inline Value &back() {
+    assert(sz > 0 && "back() on empty SlabStack");
+    return (*this)[sz - 1];
+  }
+
+  inline void push_back(Value v) {
+    ensure_capacity(sz + 1);
+    (*this)[sz] = v;
+    ++sz;
+  }
+
+  inline void pop_back() {
+    assert(sz > 0 && "pop_back() on empty SlabStack");
+    --sz;
+  }
+
+  inline void resize(size_t new_size, Value fill = Value::unspecified()) {
+    if (new_size > sz) {
+      ensure_capacity(new_size);
+      for (size_t i = sz; i < new_size; ++i) (*this)[i] = fill;
+    }
+    sz = new_size;
+  }
+
+  // If [start, start+count) lies within a single slab, points *out at
+  // its address and returns true (the common case — direct, no copy).
+  // Otherwise returns false and leaves *out untouched; the caller is
+  // expected to fall back to a copy.
+  inline bool contiguous_range(size_t start, size_t count, Value **out) {
+    if (count == 0) {
+      static Value empty_sentinel = Value::unspecified();
+      *out = &empty_sentinel;
+      return true;
+    }
+    size_t first_slab = start >> SLAB_BITS;
+    size_t last_slab = (start + count - 1) >> SLAB_BITS;
+    if (first_slab != last_slab) return false;
+    ensure_capacity(start + count);
+    *out = &slabs[first_slab][start & SLAB_MASK];
+    return true;
+  }
+
+private:
+  std::vector<std::unique_ptr<Value[]>> slabs;
+  size_t sz = 0;
+
+  inline void ensure_capacity(size_t needed) {
+    while (needed > slabs.size() * SLAB_SIZE) {
+      slabs.push_back(std::make_unique<Value[]>(SLAB_SIZE));
+    }
+  }
+};
+
+//=============================================================================
 // Fiber (Cooperative Coroutine)
 //=============================================================================
 struct Fiber {
@@ -88,8 +182,8 @@ struct Fiber {
   };
 
   State state;
-  std::vector<Value> stack;
-  std::vector<CallFrame> frames;
+  SlabStack stack;
+  std::deque<CallFrame> frames;   // single-element pointer stability, see SlabStack comment
   Value result;
   std::string error_message;
 
@@ -98,10 +192,7 @@ struct Fiber {
   Fiber *parent_fiber = nullptr;
 
   inline Fiber()
-      : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {
-    stack.reserve(256);
-    frames.reserve(32);
-  }
+      : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}
 
   inline void push(Value v) {
     stack.push_back(v);
@@ -168,14 +259,88 @@ struct VM {
   void mark_roots(Heap &h);
   inline void collect_garbage() { heap.collect_garbage(); }
 
+  // Runs `closure` to completion on the *current* fiber, pushing its frame
+  // directly onto vm.current_fiber's own stack/frames rather than spinning
+  // up an isolated Fiber for the call. That's only safe because Fiber's
+  // stack/frames now guarantee pointer stability across growth (SlabStack
+  // + deque, see vx_vm.h) — nothing pushed by this nested call can
+  // invalidate anything the caller (or anything further down the call
+  // chain) is holding a pointer into.
+  //
+  // The payoff beyond avoiding an allocation per call: an error inside
+  // the closure sets Fiber::State::Error directly on the one shared
+  // fiber object the outer dispatch loop is already checking after every
+  // subr call — no separate propagation step, so it can't be forgotten
+  // (as it previously was: this call used to run on its own throwaway
+  // Fiber, whose error state nothing ever copied back to the caller).
+  //
+  // Not every call_closure invocation has a fiber to piggyback on, though:
+  // defmacro expansion happens inside the compiler (vx_compiler.h), which
+  // runs from main.cpp's compile_top_level *before* that top-level form's
+  // fiber is ever made current. That path falls back to the old
+  // isolated-Fiber behavior — rare (compile-time only, not a hot path),
+  // so the extra allocation there doesn't matter.
   Value call_closure(ObjClosure *closure, const std::vector<Value> &args) {
-    Fiber f;
-    f.push(Value::from_ptr(closure));
     if (closure->is_variadic) {
       if (args.size() < closure->arity) {
         last_error = "Variadic closure: expected at least " + std::to_string(closure->arity) + " args";
         return Value::unspecified();
       }
+    } else if (args.size() != closure->arity) {
+      last_error = "Closure: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(args.size());
+      return Value::unspecified();
+    }
+
+    // call_closure is a synchronous "run to completion" call with no
+    // resume protocol, so anything other than a clean Completed (an
+    // explicit (yield) escaping the call, or the instruction budget
+    // running out mid-call — e.g. genuine infinite non-tail recursion)
+    // is unrecoverable here. That matters more than it did before: this
+    // now runs on the caller's own long-lived fiber rather than a
+    // throwaway one, so failing to treat it as an error would leave
+    // however many frames got pushed permanently stuck on that fiber
+    // instead of being discarded with it.
+    if (current_fiber) {
+      Fiber &f = *current_fiber;
+      size_t base_depth = f.frames.size();
+      push_closure_frame(f, closure, args);
+      StepResult res = run_dispatch(f, 10000000, base_depth);
+      if (res != StepResult::Completed || f.state == Fiber::State::Error) {
+        if (f.state != Fiber::State::Error) {
+          f.state = Fiber::State::Error;
+          f.error_message = "[VM Error] call_closure: computation did not "
+                            "complete (exceeded instruction budget or "
+                            "yielded mid-call)";
+        }
+        last_error = f.error_message;
+        return Value::unspecified();
+      }
+      return f.result;
+    }
+
+    // No active fiber (e.g. compile-time defmacro expansion) — nothing to
+    // piggyback on, so fall back to a throwaway one, same as before.
+    Fiber scratch;
+    push_closure_frame(scratch, closure, args);
+    StepResult res = step_fiber(scratch, 10000000);
+    if (res != StepResult::Completed || scratch.state == Fiber::State::Error) {
+      if (scratch.error_message.empty()) {
+        scratch.error_message = "[VM Error] call_closure: computation did not "
+                                "complete (exceeded instruction budget or "
+                                "yielded mid-call)";
+      }
+      last_error = scratch.error_message;
+      return Value::unspecified();
+    }
+    return scratch.result;
+  }
+
+private:
+  // Pushes closure + args (handling the variadic rest-list) onto f and
+  // opens its call frame — the part call_closure's two paths share.
+  void push_closure_frame(Fiber &f, ObjClosure *closure, const std::vector<Value> &args) {
+    f.push(Value::from_ptr(closure));
+    if (closure->is_variadic) {
       for (size_t i = 0; i < closure->arity; ++i) f.push(args[i]);
       Value rest_list = Value::nil();
       push_temp_root(&rest_list);
@@ -188,16 +353,13 @@ struct VM {
       for (Value a : args) f.push(a);
     }
     size_t actual_argc = closure->is_variadic ? (closure->arity + 1) : args.size();
+    size_t stack_base = f.stack.size() - actual_argc - 1;
     size_t frame_slots = std::max<size_t>(actual_argc + 1, closure->max_locals);
-    f.stack.resize(frame_slots, Value::unspecified());
-    f.frames.push_back({closure, closure->chunk->code.data(), 0});
-    StepResult res = step_fiber(f, 10000000);
-    if (res == StepResult::Error || f.state == Fiber::State::Error) {
-      last_error = f.error_message;
-      return Value::unspecified();
-    }
-    return f.result;
+    f.stack.resize(stack_base + frame_slots, Value::unspecified());
+    f.frames.push_back({closure, closure->chunk->code.data(), stack_base});
   }
+
+public:
 
   // Symbol Interning
   inline uint32_t intern(const std::string &name) {
@@ -223,6 +385,15 @@ struct VM {
 
   StepResult step_fiber(Fiber &f, size_t max_instructions = 1000);
   void step_all_active_fibers(size_t instructions_per_fiber = 500);
+
+  // Shared dispatch loop body. step_fiber calls this with stop_at_depth=0
+  // (today's behavior: run until the fiber is genuinely done). call_closure
+  // calls it directly with stop_at_depth set to the frame depth it started
+  // at, so control returns to the C++ caller once the nested call's own
+  // frame(s) unwind back past that point — without touching current_fiber/
+  // parent_fiber bookkeeping, since it's already correctly set up by
+  // whichever step_fiber invocation is further up the (real) call chain.
+  StepResult run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth);
 
   // Global variables
   inline void def_global(const std::string &name, Value val) {
