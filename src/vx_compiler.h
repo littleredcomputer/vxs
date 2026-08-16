@@ -138,8 +138,9 @@ private:
   void compile_expr(Value form, BytecodeChunk &chunk, bool is_tail = false) {
     // 1. Self-evaluating literals
     if (form.is_int() || form.is_double() || form.is_bool() || form.is_nil() ||
-        form.is_unspecified() || form.is_keyword() || Heap::is_string(form) ||
-        Heap::is_vector(form) || Heap::is_map(form)) {
+        form.is_unspecified() || form.is_eof() || form.is_char() ||
+        form.is_keyword() || Heap::is_string(form) || Heap::is_vector(form) ||
+        Heap::is_map(form)) {
       emit_constant(form, chunk);
       return;
     }

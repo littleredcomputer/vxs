@@ -15,12 +15,16 @@ namespace vxs {
 //
 // Double:   Any 64-bit IEEE-754 float where (bits & QNAN_MASK) != QNAN_MASK
 //
-// Tags (Upper 16 bits = 0xFFF8..0xFFFF):
+// Tags (Upper 16 bits = 0xFFF8..0xFFFF) — this range exactly saturates the 3
+// tag bits available above the quiet-NaN boundary, so there is no room for a
+// 9th top-level tag. Infrequently-tested scalars (CHAR, UNSPECIFIED, EOF)
+// share TAG_SMALL and are disambiguated by a sub-tag in bits 32-39, leaving
+// NIL/FALSE/TRUE as single-comparison top-level tags for the fast path.
+//
 // 0xFFF8: NIL          (empty list '())
 // 0xFFF9: FALSE        (#f)
 // 0xFFFA: TRUE         (#t)
-// 0xFFFB: UNSPECIFIED  (#<unspecified>)
-// 0xFFFC: EOF_OBJ      (#<eof>)
+// 0xFFFB: SMALL        (sub-tag in bits 32-39: CHAR/UNSPECIFIED/EOF; payload in bits 0-31)
 // 0xFFFD: SYMBOL       (lower 32 bits = uint32_t symbol ID)
 // 0xFFFE: INTEGER      (lower 32 bits = int32_t signed integer)
 // 0xFFFF: POINTER      (lower 48 bits = heap Cell* address)
@@ -35,19 +39,24 @@ struct Value {
   static constexpr uint64_t PTR_MASK = 0x0000FFFFFFFFFFFFULL;
   static constexpr uint64_t INT_MASK = 0x00000000FFFFFFFFULL;
 
-  static constexpr uint64_t TAG_CHAR = 0xFFF7000000000000ULL;
   static constexpr uint64_t TAG_NIL = 0xFFF8000000000000ULL;
   static constexpr uint64_t TAG_FALSE = 0xFFF9000000000000ULL;
   static constexpr uint64_t TAG_TRUE = 0xFFFA000000000000ULL;
-  static constexpr uint64_t TAG_UNDEF = 0xFFFB000000000000ULL;
-  static constexpr uint64_t TAG_EOF = 0xFFFC000000000000ULL;
+  static constexpr uint64_t TAG_SMALL = 0xFFFB000000000000ULL;
   static constexpr uint64_t TAG_SYMBOL = 0xFFFD000000000000ULL;
   static constexpr uint64_t TAG_INT = 0xFFFE000000000000ULL;
   static constexpr uint64_t TAG_PTR = 0xFFFF000000000000ULL;
   static constexpr uint64_t KEYWORD_BIT = 0x0000000080000000ULL;
 
+  // TAG_SMALL sub-tags (bits 32-39) and payload (bits 0-31)
+  static constexpr uint64_t SMALL_SUBTAG_MASK = 0x000000FF00000000ULL;
+  static constexpr uint64_t SMALL_PAYLOAD_MASK = 0x00000000FFFFFFFFULL;
+  static constexpr uint64_t SMALL_CHAR = 0x0000000000000000ULL;
+  static constexpr uint64_t SMALL_UNDEF = 0x0000000100000000ULL;
+  static constexpr uint64_t SMALL_EOF = 0x0000000200000000ULL;
+
   // Constructors
-  constexpr Value() : raw(TAG_UNDEF) {}
+  constexpr Value() : raw(TAG_SMALL | SMALL_UNDEF) {}
   constexpr explicit Value(uint64_t r) : raw(r) {}
 
   // Double
@@ -88,7 +97,7 @@ struct Value {
 
   // Character
   static constexpr inline Value from_char(char c) {
-    return Value(TAG_CHAR | static_cast<uint64_t>(static_cast<uint8_t>(c)));
+    return Value(TAG_SMALL | SMALL_CHAR | static_cast<uint64_t>(static_cast<uint8_t>(c)));
   }
 
   // Booleans
@@ -100,15 +109,17 @@ struct Value {
   static constexpr inline Value nil() { return Value(TAG_NIL); }
   static constexpr inline Value boolean_true() { return Value(TAG_TRUE); }
   static constexpr inline Value boolean_false() { return Value(TAG_FALSE); }
-  static constexpr inline Value unspecified() { return Value(TAG_UNDEF); }
-  static constexpr inline Value eof_obj() { return Value(TAG_EOF); }
+  static constexpr inline Value unspecified() { return Value(TAG_SMALL | SMALL_UNDEF); }
+  static constexpr inline Value eof_obj() { return Value(TAG_SMALL | SMALL_EOF); }
 
   // Predicates
   inline bool is_double() const { return (raw & QNAN_MASK) != QNAN_MASK; }
 
   inline bool is_int() const { return (raw & TAG_MASK) == TAG_INT; }
 
-  inline bool is_char() const { return (raw & TAG_MASK) == TAG_CHAR; }
+  inline bool is_char() const {
+    return (raw & TAG_MASK) == TAG_SMALL && (raw & SMALL_SUBTAG_MASK) == SMALL_CHAR;
+  }
 
   inline char as_char() const { return static_cast<char>(raw & 0xFF); }
 
@@ -132,9 +143,9 @@ struct Value {
 
   inline bool is_nil() const { return raw == TAG_NIL; }
 
-  inline bool is_unspecified() const { return raw == TAG_UNDEF; }
+  inline bool is_unspecified() const { return raw == (TAG_SMALL | SMALL_UNDEF); }
 
-  inline bool is_eof() const { return raw == TAG_EOF; }
+  inline bool is_eof() const { return raw == (TAG_SMALL | SMALL_EOF); }
 
   // Unboxers
   inline double as_double() const {
