@@ -286,7 +286,8 @@ class Heap {
 public:
   Heap()
       : head_obj(nullptr), bytes_allocated(0),
-        gc_threshold(512 * 1024), gc_paused_depth(0), vm(nullptr) {}
+        gc_threshold(512 * 1024), min_gc_threshold(512 * 1024),
+        gc_paused_depth(0), vm(nullptr) {}
 
   ~Heap() {
     free_all();
@@ -442,7 +443,11 @@ public:
   // Tracking
   size_t get_bytes_allocated() const { return bytes_allocated; }
   size_t get_gc_threshold() const { return gc_threshold; }
-  void set_gc_threshold(size_t t) { gc_threshold = t; }
+  // Sets both the immediate threshold and the floor collect_garbage()
+  // grows back to afterward (see min_gc_threshold below) — otherwise a
+  // caller lowering this for e.g. GC-pressure testing would only affect
+  // the very first collection before snapping back to the 512KB default.
+  void set_gc_threshold(size_t t) { gc_threshold = t; min_gc_threshold = t; }
   size_t get_object_count() const {
     size_t count = 0;
     for (Obj *cur = head_obj; cur; cur = cur->next_all) ++count;
@@ -518,6 +523,7 @@ private:
   Obj *head_obj;
   size_t bytes_allocated;
   size_t gc_threshold;
+  size_t min_gc_threshold;
   int gc_paused_depth;
   VM *vm;
   std::vector<Obj *> gray_stack;
