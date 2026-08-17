@@ -58,7 +58,7 @@ inline Value quote_materialize(VM &vm, Value form) {
     Value head = Heap::car(form);
     if (head.is_symbol()) {
       std::string sym = vm.get_symbol_name(head.as_symbol_id());
-      if (sym == "vector") {
+      if (sym == "%bracket-vector") {
         std::vector<Value> elems;
         Value cur = Heap::cdr(form);
         while (Heap::is_cons(cur)) {
@@ -72,7 +72,7 @@ inline Value quote_materialize(VM &vm, Value form) {
         }
         return vec;
       }
-      if (sym == "hash-map") {
+      if (sym == "%brace-map") {
         std::vector<std::pair<Value, Value>> entries;
         Value cur = Heap::cdr(form);
         while (Heap::is_cons(cur) && Heap::is_cons(Heap::cdr(cur))) {
@@ -772,7 +772,7 @@ private:
           if (Heap::is_cons(test_clause) &&
               Heap::car(test_clause).is_symbol() &&
               vm.get_symbol_name(Heap::car(test_clause).as_symbol_id()) ==
-                  "vector") {
+                  "%bracket-vector") {
             test_clause = Heap::cdr(test_clause);
           }
 
@@ -785,7 +785,7 @@ private:
           if (Heap::is_cons(var_clauses) &&
               Heap::car(var_clauses).is_symbol() &&
               vm.get_symbol_name(Heap::car(var_clauses).as_symbol_id()) ==
-                  "vector") {
+                  "%bracket-vector") {
             Value elems = Heap::cdr(var_clauses);
             while (Heap::is_cons(elems)) {
               Value v_name = Heap::car(elems);
@@ -1120,9 +1120,9 @@ private:
       return result;
     }
 
-    // Check if bracketed vector AST: (vector var1 val1 var2 val2 ...)
+    // Check if bracketed vector AST: (%bracket-vector var1 val1 var2 val2 ...)
     if (Heap::is_cons(bindings) && Heap::car(bindings).is_symbol() &&
-        vm.get_symbol_name(Heap::car(bindings).as_symbol_id()) == "vector") {
+        vm.get_symbol_name(Heap::car(bindings).as_symbol_id()) == "%bracket-vector") {
       Value elems = Heap::cdr(bindings);
       while (Heap::is_cons(elems)) {
         Value var = Heap::car(elems);
@@ -1240,7 +1240,7 @@ private:
                       Value::nil())));
         }
       }
-      if (sym == "vector") {
+      if (sym == "%bracket-vector") {
         std::vector<Value> elems;
         Value cur_v = rest;
         while (Heap::is_cons(cur_v)) {
