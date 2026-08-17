@@ -356,34 +356,66 @@ private:
 
         // (delay expr) - Standard R4RS/R5RS Memoized Promise
         if (op_name == "delay") {
+          // Reentrant-safe memoization — R4RS's own reference algorithm,
+          // not the naive "evaluate straight into res" version this used
+          // to desugar to. The difference only shows up when forcing a
+          // promise's own expression forces that SAME promise again
+          // before the outer call finishes (r4rstest.scm section 6 9
+          // exercises exactly this: a promise whose body forces itself
+          // once, using a flag to avoid infinite recursion). Naively,
+          // the outer call's own `(set! res expr)` — evaluated only
+          // AFTER the inner force call already ran and memoized its own
+          // (different, correct) answer — unconditionally overwrites
+          // that answer with whatever the outer call's copy of the same
+          // expression happened to compute, one level further recursed.
+          // The fix: evaluate into a temp, then re-check `done` before
+          // committing — if a reentrant force already completed while
+          // this call was busy evaluating, that memoized value wins and
+          // this call's own (now-redundant) result is discarded.
           Value done_sym = Value::from_symbol_id(
               vm.intern("$done__" + std::to_string(vm.next_gensym_id++)));
           Value res_sym = Value::from_symbol_id(
               vm.intern("$res__" + std::to_string(vm.next_gensym_id++)));
+          Value tmp_sym = Value::from_symbol_id(
+              vm.intern("$tmp__" + std::to_string(vm.next_gensym_id++)));
           Value expr = Heap::car(rest);
 
           Value done_pair = vm.heap.cons(
               done_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
           Value res_pair = vm.heap.cons(
               res_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
-          Value bindings =
-              vm.heap.cons(done_pair, vm.heap.cons(res_pair, Value::nil()));
+          Value tmp_pair = vm.heap.cons(
+              tmp_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
+          Value bindings = vm.heap.cons(
+              done_pair,
+              vm.heap.cons(res_pair, vm.heap.cons(tmp_pair, Value::nil())));
 
           Value not_done = vm.heap.cons(Value::from_symbol_id(vm.intern("not")),
                                         vm.heap.cons(done_sym, Value::nil()));
+          Value set_tmp = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("set!")),
+              vm.heap.cons(tmp_sym, vm.heap.cons(expr, Value::nil())));
           Value set_res = vm.heap.cons(
               Value::from_symbol_id(vm.intern("set!")),
-              vm.heap.cons(res_sym, vm.heap.cons(expr, Value::nil())));
+              vm.heap.cons(res_sym, vm.heap.cons(tmp_sym, Value::nil())));
           Value set_done = vm.heap.cons(
               Value::from_symbol_id(vm.intern("set!")),
               vm.heap.cons(done_sym,
                            vm.heap.cons(Value::boolean_true(), Value::nil())));
-          Value begin_update = vm.heap.cons(
+          Value commit_begin = vm.heap.cons(
               Value::from_symbol_id(vm.intern("begin")),
               vm.heap.cons(set_res, vm.heap.cons(set_done, Value::nil())));
+          // Re-check: only commit tmp into res/done if nothing else did
+          // so while this call was evaluating expr.
+          Value recheck_if = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("if")),
+              vm.heap.cons(not_done, vm.heap.cons(commit_begin, Value::nil())));
+          Value outer_begin = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("begin")),
+              vm.heap.cons(set_tmp, vm.heap.cons(recheck_if, Value::nil())));
           Value if_form = vm.heap.cons(
               Value::from_symbol_id(vm.intern("if")),
-              vm.heap.cons(not_done, vm.heap.cons(begin_update, Value::nil())));
+              vm.heap.cons(not_done, vm.heap.cons(outer_begin, Value::nil())));
 
           Value lambda_body =
               vm.heap.cons(if_form, vm.heap.cons(res_sym, Value::nil()));
