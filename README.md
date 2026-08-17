@@ -74,11 +74,13 @@ standard, along with why:
   or `(map :key)`) — a deliberate Clojure-style ergonomic choice. This
   means `procedure?` and `vector?`/`map?` aren't strictly disjoint the
   way R4RS assumes.
-- **`call/cc` is currently disabled.** General re-entrant continuations
-  were traded for a chunked, non-reallocating VM stack and the
-  performance that comes with it — fibers + `yield` cover the common
-  generator/coroutine use case. See `src/vx_vm.h` for the design
-  rationale if you're curious.
+- **`call/cc` is escape-only.** General re-entrant continuations were
+  traded for a chunked, non-reallocating VM stack and the performance
+  that comes with it — but the common "jump out of a loop early" use
+  case is fully supported (implemented as a single-shot, upward-only
+  unwind — see `ContinuationEscape` in `src/vx_vm.h`). Capturing a
+  continuation and invoking it again later, from outside the `call/cc`
+  that created it, fails with a runtime error instead of resuming.
 
 ## Project layout
 
@@ -90,4 +92,4 @@ testcases/      Ground-up test suite, r4rstest.scm, classic Scheme benchmarks
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).
