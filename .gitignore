@@ -6,4 +6,12 @@ _*
 .cache/
 ARCHITECTURE_ARC.md
 
+# vx-test.scm's own run artifacts (per-testcase output files it diffs
+# against testcases/good/, plus tmp1-3 from r4rstest.scm's own file-I/O
+# conformance tests)
+testcases/*.out
+testcases/tmp1
+testcases/tmp2
+testcases/tmp3
+
 

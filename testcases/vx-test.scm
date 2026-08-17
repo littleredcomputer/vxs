@@ -39,23 +39,28 @@
 		     (open-input-file goodfile))))
     (cons ok (car result))))                     ; return (pass? . elapsed time)
   
-(let ((total-time 0.0))
+(let ((total-time 0.0)
+      (any-failed? #f))
   (for-each                                       ; run all testcases
    (lambda (testcase)
      (let ((result (run-testcase testcase)))
-       (if (car result) 
+       (if (car result)
 	   (begin
 	     (display "PASS: ")
 	     (display (cdr result))
 	     (display " ")
 	     (set! total-time (+ total-time (cdr result))))
-	   (display "FAIL: "))
+	   (begin
+	     (display "FAIL: ")
+	     (set! any-failed? #t)))
        (display testcase)
        (newline)))
    testcases)
   (display "total time: ")
   (display total-time)
-  (newline))
-
-
+  (newline)
+  ;; A nonzero exit is what lets `make test` (or any other CI-shaped
+  ;; caller) actually notice a regression here — PASS/FAIL lines alone
+  ;; are only useful to a human watching the terminal.
+  (if any-failed? (exit 1)))
 

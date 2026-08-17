@@ -26,11 +26,23 @@ wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler
 	mkdir -p ../web
 	$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
 
-test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-bench
+test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-bench test-r4rs
 
 test-suite: vx-scheme
 	@echo "=== RUNNING GROUND-UP SCHEME TEST SUITE ==="
 	./vx-scheme ../testcases/run_suite.scm
+
+# The original 2002-era regression harness: r4rstest.scm (SLIB's R4RS
+# conformance suite) plus the classic benchmarks, each diffed
+# byte-for-byte against testcases/good/. Exercises things the ground-up
+# suite doesn't reach for free — dynamic.scm's self-hosted type
+# inferencer parsing its own 2300-line source was what first surfaced
+# the GC rooting bug fixed earlier this session, for instance. Was run
+# by hand all session; wired in here so a regression here can't go
+# unnoticed the way it did before.
+test-r4rs: vx-scheme
+	@echo "=== RUNNING CLASSIC vx-test.scm HARNESS (R4RS + benchmarks vs. golden files) ==="
+	cd ../testcases && ../src/vx-scheme vx-test.scm
 
 test-gc:
 	@echo "=== RUNNING MARK-AND-SWEEP GC UNIT & STRESS TESTS ==="
