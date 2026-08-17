@@ -21,6 +21,74 @@ struct UpvalueDesc {
   bool is_local;
 };
 
+// (quote expr) materializes its operand rather than embedding it verbatim:
+// [e1 e2 ...]/{k1 v1 ...} desugar to (vector ...)/(hash-map ...) call forms
+// at read time (so they evaluate their elements when used as an
+// expression — see the comment in vx_reader.h), which means a bare quote
+// would otherwise just return that inert call-form list instead of a real
+// vector/map. Recursively rebuilds any such sub-form (at any nesting
+// depth, including inside an already-literal #(...) vector) into the real
+// object it denotes, quoting each element in turn — mirrors the
+// (pre-existing) convention expand_quasiquote uses for the same shape.
+//
+// A free function (not a Compiler method) so the `read` primitive can
+// apply the same materialization to data parsed at runtime — read has no
+// compilation pass of its own, so without this, reading back a [...] a
+// program itself just wrote would silently hand back a (vector ...) list
+// instead of a real vector.
+inline Value quote_materialize(VM &vm, Value form) {
+  if (Heap::is_vector(form)) {
+    ObjVector *vec = form.as_ptr<ObjVector>();
+    Value new_vec = vm.heap.make_vector(vec->size);
+    ObjVector *nv = new_vec.as_ptr<ObjVector>();
+    for (uint32_t i = 0; i < vec->size; ++i) {
+      nv->set(i, quote_materialize(vm, vec->get(i)));
+    }
+    return new_vec;
+  }
+  if (Heap::is_map(form)) {
+    ObjMap *m = form.as_ptr<ObjMap>();
+    std::vector<std::pair<Value, Value>> entries;
+    for (const auto &p : m->entries) {
+      entries.push_back({quote_materialize(vm, p.first), quote_materialize(vm, p.second)});
+    }
+    return vm.heap.make_map(entries);
+  }
+  if (Heap::is_cons(form)) {
+    Value head = Heap::car(form);
+    if (head.is_symbol()) {
+      std::string sym = vm.get_symbol_name(head.as_symbol_id());
+      if (sym == "vector") {
+        std::vector<Value> elems;
+        Value cur = Heap::cdr(form);
+        while (Heap::is_cons(cur)) {
+          elems.push_back(quote_materialize(vm, Heap::car(cur)));
+          cur = Heap::cdr(cur);
+        }
+        Value vec = vm.heap.make_vector(static_cast<uint32_t>(elems.size()));
+        ObjVector *ov = vec.as_ptr<ObjVector>();
+        for (size_t i = 0; i < elems.size(); ++i) {
+          ov->set(static_cast<uint32_t>(i), elems[i]);
+        }
+        return vec;
+      }
+      if (sym == "hash-map") {
+        std::vector<std::pair<Value, Value>> entries;
+        Value cur = Heap::cdr(form);
+        while (Heap::is_cons(cur) && Heap::is_cons(Heap::cdr(cur))) {
+          entries.push_back({quote_materialize(vm, Heap::car(cur)),
+                             quote_materialize(vm, Heap::car(Heap::cdr(cur)))});
+          cur = Heap::cdr(Heap::cdr(cur));
+        }
+        return vm.heap.make_map(entries);
+      }
+    }
+    return vm.heap.cons(quote_materialize(vm, head),
+                        quote_materialize(vm, Heap::cdr(form)));
+  }
+  return form;
+}
+
 class Compiler {
 public:
   Compiler(VM &vm, Compiler *parent = nullptr)
@@ -173,7 +241,7 @@ private:
 
         // (quote expr)
         if (op_name == "quote") {
-          emit_constant(quote_materialize(Heap::car(rest)), chunk);
+          emit_constant(quote_materialize(vm, Heap::car(rest)), chunk);
           return;
         }
 
@@ -1111,69 +1179,6 @@ private:
     return vm.heap.cons(
         list_to_vec_sym,
         vm.heap.cons(vm.heap.cons(append_sym, v_res_list), Value::nil()));
-  }
-
-  // (quote expr) materializes its operand at compile time rather than
-  // embedding it verbatim: [e1 e2 ...]/{k1 v1 ...} desugar to (vector ...)/
-  // (hash-map ...) call forms at read time (so they evaluate their elements
-  // when used as an expression — see the comment in vx_reader.h), which
-  // means a bare quote would otherwise just return that inert call-form
-  // list instead of a real vector/map. Recursively rebuild any such
-  // sub-form (at any nesting depth, including inside an already-literal
-  // #(...) vector) into the real object it denotes, quoting each element
-  // in turn — mirrors the (pre-existing) convention expand_quasiquote uses
-  // for the same (vector ...) shape.
-  Value quote_materialize(Value form) {
-    if (Heap::is_vector(form)) {
-      ObjVector *vec = form.as_ptr<ObjVector>();
-      Value new_vec = vm.heap.make_vector(vec->size);
-      ObjVector *nv = new_vec.as_ptr<ObjVector>();
-      for (uint32_t i = 0; i < vec->size; ++i) {
-        nv->set(i, quote_materialize(vec->get(i)));
-      }
-      return new_vec;
-    }
-    if (Heap::is_map(form)) {
-      ObjMap *m = form.as_ptr<ObjMap>();
-      std::vector<std::pair<Value, Value>> entries;
-      for (const auto &p : m->entries) {
-        entries.push_back({quote_materialize(p.first), quote_materialize(p.second)});
-      }
-      return vm.heap.make_map(entries);
-    }
-    if (Heap::is_cons(form)) {
-      Value head = Heap::car(form);
-      if (head.is_symbol()) {
-        std::string sym = vm.get_symbol_name(head.as_symbol_id());
-        if (sym == "vector") {
-          std::vector<Value> elems;
-          Value cur = Heap::cdr(form);
-          while (Heap::is_cons(cur)) {
-            elems.push_back(quote_materialize(Heap::car(cur)));
-            cur = Heap::cdr(cur);
-          }
-          Value vec = vm.heap.make_vector(static_cast<uint32_t>(elems.size()));
-          ObjVector *ov = vec.as_ptr<ObjVector>();
-          for (size_t i = 0; i < elems.size(); ++i) {
-            ov->set(static_cast<uint32_t>(i), elems[i]);
-          }
-          return vec;
-        }
-        if (sym == "hash-map") {
-          std::vector<std::pair<Value, Value>> entries;
-          Value cur = Heap::cdr(form);
-          while (Heap::is_cons(cur) && Heap::is_cons(Heap::cdr(cur))) {
-            entries.push_back({quote_materialize(Heap::car(cur)),
-                               quote_materialize(Heap::car(Heap::cdr(cur)))});
-            cur = Heap::cdr(Heap::cdr(cur));
-          }
-          return vm.heap.make_map(entries);
-        }
-      }
-      return vm.heap.cons(quote_materialize(head),
-                          quote_materialize(Heap::cdr(form)));
-    }
-    return form;
   }
 
   Value expand_quasiquote(Value form,
