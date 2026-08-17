@@ -138,6 +138,27 @@ static void run_repl(VM &vm) {
 #include <unordered_set>
 #include <iomanip>
 
+// Escapes a Scheme string constant for embedding in generated C++ source
+// (AOT compile_standalone / --emit-cpp) — without this, a `"` or `\` in
+// the original string, or a raw control character like newline, would
+// land in the generated make_string("...") call and either break the
+// C++ literal or silently change the string's contents.
+static std::string escape_cpp_string(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (unsigned char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\r': out += "\\r"; break;
+      default: out += static_cast<char>(c); break;
+    }
+  }
+  return out;
+}
+
 static void collect_closures(ObjClosure *cl, std::vector<ObjClosure*> &list, std::unordered_set<ObjClosure*> &seen) {
   if (seen.count(cl)) return;
   seen.insert(cl);
@@ -222,6 +243,12 @@ using namespace vxs;
         out << "Value::nil()";
       } else if (v.is_unspecified()) {
         out << "Value::unspecified()";
+      } else if (v.is_char()) {
+        // Emit by code point rather than a C++ char literal — sidesteps
+        // escaping entirely (works uniformly for space, quote, backslash,
+        // newline, etc.), which plain-text pi.scm's `(display #\ )`/
+        // `(display #\0)` constants would otherwise need.
+        out << "Value::from_char(static_cast<char>(" << static_cast<int>(v.as_char()) << "))";
       } else if (v.is_symbol()) {
         std::string sym_name = compile_vm.get_symbol_name(v.as_symbol_id());
         out << "Value::from_symbol_id(vm.intern(\"" << sym_name << "\"))";
@@ -230,7 +257,7 @@ using namespace vxs;
         out << "Value::from_keyword_id(vm.intern(\"" << kw_name << "\"))";
       } else if (Heap::is_string(v)) {
         std::string str_val = std::string(v.as_ptr<ObjString>()->view());
-        out << "vm.heap.make_string(\"" << str_val << "\")";
+        out << "vm.heap.make_string(\"" << escape_cpp_string(str_val) << "\")";
       } else if (Heap::is_closure(v)) {
         ObjClosure *child_cl = v.as_ptr<ObjClosure>();
         int child_ix = -1;
@@ -369,9 +396,10 @@ int main(int argc, char **argv) {
           else if (v.is_bool()) out << (v.as_bool() ? "Value::boolean_true()" : "Value::boolean_false()");
           else if (v.is_nil()) out << "Value::nil()";
           else if (v.is_unspecified()) out << "Value::unspecified()";
+          else if (v.is_char()) out << "Value::from_char(static_cast<char>(" << static_cast<int>(v.as_char()) << "))";
           else if (v.is_symbol()) out << "Value::from_symbol_id(vm.intern(\"" << compile_vm.get_symbol_name(v.as_symbol_id()) << "\"))";
           else if (v.is_keyword()) out << "Value::from_keyword_id(vm.intern(\"" << compile_vm.get_symbol_name(v.as_keyword_id()) << "\"))";
-          else if (Heap::is_string(v)) out << "vm.heap.make_string(\"" << std::string(v.as_ptr<ObjString>()->view()) << "\")";
+          else if (Heap::is_string(v)) out << "vm.heap.make_string(\"" << escape_cpp_string(std::string(v.as_ptr<ObjString>()->view())) << "\")";
           else if (Heap::is_closure(v)) {
             int child_ix = -1;
             for (size_t k = 0; k < closures.size(); ++k) {
