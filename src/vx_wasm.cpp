@@ -6,6 +6,8 @@
 #include <string>
 #include <memory>
 #include <iostream>
+#include <chrono>
+#include <cstdio>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -274,11 +276,20 @@ const char *vxs_eval_json(const char *code) {
     fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
     fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-    VM::StepResult res = g_vm->step_fiber(fiber, 500000);
+    // Unbounded instructions, but a wall-clock deadline: this is a
+    // synchronous call on the browser's main thread, so a runaway
+    // evaluation would freeze the tab. 750ms is editor-scale — generous
+    // for a one-shot "run what's in the buffer" action. A hit deadline
+    // is reported as a timeout, never dressed up as a result — that
+    // would be the Yielded/Preempted conflation rebuilt one layer up.
+    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED,
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(750));
     auto t_end = std::chrono::high_resolution_clock::now();
     double time_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
 
-    if (res == VM::StepResult::Error) {
+    if (res == VM::StepResult::Preempted) {
+      g_eval_result_buffer = "{\"ok\":false,\"error\":\"evaluation exceeded 750ms and was stopped\",\"error_type\":\"timeout\",\"time_us\":" + std::to_string(time_us) + "}";
+    } else if (res == VM::StepResult::Error) {
       g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(fiber.error_message) + "\",\"error_type\":\"runtime\",\"time_us\":" + std::to_string(time_us) + "}";
     } else {
       std::string formatted = g_vm->format_value(fiber.result);
@@ -323,8 +334,12 @@ const char *vxs_eval(const char *code) {
     fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
     fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-    VM::StepResult res = g_vm->step_fiber(fiber, 500000);
-    if (res == VM::StepResult::Error) {
+    // Same deadline treatment as vxs_eval_json above.
+    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED,
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(750));
+    if (res == VM::StepResult::Preempted) {
+      g_eval_result_buffer = "[Timeout] evaluation exceeded 750ms and was stopped";
+    } else if (res == VM::StepResult::Error) {
       g_eval_result_buffer = fiber.error_message;
     } else {
       g_eval_result_buffer = g_vm->format_value(fiber.result);
@@ -336,10 +351,26 @@ const char *vxs_eval(const char *code) {
   return g_eval_result_buffer.c_str();
 }
 
+// The per-rAF-frame scheduler pump. Default (arg <= 0): every fiber runs
+// to its own (yield) under a shared ~8ms wall-clock backstop — half a
+// 60fps frame, leaving the rest for rendering/compositing. The backstop
+// is tab-freeze protection, not a scheduling device: a fiber it cuts off
+// resumes exclusively next frame (see step_all_active_fibers), and the
+// overrun is reported to the devtools console below because it means
+// that fiber isn't yielding — a bug in the fiber, worth hearing about.
+// A positive argument opts into the legacy/debug instruction cap instead.
 EMSCRIPTEN_KEEPALIVE
 int vxs_step_fibers(int instructions_per_fiber) {
   if (!g_vm) return 0;
-  g_vm->step_all_active_fibers(instructions_per_fiber > 0 ? instructions_per_fiber : 500);
+  size_t preempted;
+  if (instructions_per_fiber > 0) {
+    preempted = g_vm->step_all_active_fibers(static_cast<size_t>(instructions_per_fiber));
+  } else {
+    preempted = g_vm->step_all_active_fibers(VM::UNBOUNDED, std::chrono::milliseconds(8));
+  }
+  if (preempted > 0) {
+    fprintf(stderr, "[vxs] %zu fiber(s) exceeded the frame budget without yielding\n", preempted);
+  }
   return static_cast<int>(g_vm->active_fibers.size());
 }
 

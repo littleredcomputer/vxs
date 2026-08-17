@@ -323,8 +323,11 @@ size_t Heap::sweep() {
   return freed_count;
 }
 
-// Step one fiber for up to max_instructions
-VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
+// Step one fiber — to its own yield/completion/error by default, or to
+// an opt-in instruction cap / wall-clock deadline (see StepResult's
+// comment in vx_vm.h for the scheduling model these must respect).
+VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
+                              std::chrono::steady_clock::time_point deadline) {
   if (f.state == Fiber::State::Completed || f.state == Fiber::State::Error) {
     return StepResult::Completed;
   }
@@ -348,13 +351,15 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions) {
     return StepResult::Completed;
   }
 
-  return run_dispatch(f, max_instructions, 0);
+  return run_dispatch(f, max_instructions, 0, deadline);
 }
 
 // The dispatch loop proper — see the declaration in vx_vm.h for how
 // stop_at_depth lets call_closure re-enter this on an already-running
-// fiber without going through step_fiber's setup again.
-VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth) {
+// fiber without going through step_fiber's setup again, and for why the
+// deadline is checked only here, never in a nested call_closure dispatch.
+VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth,
+                                std::chrono::steady_clock::time_point deadline) {
   CallFrame *frame = &f.frames.back();
   const uint8_t *ip = frame->ip;
   const BytecodeChunk *chunk = frame->closure->chunk.get();
@@ -362,6 +367,15 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
   size_t count = 0;
   while (count < max_instructions) {
     ++count;
+    // Wall-clock backstop, sampled every 1024 instructions (bitmask, not
+    // a divide) and short-circuited away entirely when no deadline is
+    // set — the common native/synchronous case pays one predicted branch.
+    if (deadline != NO_DEADLINE && (count & 0x3FF) == 0 &&
+        std::chrono::steady_clock::now() >= deadline) {
+      frame->ip = ip;
+      f.state = Fiber::State::Suspended; // suspended, just not voluntarily —
+      return StepResult::Preempted;      // the result carries that bit
+    }
     uint8_t op = *ip++;
 
     switch (op) {
@@ -961,22 +975,73 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
     }
   }
 
+  // Fell off the counted loop: the opt-in instruction cap was exhausted.
+  // This is preemption and is reported as such — for years-of-one-session
+  // this returned Yielded, indistinguishable from OP_YIELD, which meant
+  // an instruction budget could silently interleave fibers at boundaries
+  // they never chose. (Unreachable when max_instructions == UNBOUNDED.)
   frame->ip = ip;
-  return StepResult::Yielded;
+  f.state = Fiber::State::Suspended;
+  return StepResult::Preempted;
 }
 
-// Step all active background fibers
-void VM::step_all_active_fibers(size_t instructions_per_fiber) {
+// Step all active background fibers — see the declaration's comment for
+// the shared-deadline and exclusive-resume (preempted_fiber) policies.
+size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
+                                  std::chrono::milliseconds wall_clock_budget) {
+  auto deadline = (wall_clock_budget == std::chrono::milliseconds::max())
+                      ? NO_DEADLINE
+                      : std::chrono::steady_clock::now() + wall_clock_budget;
+  size_t preempted_count = 0;
+
+  // A fiber the deadline cut off mid-flight last call is owed an
+  // exclusive resume: nothing else may step until it reaches its own
+  // yield, so no sibling ever observes its half-finished work.
+  if (preempted_fiber) {
+    auto it = std::find(active_fibers.begin(), active_fibers.end(), preempted_fiber);
+    if (it == active_fibers.end()) {
+      preempted_fiber = nullptr; // it died elsewhere; nothing owed
+    } else {
+      Fiber *f = preempted_fiber;
+      StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
+      if (res == StepResult::Preempted) {
+        return 1; // still not at a yield point — keep its exclusivity
+      }
+      preempted_fiber = nullptr;
+      if (res == StepResult::Completed || res == StepResult::Error) {
+        active_fibers.erase(std::find(active_fibers.begin(), active_fibers.end(), f));
+        delete f;
+      }
+      // it yielded (or finished) — the round may proceed below
+    }
+  }
+
   for (size_t i = 0; i < active_fibers.size(); ) {
+    // Deadline already spent: don't start another fiber against it
+    // (its first check is 1024 instructions in — it would overshoot).
+    if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
     Fiber *f = active_fibers[i];
-    StepResult res = step_fiber(*f, instructions_per_fiber);
+    StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
     if (res == StepResult::Completed || res == StepResult::Error) {
       active_fibers.erase(active_fibers.begin() + i);
       delete f;
+    } else if (res == StepResult::Preempted) {
+      // First preemption ends the round: this fiber takes the exclusive-
+      // resume slot, and no sibling may step past it — under an
+      // instruction cap this serializes progress into atomic inter-yield
+      // sections rather than interleaving mid-flight fibers (the old,
+      // unsound behavior), and under a deadline the budget is spent
+      // anyway.
+      ++preempted_count;
+      preempted_fiber = f;
+      break;
     } else {
       ++i;
     }
   }
+  return preempted_count;
 }
 
 // Case-insensitive three-way compare, shared by the string-ci*? family.
@@ -2246,12 +2311,19 @@ void VM::init_primitives() {
   };
   def_global("active-fibers-count", heap.make_subr("active-fibers-count", subr_active_count, 0, 0));
 
+  // (run-fibers [max-rounds]) — pump the scheduler until every active
+  // fiber completes, or for at most max-rounds full rounds. Each round
+  // steps each fiber to its own (yield)/completion/error — never an
+  // arbitrary instruction boundary, which is the atomicity Scheme code
+  // gets to rely on (the yield points are the lock boundaries; there are
+  // no locks because none are needed). The optional argument counts
+  // ROUNDS — a unit a Scheme program can reason about — not instructions,
+  // which it never could. Unbounded by default: a fiber that never
+  // yields is the program's bug, same as any other infinite loop.
   auto subr_run_fibers = [](VM &vm, uint32_t argc, Value *args) -> Value {
-    size_t max_steps = argc > 0 ? static_cast<size_t>(args[0].as_real()) : 100000;
-    size_t total = 0;
-    while (!vm.active_fibers.empty() && total < max_steps) {
-      vm.step_all_active_fibers(100);
-      total += 100;
+    size_t max_rounds = argc > 0 ? static_cast<size_t>(args[0].as_real()) : VM::UNBOUNDED;
+    for (size_t round = 0; !vm.active_fibers.empty() && round < max_rounds; ++round) {
+      vm.step_all_active_fibers();
     }
     return Value::from_int(static_cast<int32_t>(vm.active_fibers.size()));
   };

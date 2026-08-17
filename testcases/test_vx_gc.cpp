@@ -20,7 +20,7 @@ static Value eval_scheme(VM &vm, const std::string &code) {
   fiber.stack.resize(frame_slots, Value::unspecified());
   fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-  VM::StepResult res = vm.step_fiber(fiber, 100000000);
+  VM::StepResult res = vm.step_fiber(fiber);
   if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
     std::cerr << "Runtime Error: " << fiber.error_message << std::endl;
     assert(false);

@@ -152,7 +152,13 @@
 
     if (isWasmReady && fibersRunning) {
       try {
-        const hasMore = vxsStepFibers(2500);
+        // 0 = default scheduling: every fiber runs to its own (yield)
+        // under a shared ~8ms wall-clock backstop inside the VM. The
+        // old positive-number form (an instruction cap per fiber) is
+        // debug-only — it preempts fibers at boundaries they didn't
+        // choose, which is exactly what the VM now refuses to disguise
+        // as normal yielding.
+        const hasMore = vxsStepFibers(0);
         const activeCount = vxsActiveFibersCount();
         tagFibers.textContent = `${activeCount} Active Fibers`;
         if (activeCount > 0) {
