@@ -13,6 +13,7 @@
 (load "testcases/suite/03_scoping.scm")
 (load "testcases/suite/04_control.scm")
 (load "testcases/suite/05_gc_stress.scm")
+(load "testcases/suite/06_conditions.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")
