@@ -227,14 +227,19 @@ private:
     return result;
   }
 
-  // [e1 e2 ...] desugars to a (vector e1 e2 ...) call form, NOT a literal
-  // ObjVector like read_vector() below builds for #(...) — deliberately:
-  // Clojure-style bracket vectors evaluate their elements when used as an
-  // expression (e.g. `[(v 1) (:y a)]`), unlike R4RS's self-evaluating
-  // #(...) vectors. The compiler's `quote`/`quasiquote` handling
-  // recognizes (vector ...)-headed lists specially and materializes a
-  // real ObjVector out of them at quote time instead of leaving them as
-  // an inert call form — see quote_materialize in vx_compiler.h.
+  // [e1 e2 ...] desugars to a (%bracket-vector e1 e2 ...) call form, NOT a
+  // literal ObjVector like read_vector() below builds for #(...) —
+  // deliberately: Clojure-style bracket vectors evaluate their elements
+  // when used as an expression (e.g. `[(v 1) (:y a)]`), unlike R4RS's
+  // self-evaluating #(...) vectors. %bracket-vector is a reserved alias
+  // for the `vector` procedure (see vx_vm.cpp) rather than the symbol
+  // `vector` itself, so that a user's own quoted list headed by the
+  // ordinary symbol `vector` (e.g. `'vector`, `'(vector 1 2)`) can't be
+  // confused for a desugared bracket form. The compiler's
+  // `quote`/`quasiquote`/`do`/`let` handling recognizes
+  // (%bracket-vector ...)-headed lists specially and materializes a real
+  // ObjVector (or binding list) out of them instead of leaving them as an
+  // inert call form — see quote_materialize in vx_compiler.h.
   Value read_bracket_vector() {
     advance(); // '['
     skip_whitespace_and_comments();
@@ -251,11 +256,11 @@ private:
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
       list = vm.heap.cons(*it, list);
     }
-    Value vec_sym = Value::from_symbol_id(vm.intern("vector"));
+    Value vec_sym = Value::from_symbol_id(vm.intern("%bracket-vector"));
     return vm.heap.cons(vec_sym, list);
   }
 
-  // {k1 v1 ...} desugars to a (hash-map k1 v1 ...) call form — same
+  // {k1 v1 ...} desugars to a (%brace-map k1 v1 ...) call form — same
   // reasoning as read_bracket_vector above.
   Value read_brace_map() {
     advance(); // '{'
@@ -273,7 +278,7 @@ private:
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
       list = vm.heap.cons(*it, list);
     }
-    Value map_sym = Value::from_symbol_id(vm.intern("hash-map"));
+    Value map_sym = Value::from_symbol_id(vm.intern("%brace-map"));
     return vm.heap.cons(map_sym, list);
   }
 
