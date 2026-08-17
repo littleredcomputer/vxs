@@ -66,7 +66,16 @@ enum Opcode : uint8_t {
   OP_CLOSURE,
   OP_FUTURE,
   OP_TOUCH,
-  OP_YIELD
+  OP_YIELD,
+
+  // unwind-protect support: push a cleanup closure onto the fiber's
+  // winder list / pop it back onto the operand stack (to be called).
+  // The winder list lives on the Fiber — not the C++ stack — which is
+  // what makes (yield) inside a protected body legal: pending cleanups
+  // are fiber state and survive suspension like everything else the
+  // fiber owns.
+  OP_PUSH_WINDER,
+  OP_POP_WINDER
 };
 
 //=============================================================================
@@ -188,6 +197,16 @@ struct Fiber {
   std::deque<CallFrame> frames;   // single-element pointer stability, see SlabStack comment
   Value result;
   std::string error_message;
+
+  // Pending unwind-protect cleanups (innermost last). Deliberately fiber
+  // state rather than C++-stack state: a protected body may (yield) and
+  // the cleanups outlive the suspension; escape continuations and fiber
+  // errors run them on the way out (see step_fiber / call/cc's catch).
+  // A fiber DISCARDED while suspended (vxs_clear_fibers) does NOT run
+  // its winders — that is our custodian moment: teardown is explicit,
+  // loud, and not a control transfer. Tying cleanup to fiber liveness
+  // would be the guardian/finalizer tar pit by another name.
+  std::vector<Value> winders;
 
   // Continuation snapshot for call/cc
   std::vector<Value> saved_continuation;
@@ -485,6 +504,18 @@ public:
 
   StepResult step_fiber(Fiber &f, size_t max_instructions = UNBOUNDED,
                         std::chrono::steady_clock::time_point deadline = NO_DEADLINE);
+
+  // Pops and runs f's pending unwind-protect cleanups, innermost first,
+  // down to (not including) index down_to. Used on the involuntary exit
+  // paths: a fiber entering Error state (step_fiber), and an escape
+  // continuation unwinding out of protected extents (call/cc's catch
+  // runs the winders the discarded frames left behind; step_fiber runs
+  // them for an out-of-extent escape leaving the fiber entirely).
+  // Normal exits don't come here — the compiled OP_POP_WINDER sequence
+  // runs the cleanup inline. A cleanup that itself escapes or errors
+  // abandons the remaining winders (CL's unwind-protect permits the
+  // same); an erroring cleanup does not clobber the original error.
+  void run_pending_winders(Fiber &f, size_t down_to);
 
   // Steps every active fiber, each to its own yield/completion/error —
   // except under the shared wall-clock budget, computed once up front:
