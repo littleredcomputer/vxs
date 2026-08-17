@@ -347,10 +347,18 @@ struct VM {
     if (closure->is_variadic) {
       if (args.size() < closure->arity) {
         last_error = "Variadic closure: expected at least " + std::to_string(closure->arity) + " args";
+        if (current_fiber) {
+          current_fiber->state = Fiber::State::Error;
+          current_fiber->error_message = "[VM Error] " + last_error;
+        }
         return Value::unspecified();
       }
     } else if (args.size() != closure->arity) {
       last_error = "Closure: expected " + std::to_string(closure->arity) + " args, got " + std::to_string(args.size());
+      if (current_fiber) {
+        current_fiber->state = Fiber::State::Error;
+        current_fiber->error_message = "[VM Error] " + last_error;
+      }
       return Value::unspecified();
     }
 

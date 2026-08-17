@@ -1529,6 +1529,52 @@ void VM::init_primitives() {
   };
   def_global("apply", heap.make_subr("apply", subr_apply, 2, UINT32_MAX));
 
+  auto subr_values = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    // A single value is returned bare, not wrapped — see
+    // Heap::make_multivalue's comment. Ordinary code calling an ordinary
+    // procedure (which implicitly "returns one value") never needs to
+    // know values exists at all.
+    if (argc == 1) return args[0];
+    return vm.heap.make_multivalue(std::vector<Value>(args, args + argc));
+  };
+  def_global("values", heap.make_subr("values", subr_values, 0, UINT32_MAX));
+
+  auto subr_call_with_values = [](VM &vm, uint32_t, Value *args) -> Value {
+    Value producer = args[0];
+    Value consumer = args[1];
+    Value result = Value::unspecified();
+    vm.push_temp_root(&result);
+    if (Heap::is_subr(producer)) {
+      result = vm.call_subr(producer.as_ptr<ObjSubr>(), 0, nullptr);
+    } else if (Heap::is_closure(producer)) {
+      result = vm.call_closure(producer.as_ptr<ObjClosure>(), {});
+    }
+    std::vector<Value> consumer_args;
+    if (Heap::is_multivalue(result)) {
+      ObjVector *ov = result.as_ptr<ObjVector>();
+      consumer_args.assign(ov->data, ov->data + ov->size);
+    } else {
+      consumer_args.push_back(result);
+    }
+    vm.pop_temp_root();
+    if (Heap::is_subr(consumer)) {
+      ObjSubr *subr = consumer.as_ptr<ObjSubr>();
+      uint32_t n = static_cast<uint32_t>(consumer_args.size());
+      if (n < subr->min_args || n > subr->max_args) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] call-with-values: consumer expected a different number of values, got " + std::to_string(n);
+        return Value::unspecified();
+      }
+      return vm.call_subr(subr, n, consumer_args.data());
+    }
+    if (Heap::is_closure(consumer)) {
+      return vm.call_closure(consumer.as_ptr<ObjClosure>(), consumer_args);
+    }
+    return Value::unspecified();
+  };
+  def_global("call-with-values", heap.make_subr("call-with-values", subr_call_with_values, 2, 2));
+
   auto subr_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc < 2) return Value::nil();
     Value fn = args[0];
@@ -1615,14 +1661,31 @@ void VM::init_primitives() {
         }
         cur = Heap::cdr(cur);
       }
+      // A proper list's walk always ends at nil; anything else (a vector,
+      // an improper/dotted tail, ...) means the argument was never a list
+      // to begin with, rather than "an empty one" — for-each only walks
+      // lists (see vector-for-each/string-for-each for the vector/string
+      // equivalents), so make that loud instead of quietly doing nothing.
+      if (!cur.is_nil()) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] for-each: not a proper list, got " + vm.format_value(args[1]);
+      }
       return Value::unspecified();
     }
     // N-ary for-each
     std::vector<Value> lists(args + 1, args + argc);
     while (true) {
+      bool any_ended = false;
       for (Value l : lists) {
-        if (!Heap::is_cons(l)) return Value::unspecified();
+        if (!Heap::is_cons(l)) {
+          any_ended = true;
+          if (!l.is_nil()) {
+            vm.current_fiber->state = Fiber::State::Error;
+            vm.current_fiber->error_message = "[VM Error] for-each: not a proper list, got " + vm.format_value(l);
+          }
+        }
       }
+      if (any_ended) return Value::unspecified();
       std::vector<Value> step_args;
       step_args.reserve(lists.size());
       for (size_t i = 0; i < lists.size(); ++i) {
@@ -1769,6 +1832,37 @@ void VM::init_primitives() {
 
   def_global("inexact?", heap.make_subr("inexact?", [](VM &, uint32_t, Value *args) -> Value {
     return Value::from_bool(args[0].is_double());
+  }, 1, 1));
+
+  // R7RS additions: exactness/integer-ness is fully determined by the
+  // int/double tag in this system (no separate rational/bignum tower),
+  // so exact-integer? is just is_int() — an int can't help being both.
+  def_global("exact-integer?", heap.make_subr("exact-integer?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(args[0].is_int());
+  }, 1, 1));
+
+  def_global("nan?", heap.make_subr("nan?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(args[0].is_double() && std::isnan(args[0].as_double()));
+  }, 1, 1));
+
+  def_global("infinite?", heap.make_subr("infinite?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(args[0].is_double() && std::isinf(args[0].as_double()));
+  }, 1, 1));
+
+  def_global("finite?", heap.make_subr("finite?", [](VM &, uint32_t, Value *args) -> Value {
+    if (args[0].is_int()) return Value::boolean_true();
+    return Value::from_bool(args[0].is_double() && std::isfinite(args[0].as_double()));
+  }, 1, 1));
+
+  def_global("square", heap.make_subr("square", [](VM &, uint32_t, Value *args) -> Value {
+    if (args[0].is_int()) {
+      int64_t v = args[0].as_int();
+      int64_t sq = v * v;
+      if (sq >= INT32_MIN && sq <= INT32_MAX) return Value::from_int(static_cast<int32_t>(sq));
+      return Value::from_double(static_cast<double>(sq));
+    }
+    double d = args[0].as_real();
+    return Value::from_double(d * d);
   }, 1, 1));
 
   def_global("string?", heap.make_subr("string?", [](VM &, uint32_t, Value *args) -> Value {
@@ -2268,17 +2362,6 @@ void VM::init_primitives() {
     }
     vm.pop_temp_root();
     return res;
-  }, 1, 1));
-
-  def_global("list->string", heap.make_subr("list->string", [](VM &vm, uint32_t, Value *args) -> Value {
-    std::string s;
-    Value cur = args[0];
-    while (Heap::is_cons(cur)) {
-      Value c = Heap::car(cur);
-      if (c.is_char()) s += c.as_char();
-      cur = Heap::cdr(cur);
-    }
-    return vm.heap.make_string(s);
   }, 1, 1));
 
   def_global("void", heap.make_subr("void", [](VM &, uint32_t, Value *) -> Value {
@@ -2877,6 +2960,124 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 2, 2));
 
+  // R7RS's answer to "why won't for-each/map walk a vector": separate,
+  // type-specific procedures rather than generalizing for-each/map
+  // themselves (see yesterday's for-each fix — vx-scheme follows
+  // mainstream Scheme here, not Clojure's single-seq-abstraction model).
+  auto subr_vector_for_each = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value fn = args[0];
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!Heap::is_vector(args[i])) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-for-each: not a vector, got " + vm.format_value(args[i]);
+        return Value::unspecified();
+      }
+    }
+    uint32_t len = args[1].as_ptr<ObjVector>()->size;
+    for (uint32_t i = 2; i < argc; ++i) len = std::min(len, args[i].as_ptr<ObjVector>()->size);
+    std::vector<Value> step_args(argc - 1);
+    for (uint32_t i = 0; i < len; ++i) {
+      for (uint32_t k = 1; k < argc; ++k) step_args[k - 1] = args[k].as_ptr<ObjVector>()->get(i);
+      if (Heap::is_subr(fn)) {
+        vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
+      } else if (Heap::is_closure(fn)) {
+        vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
+      }
+    }
+    return Value::unspecified();
+  };
+  def_global("vector-for-each", heap.make_subr("vector-for-each", subr_vector_for_each, 2, UINT32_MAX));
+
+  auto subr_vector_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value fn = args[0];
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!Heap::is_vector(args[i])) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] vector-map: not a vector, got " + vm.format_value(args[i]);
+        return Value::unspecified();
+      }
+    }
+    uint32_t len = args[1].as_ptr<ObjVector>()->size;
+    for (uint32_t i = 2; i < argc; ++i) len = std::min(len, args[i].as_ptr<ObjVector>()->size);
+    // `out`'s underlying ObjVector, once rooted, has a stable address for
+    // the rest of this call (the collector never moves live objects) —
+    // safe to cache `ov` across the loop the same way map/filter's
+    // result-chain accumulators are protected via push_temp_root.
+    Value out = vm.heap.make_vector(len);
+    vm.push_temp_root(&out);
+    ObjVector *ov = out.as_ptr<ObjVector>();
+    std::vector<Value> step_args(argc - 1);
+    for (uint32_t i = 0; i < len; ++i) {
+      for (uint32_t k = 1; k < argc; ++k) step_args[k - 1] = args[k].as_ptr<ObjVector>()->get(i);
+      Value res = Value::unspecified();
+      if (Heap::is_subr(fn)) {
+        res = vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
+      } else if (Heap::is_closure(fn)) {
+        res = vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
+      }
+      ov->set(i, res);
+    }
+    vm.pop_temp_root();
+    return out;
+  };
+  def_global("vector-map", heap.make_subr("vector-map", subr_vector_map, 2, UINT32_MAX));
+
+  auto subr_string_for_each = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value fn = args[0];
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!Heap::is_string(args[i])) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] string-for-each: not a string, got " + vm.format_value(args[i]);
+        return Value::unspecified();
+      }
+    }
+    uint32_t len = args[1].as_ptr<ObjString>()->length;
+    for (uint32_t i = 2; i < argc; ++i) len = std::min(len, args[i].as_ptr<ObjString>()->length);
+    std::vector<Value> step_args(argc - 1);
+    for (uint32_t i = 0; i < len; ++i) {
+      for (uint32_t k = 1; k < argc; ++k) step_args[k - 1] = Value::from_char(args[k].as_ptr<ObjString>()->chars[i]);
+      if (Heap::is_subr(fn)) {
+        vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
+      } else if (Heap::is_closure(fn)) {
+        vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
+      }
+    }
+    return Value::unspecified();
+  };
+  def_global("string-for-each", heap.make_subr("string-for-each", subr_string_for_each, 2, UINT32_MAX));
+
+  auto subr_string_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value fn = args[0];
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (!Heap::is_string(args[i])) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] string-map: not a string, got " + vm.format_value(args[i]);
+        return Value::unspecified();
+      }
+    }
+    uint32_t len = args[1].as_ptr<ObjString>()->length;
+    for (uint32_t i = 2; i < argc; ++i) len = std::min(len, args[i].as_ptr<ObjString>()->length);
+    // No GC-safety concern building this up as a plain std::string —
+    // unlike vector-map's output, it isn't Scheme-heap-visible (and thus
+    // isn't at risk from an intervening collection) until make_string
+    // constructs the real ObjString at the very end.
+    std::string result;
+    result.reserve(len);
+    std::vector<Value> step_args(argc - 1);
+    for (uint32_t i = 0; i < len; ++i) {
+      for (uint32_t k = 1; k < argc; ++k) step_args[k - 1] = Value::from_char(args[k].as_ptr<ObjString>()->chars[i]);
+      Value res = Value::unspecified();
+      if (Heap::is_subr(fn)) {
+        res = vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
+      } else if (Heap::is_closure(fn)) {
+        res = vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
+      }
+      if (res.is_char()) result += res.as_char();
+    }
+    return vm.heap.make_string(result);
+  };
+  def_global("string-map", heap.make_subr("string-map", subr_string_map, 2, UINT32_MAX));
+
   def_global("list->string", heap.make_subr("list->string", [](VM &vm, uint32_t, Value *args) -> Value {
     std::string s;
     Value cur = args[0];
@@ -2903,6 +3104,19 @@ void VM::init_primitives() {
   // Initialize force as a pure Scheme procedure to avoid C++ recursion during deep lazy streams
   {
     Reader r(*this, "(define (force p) (if (procedure? p) (p) p))");
+    Value form = r.read_form();
+    Compiler comp(*this);
+    ObjClosure *cl = comp.compile_top_level(form);
+    call_closure(cl, {});
+  }
+
+  // assert as a defmacro (not a subr) so the failing *expression* — not
+  // just its runtime-false value — shows up in the error, the way most
+  // Lisps' assert does. Not an R7RS procedure (R7RS doesn't standardize
+  // one at all), but a common enough extension across Schemes that it's
+  // worth having in the "things people reflexively reach for" sense.
+  {
+    Reader r(*this, "(defmacro (assert expr) `(if (not ,expr) (error 'assert \"assertion failed:\" ',expr)))");
     Value form = r.read_form();
     Compiler comp(*this);
     ObjClosure *cl = comp.compile_top_level(form);
