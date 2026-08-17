@@ -1,11 +1,8 @@
-(define gf-prefix
-  (cond
-   ((eq? (scheme-implementation-type) 'scm) "good/")
-   ((eq? (scheme-implementation-platform) 'VxWorks) "vx-good")
-   ((and (eq? (scheme-implementation-type) 'vx-scheme)
-         (eq? (vx-scheme-implementation-type) 'vm)) "c-good/")
-   ((eq? (scheme-implementation-platform) 'win32) "w32-good/")
-   (else "good/")))
+;; This harness once picked its reference-output directory (good/,
+;; vx-good/, c-good/, w32-good/) by probing scheme-implementation-type/
+;; -platform — a relic of targeting SCM, VxWorks, and Win32 builds
+;; alongside our own. One engine, one set of reference files now.
+(define gf-prefix "good/")
 
 ;; some of our testcases use notation like 'bitwise-and' for 'logand';
 ;; we supply the needed bindings
