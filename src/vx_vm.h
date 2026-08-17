@@ -13,6 +13,7 @@
 #include <sstream>
 #include <cmath>
 #include <numeric>
+#include <stdexcept>
 
 namespace vxs {
 
@@ -211,6 +212,27 @@ struct Fiber {
   }
 };
 
+// Escape-only ("bounded") continuations: call-with-current-continuation
+// creates a fresh, otherwise-ordinary ObjSubr per invocation, and its own
+// identity (a raw pointer, not a separately-tracked token) is what a
+// throw of this type carries to identify which invocation it belongs to.
+// A C++ exception is what makes this work across arbitrarily nested
+// run_dispatch/call_closure/native-subr C++ call frames (map, for-each,
+// filter, ...) for free, via ordinary stack unwinding — the same
+// property that makes call/cc awkward for anything beyond escape-only
+// use is exactly what we're not attempting here. If nothing catches it
+// (the escape procedure outlived the call/cc that created it and was
+// invoked again later), it surfaces at the top level as a plain runtime
+// error instead of crashing, since it derives from std::exception and
+// main.cpp's top-level eval_string already catches std::exception.
+struct ContinuationEscape : std::runtime_error {
+  Obj *target;
+  Value value;
+  ContinuationEscape(Obj *t, Value v)
+      : std::runtime_error("escape continuation invoked outside its dynamic extent"),
+        target(t), value(v) {}
+};
+
 //=============================================================================
 // Virtual Machine & Global Environment
 //=============================================================================
@@ -225,6 +247,32 @@ struct VM {
   // Active concurrent fibers
   std::vector<Fiber *> active_fibers;
   Fiber *current_fiber;
+
+  // The ObjSubr currently executing — NativeSubrFn's signature (VM&,
+  // argc, args) doesn't otherwise give a subr body any way to know which
+  // ObjSubr instance it's being invoked as. Needed for escape
+  // continuations: every call/cc invocation creates its own otherwise-
+  // identical escape-procedure ObjSubr, distinguished only by identity,
+  // and the shared body needs to read that identity back out to know
+  // which continuation it represents. Set/restored around every subr
+  // call in run_dispatch (both OP_CALL and OP_TAIL_CALL) and by
+  // call_subr below, for the many native subrs (map, for-each, filter,
+  // apply, with-output-to-file, ...) that invoke another subr's fn
+  // directly rather than going through the bytecode dispatch loop.
+  ObjSubr *current_subr = nullptr;
+
+  // Invokes a native subr with current_subr correctly set for the
+  // duration — see the field comment above for why this matters
+  // (escape continuations identify themselves via current_subr).
+  // Centralizes the save/set/restore dance so it can't be forgotten at
+  // one of the many direct-invocation call sites.
+  inline Value call_subr(ObjSubr *subr, uint32_t argc, Value *args) {
+    ObjSubr *prev_subr = current_subr;
+    current_subr = subr;
+    Value res = subr->fn(*this, argc, args);
+    current_subr = prev_subr;
+    return res;
+  }
 
   // Ephemeral GC roots
   std::vector<Value *> temp_roots;

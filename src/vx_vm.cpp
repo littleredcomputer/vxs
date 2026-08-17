@@ -642,7 +642,7 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
             for (uint8_t i = 0; i < argc; ++i) args_scratch[i] = f.stack[args_start + i];
             args = args_scratch.data();
           }
-          Value res = subr->fn(*this, argc, args);
+          Value res = call_subr(subr, argc, args);
           if (f.state == Fiber::State::Error) return StepResult::Error;
           f.stack.resize(f.stack.size() - argc - 1);
           f.push(res);
@@ -773,7 +773,7 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
             for (uint8_t i = 0; i < argc; ++i) args_scratch[i] = f.stack[args_start + i];
             args = args_scratch.data();
           }
-          Value res = subr->fn(*this, argc, args);
+          Value res = call_subr(subr, argc, args);
           if (f.state == Fiber::State::Error) {
             return StepResult::Error;
           }
@@ -1023,6 +1023,25 @@ static std::unique_ptr<std::ifstream> open_input_with_fallback(const std::string
   if (!ifs->is_open()) return nullptr;
   return ifs;
 }
+
+// RAII guards for with-output-to-file / call-with-*-file: escape
+// continuations (call/cc) make it possible for a thunk to unwind past
+// these via a C++ exception now, so "restore/close after the call"
+// plain statements would silently skip on that path — the port would
+// stay open, or current_out_port would stay pointed at a closed port.
+struct ScopedOutPortRebind {
+  VM &vm;
+  Value prev;
+  ScopedOutPortRebind(VM &v, Value new_port) : vm(v), prev(vm.current_out_port) {
+    vm.current_out_port = new_port;
+  }
+  ~ScopedOutPortRebind() { vm.current_out_port = prev; }
+};
+
+struct ScopedPortCloser {
+  Value port;
+  ~ScopedPortCloser() { port.as_ptr<ObjPort>()->close_port(); }
+};
 
 // Builtin primitive registration
 void VM::init_primitives() {
@@ -1492,7 +1511,7 @@ void VM::init_primitives() {
             "[VM Error] " + std::string(subr->name) + ": wrong number of arguments";
         return Value::unspecified();
       }
-      return subr->fn(vm, n, flat_args.data());
+      return vm.call_subr(subr, n, flat_args.data());
     }
     if (Heap::is_closure(fn)) {
       return vm.call_closure(fn.as_ptr<ObjClosure>(), flat_args);
@@ -1511,7 +1530,7 @@ void VM::init_primitives() {
         Value elem = Heap::car(cur);
         Value out = Value::nil();
         if (Heap::is_subr(fn)) {
-          out = fn.as_ptr<ObjSubr>()->fn(vm, 1, &elem);
+          out = vm.call_subr(fn.as_ptr<ObjSubr>(), 1, &elem);
         } else if (Heap::is_closure(fn)) {
           out = vm.call_closure(fn.as_ptr<ObjClosure>(), {elem});
         }
@@ -1539,7 +1558,7 @@ void VM::init_primitives() {
       }
       Value out = Value::nil();
       if (Heap::is_subr(fn)) {
-        out = fn.as_ptr<ObjSubr>()->fn(vm, static_cast<uint32_t>(step_args.size()), step_args.data());
+        out = vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
       } else if (Heap::is_closure(fn)) {
         out = vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
       }
@@ -1562,7 +1581,7 @@ void VM::init_primitives() {
       while (Heap::is_cons(cur)) {
         Value elem = Heap::car(cur);
         if (Heap::is_subr(fn)) {
-          fn.as_ptr<ObjSubr>()->fn(vm, 1, &elem);
+          vm.call_subr(fn.as_ptr<ObjSubr>(), 1, &elem);
         } else if (Heap::is_closure(fn)) {
           vm.call_closure(fn.as_ptr<ObjClosure>(), {elem});
         }
@@ -1583,7 +1602,7 @@ void VM::init_primitives() {
         lists[i] = Heap::cdr(lists[i]);
       }
       if (Heap::is_subr(fn)) {
-        fn.as_ptr<ObjSubr>()->fn(vm, static_cast<uint32_t>(step_args.size()), step_args.data());
+        vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
       } else if (Heap::is_closure(fn)) {
         vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
       }
@@ -1650,7 +1669,7 @@ void VM::init_primitives() {
       Value elem = Heap::car(cur);
       Value match = Value::boolean_false();
       if (Heap::is_subr(fn)) {
-        match = fn.as_ptr<ObjSubr>()->fn(vm, 1, &elem);
+        match = vm.call_subr(fn.as_ptr<ObjSubr>(), 1, &elem);
       } else if (Heap::is_closure(fn)) {
         match = vm.call_closure(fn.as_ptr<ObjClosure>(), {elem});
       }
@@ -1911,18 +1930,15 @@ void VM::init_primitives() {
     auto ofs = std::make_unique<std::ofstream>(filename);
     if (!ofs->is_open()) return Value::unspecified();
     Value port = vm.heap.make_output_file_port(std::move(ofs));
-    Value prev = vm.current_out_port;
-    vm.current_out_port = port;
+    ScopedOutPortRebind rebind(vm, port);
+    ScopedPortCloser closer{port};
     Value thunk = args[1];
-    Value res = Value::unspecified();
     if (Heap::is_closure(thunk)) {
-      res = vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
+      return vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
     } else if (Heap::is_subr(thunk)) {
-      res = thunk.as_ptr<ObjSubr>()->fn(vm, 0, nullptr);
+      return vm.call_subr(thunk.as_ptr<ObjSubr>(), 0, nullptr);
     }
-    vm.current_out_port = prev;
-    port.as_ptr<ObjPort>()->close_port();
-    return res;
+    return Value::unspecified();
   }, 2, 2));
 
   def_global("open-input-file", heap.make_subr("open-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
@@ -1944,15 +1960,14 @@ void VM::init_primitives() {
     auto ifs = open_input_with_fallback(std::string(args[0].as_ptr<ObjString>()->view()));
     if (!ifs) return Value::boolean_false();
     Value port = vm.heap.make_input_file_port(std::move(ifs));
+    ScopedPortCloser closer{port};
     Value proc = args[1];
-    Value res = Value::unspecified();
     if (Heap::is_closure(proc)) {
-      res = vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
+      return vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
     } else if (Heap::is_subr(proc)) {
-      res = proc.as_ptr<ObjSubr>()->fn(vm, 1, &port);
+      return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &port);
     }
-    port.as_ptr<ObjPort>()->close_port();
-    return res;
+    return Value::boolean_false();
   }, 2, 2));
 
   def_global("call-with-output-file", heap.make_subr("call-with-output-file", [](VM &vm, uint32_t, Value *args) -> Value {
@@ -1960,15 +1975,14 @@ void VM::init_primitives() {
     auto ofs = std::make_unique<std::ofstream>(std::string(args[0].as_ptr<ObjString>()->view()));
     if (!ofs->is_open()) return Value::boolean_false();
     Value port = vm.heap.make_output_file_port(std::move(ofs));
+    ScopedPortCloser closer{port};
     Value proc = args[1];
-    Value res = Value::unspecified();
     if (Heap::is_closure(proc)) {
-      res = vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
+      return vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
     } else if (Heap::is_subr(proc)) {
-      res = proc.as_ptr<ObjSubr>()->fn(vm, 1, &port);
+      return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &port);
     }
-    port.as_ptr<ObjPort>()->close_port();
-    return res;
+    return Value::boolean_false();
   }, 2, 2));
 
   def_global("read-char", heap.make_subr("read-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
@@ -2848,7 +2862,7 @@ void VM::init_primitives() {
     if (Heap::is_closure(thunk)) {
       res = vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
     } else if (Heap::is_subr(thunk)) {
-      res = thunk.as_ptr<ObjSubr>()->fn(vm, 0, nullptr);
+      res = vm.call_subr(thunk.as_ptr<ObjSubr>(), 0, nullptr);
     }
     auto t1 = std::chrono::high_resolution_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
@@ -2925,13 +2939,57 @@ void VM::init_primitives() {
     return Value::from_bool(Heap::is_closure(args[0]));
   }, 1, 1));
 
-  // Escape Continuations (call/cc) - Temporarily disabled pending continuation stack-copying refactoring
-  auto subr_call_cc = [](VM &vm, uint32_t, Value *) -> Value {
-    if (vm.current_fiber) {
-      vm.current_fiber->state = Fiber::State::Error;
-      vm.current_fiber->error_message = "[VM Error] call/cc is temporarily disabled pending continuation refactoring";
+  // Escape-only ("bounded") continuations. General re-entrant call/cc is
+  // deliberately not supported (see vx_vm.h's ContinuationEscape comment
+  // and ARCHITECTURE_ARC.md, Milestone 7) — the escape procedure below
+  // may only be invoked to unwind outward, and only within the dynamic
+  // extent of this call; invoking it later throws all the way to the
+  // top level as an ordinary runtime error instead of resuming anything.
+  auto subr_call_cc = [](VM &vm, uint32_t, Value *args) -> Value {
+    Value proc = args[0];
+    if (!Heap::is_closure(proc) && !Heap::is_subr(proc)) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message = "[VM Error] call/cc: not a procedure";
+      }
+      return Value::unspecified();
     }
-    return Value::unspecified();
+
+    // A fresh ObjSubr per invocation; its own address is its identity
+    // (see ContinuationEscape / VM::current_subr in vx_vm.h) — no
+    // separate token bookkeeping needed.
+    ObjSubr *escape = vm.heap.allocate<ObjSubr>(
+        "continuation",
+        [](VM &vm, uint32_t argc, Value *args) -> Value {
+          throw ContinuationEscape(vm.current_subr, argc > 0 ? args[0] : Value::unspecified());
+        },
+        0, 1);
+    Value escape_val = Value::from_ptr(escape);
+
+    // A C++ exception unwinds the Scheme-level f.stack/f.frames' backing
+    // vectors/deques (see call_closure's use of run_dispatch throughout
+    // this file, and OP_TAIL_CALL and OP_CALL). C++ exception unwinding
+    // only touches the *C++* call stack, not those — restore them
+    // explicitly on the caught path so the OP_CALL that invoked this
+    // very subr sees the same stack shape it would have on an ordinary
+    // (non-escaping) return.
+    Fiber *f = vm.current_fiber;
+    size_t saved_stack_size = f ? f->stack.size() : 0;
+    size_t saved_frames_size = f ? f->frames.size() : 0;
+
+    try {
+      if (Heap::is_closure(proc)) {
+        return vm.call_closure(proc.as_ptr<ObjClosure>(), {escape_val});
+      }
+      return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &escape_val);
+    } catch (ContinuationEscape &e) {
+      if (e.target != static_cast<Obj *>(escape)) throw; // not ours — keep unwinding
+      if (f) {
+        f->stack.resize(saved_stack_size);
+        f->frames.resize(saved_frames_size);
+      }
+      return e.value;
+    }
   };
   def_global("call-with-current-continuation", heap.make_subr("call-with-current-continuation", subr_call_cc, 1, 1));
   def_global("call/cc", heap.make_subr("call/cc", subr_call_cc, 1, 1));
