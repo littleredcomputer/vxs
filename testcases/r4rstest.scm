@@ -1020,11 +1020,7 @@
 ;(test #f procedure? 'car)
 (test #t procedure? (lambda (x) (* x x)))
 (test #f procedure? '(lambda (x) (* x x)))
-;; Vx-Scheme deviation: call/cc is deliberately disabled (see the fiber
-;; architecture discussion — traded general re-entrant continuations for
-;; raw performance; fibers+yield cover the common generator/coroutine
-;; use case instead). Skip the handful of tests that invoke it directly.
-;(test #t call-with-current-continuation procedure?)
+(test #t call-with-current-continuation procedure?)
 (test 7 apply + (list 3 4))
 (test 7 apply (lambda (a b) (+ a b)) (list 3 4))
 (test 17 apply + 10 (list 3 4))
@@ -1042,13 +1038,11 @@
 		(for-each (lambda (i) (vector-set! v i (* i i)))
 			'(0 1 2 3 4))
 		v))
-;(test -3 call-with-current-continuation
-;		(lambda (exit)
-;		 (for-each (lambda (x) (if (negative? x) (exit x)))
-;		 	'(54 0 37 -3 245 19))
-;		#t))
-;; list-length calls call-with-current-continuation internally, so it's
-;; safe to *define* (never executed until called) but not to invoke.
+(test -3 call-with-current-continuation
+		(lambda (exit)
+		 (for-each (lambda (x) (if (negative? x) (exit x)))
+		 	'(54 0 37 -3 245 19))
+		#t))
 (define list-length
  (lambda (obj)
   (call-with-current-continuation
@@ -1057,8 +1051,8 @@
 				((pair? obj) (+ (r (cdr obj)) 1))
 				(else (return #f))))))
 	(r obj))))))
-;(test 4 list-length '(1 2 3 4))
-;(test #f list-length '(a b . c))
+(test 4 list-length '(1 2 3 4))
+(test #f list-length '(a b . c))
 (test '() map cadr '())
 
 ;;; This tests full conformance of call-with-current-continuation.  It
@@ -1224,10 +1218,16 @@
 (newline)
 (test-delay)
 (newline)
-;; Vx-Scheme deviation: call/cc is deliberately disabled (see the note at
-;; SECTION 6.9 above) — test-cont exercises full re-entrant continuations
-;; via next-leaf-generator, which needs it. The file's own framing above
-;; ("To fully test continuations do: (test-cont)") already treats this as
-;; optional; this file previously called it unconditionally anyway.
+;; Vx-Scheme deviation: call/cc is real but escape-only (single-shot,
+;; upward unwind via a C++ exception under the hood — see
+;; ContinuationEscape in vx_vm.h) — deliberately not general re-entrant
+;; continuations. test-cont's next-leaf-generator specifically needs the
+;; re-entrant kind: it saves a continuation and invokes it again *later*,
+;; outside the call/cc that captured it, to resume mid-tree-walk — the
+;; one shape escape-only continuations exist precisely to not support.
+;; Confirmed it fails cleanly (a plain runtime error) rather than
+;; crashing. The file's own framing above ("To fully test continuations
+;; do: (test-cont)") already treats this as optional; this file
+;; previously called it unconditionally anyway.
 ;(test-cont)
 "last item in file"

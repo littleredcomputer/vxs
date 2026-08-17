@@ -47,7 +47,8 @@ test-wasm:
 test-bench: vx-scheme
 	@echo "=== RUNNING CLASSIC SCHEME BENCHMARKS ==="
 	./vx-scheme ../testcases/ack.scm
-	# ./vx-scheme ../testcases/puzzle.scm  # Paused pending continuation refactoring
+	./vx-scheme ../testcases/puzzle.scm
+	./vx-scheme ../testcases/maze.scm
 	./vx-scheme ../testcases/pi.scm
 	./vx-scheme ../testcases/sieve.scm
 	./vx-scheme ../testcases/series.scm
