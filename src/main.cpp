@@ -1,6 +1,6 @@
 //----------------------------------------------------------------------
 // vx-scheme : Modern 64-Bit NaN-Boxed Scheme Engine
-// Copyright (c) 2002-2026 Colin Smith and Antigravity contributors.
+// Copyright (c) 2002-2026 Colin Smith.
 //----------------------------------------------------------------------
 
 #include "vx_value.h"
