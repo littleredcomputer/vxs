@@ -192,6 +192,11 @@ void Heap::mark_fiber(Fiber *f) {
   for (Value v : f->saved_continuation) {
     mark_value(v);
   }
+  // Pending unwind-protect cleanups are live closures a suspended fiber
+  // will eventually call — invisible everywhere else, rooted here.
+  for (Value v : f->winders) {
+    mark_value(v);
+  }
 }
 
 void Heap::blacken_obj(Obj *obj) {
@@ -351,7 +356,39 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
     return StepResult::Completed;
   }
 
-  return run_dispatch(f, max_instructions, 0, deadline);
+  try {
+    StepResult res = run_dispatch(f, max_instructions, 0, deadline);
+    if (res == StepResult::Error) {
+      // Error is terminal for a fiber; its pending unwind-protect
+      // cleanups run now, before anyone inspects the corpse — this is
+      // what keeps e.g. with-output-to-file's redirection from
+      // outliving a crashed body.
+      run_pending_winders(f, 0);
+    }
+    return res;
+  } catch (ContinuationEscape &) {
+    // An escape targeting nothing in this fiber (invoked outside its
+    // dynamic extent) is leaving the VM entirely — run the cleanups on
+    // its way through, then let it surface as the usual top-level error.
+    run_pending_winders(f, 0);
+    throw;
+  }
+}
+
+void VM::run_pending_winders(Fiber &f, size_t down_to) {
+  Fiber::State saved_state = f.state;
+  std::string saved_error = f.error_message;
+  while (f.winders.size() > down_to) {
+    Value w = f.winders.back();
+    f.winders.pop_back();
+    if (!Heap::is_closure(w)) continue;
+    // call_closure needs a runnable fiber; the original disposition
+    // (and error message — first error wins) is restored afterward.
+    f.state = Fiber::State::Running;
+    call_closure(w.as_ptr<ObjClosure>(), {});
+  }
+  f.state = saved_state;
+  f.error_message = saved_error;
 }
 
 // The dispatch loop proper — see the declaration in vx_vm.h for how
@@ -920,6 +957,22 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         return StepResult::Yielded;
       }
 
+      case OP_PUSH_WINDER: {
+        f.winders.push_back(f.pop());
+        break;
+      }
+
+      case OP_POP_WINDER: {
+        // Back onto the operand stack; the compiler follows this with
+        // OP_CALL 0 / OP_POP so the cleanup runs inline in this very
+        // dispatch loop (yield-legal), its result discarded, the
+        // protected body's value left on top.
+        assert(!f.winders.empty() && "OP_POP_WINDER with no pending winder");
+        f.push(f.winders.back());
+        f.winders.pop_back();
+        break;
+      }
+
       case OP_FUTURE: {
         // Pop nullary lambda closure and spawn fiber
         Value closure_val = f.pop();
@@ -1091,25 +1144,6 @@ static std::unique_ptr<std::ifstream> open_input_with_fallback(const std::string
   if (!ifs->is_open()) return nullptr;
   return ifs;
 }
-
-// RAII guards for with-output-to-file / call-with-*-file: escape
-// continuations (call/cc) make it possible for a thunk to unwind past
-// these via a C++ exception now, so "restore/close after the call"
-// plain statements would silently skip on that path — the port would
-// stay open, or current_out_port would stay pointed at a closed port.
-struct ScopedOutPortRebind {
-  VM &vm;
-  Value prev;
-  ScopedOutPortRebind(VM &v, Value new_port) : vm(v), prev(vm.current_out_port) {
-    vm.current_out_port = new_port;
-  }
-  ~ScopedOutPortRebind() { vm.current_out_port = prev; }
-};
-
-struct ScopedPortCloser {
-  Value port;
-  ~ScopedPortCloser() { port.as_ptr<ObjPort>()->close_port(); }
-};
 
 // Builtin primitive registration
 void VM::init_primitives() {
@@ -2121,22 +2155,20 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 1, 2));
 
-  def_global("with-output-to-file", heap.make_subr("with-output-to-file", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (!Heap::is_string(args[0])) return Value::unspecified();
-    std::string filename = std::string(args[0].as_ptr<ObjString>()->view());
-    auto ofs = std::make_unique<std::ofstream>(filename);
-    if (!ofs->is_open()) return Value::unspecified();
-    Value port = vm.heap.make_output_file_port(std::move(ofs));
-    ScopedOutPortRebind rebind(vm, port);
-    ScopedPortCloser closer{port};
-    Value thunk = args[1];
-    if (Heap::is_closure(thunk)) {
-      return vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
-    } else if (Heap::is_subr(thunk)) {
-      return vm.call_subr(thunk.as_ptr<ObjSubr>(), 0, nullptr);
-    }
+  // %set-current-output-port! — internal-only (reserved-name convention,
+  // see %bracket-vector/%brace-map), not exported as a general Scheme
+  // mutator. Real parameter objects (make-parameter/parameterize) would
+  // be the R7RS-shaped way to expose rebindable dynamic state generally;
+  // absent those, this stays a narrow primitive that only the
+  // with-output-to-file bootstrap below calls, itself wrapped in
+  // unwind-protect for the restore-on-every-exit guarantee that used to
+  // live in ScopedOutPortRebind/ScopedPortCloser (removed — cleanup is
+  // now a language feature, not a C++ RAII pattern reinvented per call
+  // site).
+  def_global("%set-current-output-port!", heap.make_subr("%set-current-output-port!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (Heap::is_port(args[0])) vm.current_out_port = args[0];
     return Value::unspecified();
-  }, 2, 2));
+  }, 1, 1));
 
   def_global("open-input-file", heap.make_subr("open-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_string(args[0])) return Value::boolean_false();
@@ -2152,35 +2184,42 @@ void VM::init_primitives() {
     return vm.heap.make_output_file_port(std::move(ofs));
   }, 1, 1));
 
-  def_global("call-with-input-file", heap.make_subr("call-with-input-file", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (!Heap::is_string(args[0])) return Value::boolean_false();
-    auto ifs = open_input_with_fallback(std::string(args[0].as_ptr<ObjString>()->view()));
-    if (!ifs) return Value::boolean_false();
-    Value port = vm.heap.make_input_file_port(std::move(ifs));
-    ScopedPortCloser closer{port};
-    Value proc = args[1];
-    if (Heap::is_closure(proc)) {
-      return vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
-    } else if (Heap::is_subr(proc)) {
-      return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &port);
+  // with-output-to-file / call-with-input-file / call-with-output-file:
+  // bootstrapped in Scheme (same pattern as force/assert above) rather
+  // than as C++ subrs — unwind-protect now provides exactly the
+  // restore-on-every-exit guarantee these needed, so the C++-RAII
+  // version of that guarantee (ScopedOutPortRebind/ScopedPortCloser) is
+  // gone; the language has the feature natively. open-*-file returning
+  // #f on failure is unchanged, but the friendly with-*/call-with-*
+  // wrappers now signal a clear error instead of silently returning
+  // unspecified/#f — matching this session's running "no silent
+  // failures" policy (see the for-each fix).
+  {
+    Reader r(*this,
+      "(define (with-output-to-file filename thunk)"
+      "  (let ((port (open-output-file filename)))"
+      "    (if (not port) (error 'with-output-to-file \"could not open file:\" filename)"
+      "        (let ((prev (current-output-port)))"
+      "          (%set-current-output-port! port)"
+      "          (unwind-protect (thunk)"
+      "            (%set-current-output-port! prev)"
+      "            (close-output-port port))))))"
+      "(define (call-with-input-file filename proc)"
+      "  (let ((port (open-input-file filename)))"
+      "    (if (not port) (error 'call-with-input-file \"could not open file:\" filename)"
+      "        (unwind-protect (proc port) (close-input-port port)))))"
+      "(define (call-with-output-file filename proc)"
+      "  (let ((port (open-output-file filename)))"
+      "    (if (not port) (error 'call-with-output-file \"could not open file:\" filename)"
+      "        (unwind-protect (proc port) (close-output-port port)))))");
+    while (true) {
+      Value form = r.read_form();
+      if (form.is_eof()) break;
+      Compiler comp(*this);
+      ObjClosure *cl = comp.compile_top_level(form);
+      call_closure(cl, {});
     }
-    return Value::boolean_false();
-  }, 2, 2));
-
-  def_global("call-with-output-file", heap.make_subr("call-with-output-file", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (!Heap::is_string(args[0])) return Value::boolean_false();
-    auto ofs = std::make_unique<std::ofstream>(std::string(args[0].as_ptr<ObjString>()->view()));
-    if (!ofs->is_open()) return Value::boolean_false();
-    Value port = vm.heap.make_output_file_port(std::move(ofs));
-    ScopedPortCloser closer{port};
-    Value proc = args[1];
-    if (Heap::is_closure(proc)) {
-      return vm.call_closure(proc.as_ptr<ObjClosure>(), {port});
-    } else if (Heap::is_subr(proc)) {
-      return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &port);
-    }
-    return Value::boolean_false();
-  }, 2, 2));
+  }
 
   def_global("read-char", heap.make_subr("read-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
     std::istream *is = resolve_in(vm, argc, args, 0);
@@ -3332,6 +3371,7 @@ void VM::init_primitives() {
     Fiber *f = vm.current_fiber;
     size_t saved_stack_size = f ? f->stack.size() : 0;
     size_t saved_frames_size = f ? f->frames.size() : 0;
+    size_t saved_winders_size = f ? f->winders.size() : 0;
 
     try {
       if (Heap::is_closure(proc)) {
@@ -3343,6 +3383,12 @@ void VM::init_primitives() {
       if (f) {
         f->stack.resize(saved_stack_size);
         f->frames.resize(saved_frames_size);
+        // The frames just discarded may have entered unwind-protect
+        // extents whose cleanups are still pending on the winder list —
+        // run them (innermost first) now that the fiber is coherent
+        // again, before handing the escape value back. This is the
+        // "finally fires on the way out" half of the design.
+        vm.run_pending_winders(*f, saved_winders_size);
       }
       return e.value;
     }

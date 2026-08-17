@@ -435,6 +435,40 @@ private:
           return;
         }
 
+        // (unwind-protect body cleanup...) — CL semantics, honestly
+        // named: body's value is the result; the cleanups run on EVERY
+        // exit — normal return, escape continuation, or fiber error.
+        // (Deliberately NOT dynamic-wind: that name promises symmetric
+        // re-entry semantics for a control regime — re-entrant call/cc —
+        // this VM deliberately doesn't have. dynamic-wind isn't even
+        // R4RS; it arrived in R5RS. We decline the transplant.)
+        //
+        // Compiled inline, not as a subr: the body runs in the fiber's
+        // own dispatch loop, so (yield) inside it is legal — the pending
+        // cleanup lives on the fiber's winder list (Fiber::winders) and
+        // survives suspension. The cleanups compile as a zero-arg
+        // closure (full upvalue capture, via the ordinary lambda path);
+        // OP_PUSH_WINDER parks it, and on normal exit OP_POP_WINDER /
+        // OP_CALL 0 / OP_POP run it inline and discard its value. The
+        // involuntary exits (escape, error) run parked winders via
+        // VM::run_pending_winders. Note the body is never in tail
+        // position — true of finally-like forms in every language.
+        if (op_name == "unwind-protect") {
+          Value body = Heap::car(rest);
+          Value cleanups = Heap::cdr(rest);
+          Value cleanup_lambda = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("lambda")),
+              vm.heap.cons(Value::nil(), cleanups));
+          compile_expr(cleanup_lambda, chunk, false); // closure on stack
+          chunk.code.push_back(OP_PUSH_WINDER);
+          compile_expr(body, chunk, false);           // body value on stack
+          chunk.code.push_back(OP_POP_WINDER);        // cleanup closure back
+          chunk.code.push_back(OP_CALL);
+          chunk.code.push_back(0);
+          chunk.code.push_back(OP_POP);               // drop cleanup's value
+          return;
+        }
+
         // (let ((v e)...) body...) or (let [v e ...] body...)
         if (op_name == "let") {
           Value bindings = Heap::car(rest);
