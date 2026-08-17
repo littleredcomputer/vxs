@@ -2966,13 +2966,20 @@ void VM::init_primitives() {
       return vm.heap.make_string(std::to_string(args[0].as_int()));
     }
     if (args[0].is_double()) {
-      double d = args[0].as_double();
-      if (d == std::floor(d) && !std::isnan(d) && !std::isinf(d) && std::abs(d) < 1e16) {
-        return vm.heap.make_string(std::to_string(static_cast<int64_t>(d)));
-      }
-      char buf[32];
-      auto res = std::to_chars(buf, buf + sizeof(buf), d);
-      return vm.heap.make_string(std::string_view(buf, res.ptr - buf));
+      // Route through the one shared formatter (format_double, used by
+      // format_value/write/display too) rather than a second copy of
+      // this logic — a second copy is exactly how this bug happened:
+      // whole-number doubles here used to short-circuit to
+      // std::to_string(int64_t), producing bare integer text ("0" for
+      // 0.0) with no decimal point at all, indistinguishable from the
+      // exact integer 0. string->number then read it back as exact,
+      // and (eqv? 0.0 0) is false (eqv? requires matching exactness) —
+      // number->string must produce something string->number reads
+      // back as the SAME exactness, not just the same magnitude.
+      // format_double already guards this (appends ".0" whenever
+      // to_chars' output has neither '.' nor 'e'); this path just
+      // wasn't using it.
+      return vm.heap.make_string(format_double(args[0].as_double()));
     }
     return vm.heap.make_string("0");
   }, 1, 2));
