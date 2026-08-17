@@ -284,6 +284,9 @@ void VM::mark_roots(Heap &h) {
   for (Obj **op : temp_obj_roots) {
     if (op && *op) h.mark_obj(*op);
   }
+  for (Value v : in_flight_raises) {
+    h.mark_value(v);
+  }
 }
 
 void Heap::collect_garbage() {
@@ -1131,6 +1134,26 @@ static std::istream *resolve_in(VM &vm, uint32_t argc, Value *args, uint32_t por
     if (p->is_input && !p->closed && p->in) return p->in;
   }
   return &vm.in_stream();
+}
+
+// Formats a raised value for human consumption — used both to build an
+// error-object's own display (indirectly, via error's construction
+// below) and as RaiseEscape's fallback message, for whatever ends up
+// seeing an uncaught raise (main.cpp's top-level catch, vx_wasm.cpp's).
+// An error-object formats the way `error` always has (message, then
+// each irritant write-formatted); any other raised value — (raise 'foo)
+// is perfectly legal R7RS — just shows what it is.
+static std::string format_raised_value(const VM &vm, Value v) {
+  if (Heap::is_error_object(v)) {
+    ObjVector *ov = v.as_ptr<ObjVector>();
+    std::ostringstream oss;
+    vm.display_value(ov->get(0), oss);
+    for (uint32_t i = 1; i < ov->size; ++i) {
+      oss << " " << vm.format_value(ov->get(i));
+    }
+    return "[Scheme Error] " + oss.str();
+  }
+  return "uncaught exception: " + vm.format_value(v);
 }
 
 // Tries filename, then testcases/filename, ../testcases/filename,
@@ -3283,18 +3306,55 @@ void VM::init_primitives() {
     return last_res;
   }, 1, 1));
 
+  // error now RAISES (an error-object) rather than directly killing the
+  // fiber — the same mechanism (raise) that (guard ...) catches, so
+  // every existing (error ...) call site in the codebase (assert, the
+  // AOT/reader bootstrap snippets, ...) is transparently catchable now.
+  // An uncaught error surfaces exactly as before: format_raised_value
+  // produces the identical "[Scheme Error] reason irritant..." text,
+  // and RaiseEscape derives from std::exception, so main.cpp's top-level
+  // catch (and vx_wasm.cpp's) need no changes at all.
   def_global("error", heap.make_subr("error", [](VM &vm, uint32_t argc, Value *args) -> Value {
-    std::ostringstream oss;
-    vm.display_value(args[0], oss);
-    for (uint32_t i = 1; i < argc; i++) {
-      oss << " " << vm.format_value(args[i]);
-    }
-    if (vm.current_fiber) {
-      vm.current_fiber->state = Fiber::State::Error;
-      vm.current_fiber->error_message = "[Scheme Error] " + oss.str();
-    }
-    return Value::unspecified();
+    std::vector<Value> irritants(args + 1, args + argc);
+    Value err_obj = vm.heap.make_error_object(args[0], irritants);
+    std::string msg = format_raised_value(vm, err_obj);
+    vm.in_flight_raises.push_back(err_obj);
+    throw RaiseEscape(msg);
   }, 1, UINT32_MAX));
+
+  // (raise obj) — obj can be anything, not just an error-object (R7RS
+  // permits (raise 'some-symbol), (raise 42), ...); error-object? is
+  // what lets a guard clause tell the two apart. raise-continuable is
+  // deliberately not implemented: it requires the handler's return value
+  // to become raise-continuable's own return value, which is a
+  // fundamentally different (non-escape) control shape than everything
+  // else in this VM's exception handling — a real omission, not an
+  // oversight, and one we're comfortable with per "no interest in Rx
+  // compatibility for its own sake."
+  def_global("raise", heap.make_subr("raise", [](VM &vm, uint32_t, Value *args) -> Value {
+    std::string msg = format_raised_value(vm, args[0]);
+    vm.in_flight_raises.push_back(args[0]);
+    throw RaiseEscape(msg);
+  }, 1, 1));
+
+  def_global("error-object?", heap.make_subr("error-object?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_error_object(args[0]));
+  }, 1, 1));
+
+  def_global("error-object-message", heap.make_subr("error-object-message", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_error_object(args[0])) return Value::boolean_false();
+    return args[0].as_ptr<ObjVector>()->get(0);
+  }, 1, 1));
+
+  def_global("error-object-irritants", heap.make_subr("error-object-irritants", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_error_object(args[0])) return Value::nil();
+    ObjVector *ov = args[0].as_ptr<ObjVector>();
+    Value res = Value::nil();
+    vm.push_temp_root(&res);
+    for (uint32_t i = ov->size; i > 1; --i) res = vm.heap.cons(ov->get(i - 1), res);
+    vm.pop_temp_root();
+    return res;
+  }, 1, 1));
 
   def_global("scheme-implementation-type", heap.make_subr("scheme-implementation-type", [](VM &vm, uint32_t, Value *) -> Value {
     return Value::from_symbol_id(vm.intern("vx-scheme"));
@@ -3380,6 +3440,16 @@ void VM::init_primitives() {
       return vm.call_subr(proc.as_ptr<ObjSubr>(), 1, &escape_val);
     } catch (ContinuationEscape &e) {
       if (e.target != static_cast<Obj *>(escape)) throw; // not ours — keep unwinding
+      // Copy out of the caught exception object before touching anything
+      // that can allocate: e.value lives in C++ exception-handling
+      // storage, which mark_roots has no way to see. That was harmless
+      // right up until run_pending_winders below started existing —
+      // a winder's cleanup can call_closure, which can GC, and at that
+      // point e.value (if it's a fresh, otherwise-unrooted heap object)
+      // would be invisible to the collector. escape_value is an ordinary
+      // local instead, protected the ordinary way.
+      Value escape_value = e.value;
+      vm.push_temp_root(&escape_value);
       if (f) {
         f->stack.resize(saved_stack_size);
         f->frames.resize(saved_frames_size);
@@ -3390,11 +3460,59 @@ void VM::init_primitives() {
         // "finally fires on the way out" half of the design.
         vm.run_pending_winders(*f, saved_winders_size);
       }
-      return e.value;
+      vm.pop_temp_root();
+      return escape_value;
     }
   };
   def_global("call-with-current-continuation", heap.make_subr("call-with-current-continuation", subr_call_cc, 1, 1));
   def_global("call/cc", heap.make_subr("call/cc", subr_call_cc, 1, 1));
+
+  // %guard — internal-only (reserved-name convention), the C++ half of
+  // the `guard` compiler special form below. Not itself compiled inline
+  // the way unwind-protect is: unlike a pending cleanup (a value on a
+  // list, consulted by whichever catch site gets there first), guard
+  // needs an actual C++ try/catch scoping its body, and try/catch is
+  // inherently tied to C++ call-stack depth — there is no bytecode-level
+  // trick that gives a specific instruction pointer its own catch
+  // boundary without a nested C++ call. That means (yield) inside a
+  // guard body is illegal, exactly like inside a call/cc thunk today —
+  // not a new limitation, the same one, for the same underlying reason.
+  auto subr_guard = [](VM &vm, uint32_t, Value *args) -> Value {
+    Value handler = args[0]; // (lambda (var) (cond clause... (else (raise var))))
+    Value thunk = args[1];   // (lambda () body...)
+
+    Fiber *f = vm.current_fiber;
+    size_t saved_stack_size = f ? f->stack.size() : 0;
+    size_t saved_frames_size = f ? f->frames.size() : 0;
+    size_t saved_winders_size = f ? f->winders.size() : 0;
+
+    try {
+      if (Heap::is_closure(thunk)) {
+        return vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
+      }
+      return vm.call_subr(thunk.as_ptr<ObjSubr>(), 0, nullptr);
+    } catch (RaiseEscape &) {
+      // Whichever raise got us here pushed exactly one value; it's ours
+      // to pop (see VM::in_flight_raises' comment on LIFO nesting).
+      Value raised = vm.in_flight_raises.back();
+      vm.in_flight_raises.pop_back();
+      vm.push_temp_root(&raised);
+      if (f) {
+        f->stack.resize(saved_stack_size);
+        f->frames.resize(saved_frames_size);
+        vm.run_pending_winders(*f, saved_winders_size);
+      }
+      Value result;
+      if (Heap::is_closure(handler)) {
+        result = vm.call_closure(handler.as_ptr<ObjClosure>(), {raised});
+      } else {
+        result = vm.call_subr(handler.as_ptr<ObjSubr>(), 1, &raised);
+      }
+      vm.pop_temp_root();
+      return result;
+    }
+  };
+  def_global("%guard", heap.make_subr("%guard", subr_guard, 2, 2));
 
   // Sweep any temporary artifacts from bootstrap evaluation
   collect_garbage();

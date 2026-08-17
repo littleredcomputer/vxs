@@ -46,6 +46,16 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
     }
     ok = true;
     return last_res;
+  } catch (const RaiseEscape &e) {
+    // RaiseEscape's own message is already fully formatted (see
+    // format_raised_value: "[Scheme Error] ..." for an error-object,
+    // "uncaught exception: ..." otherwise) — an uncaught raise/error,
+    // not a VM-internal fault, so it doesn't want the generic "[Error]"
+    // wrapper below (that's for things like a stale continuation, whose
+    // std::runtime_error message has no formatting of its own).
+    ok = false;
+    err_msg = e.what();
+    return Value::unspecified();
   } catch (const std::exception &e) {
     ok = false;
     err_msg = std::string("[Error] ") + e.what();

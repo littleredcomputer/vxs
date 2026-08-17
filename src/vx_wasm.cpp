@@ -308,6 +308,12 @@ const char *vxs_eval_json(const char *code) {
                              "\",\"time_us\":" + std::to_string(time_us) +
                              ",\"active_fibers\":" + std::to_string(g_vm->active_fibers.size()) + "}";
     }
+  } catch (const RaiseEscape &e) {
+    // An uncaught (raise ...)/(error ...) — a Scheme-level condition,
+    // not a VM-internal fault, hence "runtime" (matching the ordinary
+    // StepResult::Error branch above) rather than the generic "exception"
+    // the catch-all below reports for things like a stale continuation.
+    g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(e.what()) + "\",\"error_type\":\"runtime\"}";
   } catch (const std::exception &e) {
     g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(e.what()) + "\",\"error_type\":\"exception\"}";
   }
@@ -344,6 +350,9 @@ const char *vxs_eval(const char *code) {
     } else {
       g_eval_result_buffer = g_vm->format_value(fiber.result);
     }
+  } catch (const RaiseEscape &e) {
+    // Already fully formatted — see the matching catch in vxs_eval_json.
+    g_eval_result_buffer = e.what();
   } catch (const std::exception &e) {
     g_eval_result_buffer = "[Evaluation Error] " + std::string(e.what());
   }
