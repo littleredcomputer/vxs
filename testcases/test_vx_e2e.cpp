@@ -18,7 +18,7 @@ Value eval_scheme(VM &vm, const std::string &code) {
   fiber.push(Value::from_ptr(closure));
   fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-  VM::StepResult res = vm.step_fiber(fiber, 100000);
+  VM::StepResult res = vm.step_fiber(fiber);
   if (res == VM::StepResult::Error) {
     std::cerr << "Runtime Error: " << fiber.error_message << std::endl;
     assert(false);

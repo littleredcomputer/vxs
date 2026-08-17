@@ -14,6 +14,7 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <chrono>
 
 namespace vxs {
 
@@ -375,7 +376,12 @@ struct VM {
       Fiber &f = *current_fiber;
       size_t base_depth = f.frames.size();
       push_closure_frame(f, closure, args);
-      StepResult res = run_dispatch(f, 100000000, base_depth);
+      // UNBOUNDED, no deadline: this is a synchronous run-to-completion
+      // call — nothing else interleaves, so an instruction ceiling here
+      // is pure liability (we bumped it once already when boyer.scm
+      // legitimately outgrew it). Genuine non-termination is the
+      // program's bug, exactly as it would be in any interpreter.
+      StepResult res = run_dispatch(f, UNBOUNDED, base_depth);
       if (res != StepResult::Completed || f.state == Fiber::State::Error) {
         if (f.state != Fiber::State::Error) {
           f.state = Fiber::State::Error;
@@ -447,15 +453,60 @@ public:
     return symbol_names[id];
   }
 
-  // Fiber Execution (Quantum Stepping)
+  // Fiber Execution
+  //
+  // The scheduling model is cooperative, full stop: a fiber runs until
+  // its own (yield), completion, or error. That's the invariant Scheme
+  // code is entitled to reason with — "nothing else touches shared state
+  // between my yields" — and it's what makes this a language without
+  // locks: in a cooperative model, the yield points ARE the lock
+  // boundaries. Anything that cuts a fiber off at a boundary it didn't
+  // choose is preemption, and preemption is reported honestly as
+  // StepResult::Preempted, never disguised as a yield. Two opt-in
+  // mechanisms can preempt:
+  //   - max_instructions: an explicit instruction cap, for debugger-style
+  //     "step exactly N and inspect" use on a single fiber. Never a
+  //     scheduling device — no sibling fiber runs during such stepping.
+  //   - deadline: a wall-clock backstop for embedders that cannot afford
+  //     to block (the browser's rAF loop). Overrun is a reported error
+  //     condition ("this fiber didn't yield — that's a bug"), not a mode.
   enum class StepResult {
     Completed,
-    Yielded,
+    Yielded,    // the fiber executed OP_YIELD — the only voluntary suspension
+    Preempted,  // cut off without asking: instruction cap or deadline hit
     Error
   };
 
-  StepResult step_fiber(Fiber &f, size_t max_instructions = 1000);
-  void step_all_active_fibers(size_t instructions_per_fiber = 500);
+  // "No limit" sentinels. UNBOUNDED makes the instruction-count exit
+  // unreachable; NO_DEADLINE short-circuits the clock check entirely.
+  static constexpr size_t UNBOUNDED = SIZE_MAX;
+  static constexpr std::chrono::steady_clock::time_point NO_DEADLINE =
+      std::chrono::steady_clock::time_point::max();
+
+  StepResult step_fiber(Fiber &f, size_t max_instructions = UNBOUNDED,
+                        std::chrono::steady_clock::time_point deadline = NO_DEADLINE);
+
+  // Steps every active fiber, each to its own yield/completion/error —
+  // except under the shared wall-clock budget, computed once up front:
+  // one absolute deadline for the whole call is what actually protects
+  // a frame budget (per-fiber slices would just divide the overrun).
+  // Returns how many fibers were preempted by the deadline this call, so
+  // embedders can surface "a fiber isn't yielding" instead of hiding it.
+  //
+  // Atomicity is preserved even for a misbehaving fiber: if the deadline
+  // cuts one off mid-flight, that fiber is remembered (preempted_fiber)
+  // and resumed EXCLUSIVELY on subsequent calls — no sibling steps until
+  // it reaches its own yield. A genuinely non-yielding fiber therefore
+  // starves its siblings, exactly as it would block forever in the
+  // browser's own event loop; the embedder stays responsive and the
+  // preempted-count says why. No fiber ever observes another fiber's
+  // effects at a non-yield boundary.
+  size_t step_all_active_fibers(
+      size_t instructions_per_fiber = UNBOUNDED,
+      std::chrono::milliseconds wall_clock_budget = std::chrono::milliseconds::max());
+
+  // The deadline-preempted fiber owed an exclusive resume — see above.
+  Fiber *preempted_fiber = nullptr;
 
   // Shared dispatch loop body. step_fiber calls this with stop_at_depth=0
   // (today's behavior: run until the fiber is genuinely done). call_closure
@@ -464,7 +515,18 @@ public:
   // frame(s) unwind back past that point — without touching current_fiber/
   // parent_fiber bookkeeping, since it's already correctly set up by
   // whichever step_fiber invocation is further up the (real) call chain.
-  StepResult run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth);
+  //
+  // The deadline is checked only in THIS loop, never inside a nested
+  // call_closure dispatch (which always runs UNBOUNDED): call_closure is
+  // a synchronous run-to-completion contract — a Preempted result there
+  // would strand frames on the shared fiber (see call_closure's comment)
+  // — and it also means native primitives (map, for-each, ...) remain
+  // atomic units, which is the soundness property we're defending. The
+  // cost is that the deadline is best-effort: a single huge primitive
+  // call can overshoot it, and the check fires as soon as control
+  // returns to the outer loop.
+  StepResult run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth,
+                          std::chrono::steady_clock::time_point deadline = NO_DEADLINE);
 
   // Global variables
   inline void def_global(const std::string &name, Value val) {

@@ -34,7 +34,9 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
       fiber.stack.resize(frame_slots, Value::unspecified());
       fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
-      VM::StepResult res = vm.step_fiber(fiber, 100000000);
+      // UNBOUNDED: a top-level script that never terminates is the
+      // program's bug, same as in any interpreter — not the VM's to cap.
+      VM::StepResult res = vm.step_fiber(fiber);
       if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
         ok = false;
         err_msg = fiber.error_message.empty() ? "[VM Error] Execution error" : fiber.error_message;
@@ -301,7 +303,7 @@ using namespace vxs;
   out << "  size_t frame_slots = std::max<size_t>(1, closure_" << root_ix << "->max_locals);\n";
   out << "  fiber.stack.resize(frame_slots, Value::unspecified());\n";
   out << "  fiber.frames.push_back({closure_" << root_ix << ", closure_" << root_ix << "->chunk->code.data(), 0});\n\n";
-  out << "  VM::StepResult res = vm.step_fiber(fiber, 100000000);\n";
+  out << "  VM::StepResult res = vm.step_fiber(fiber);\n";
   out << "  if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {\n";
   out << "    std::cerr << (fiber.error_message.empty() ? \"[VM Error] Execution error\" : fiber.error_message) << std::endl;\n";
   out << "    return 1;\n";
