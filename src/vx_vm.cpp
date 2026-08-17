@@ -7,6 +7,7 @@
 #include <sstream>
 #include <chrono>
 #include <cerrno>
+#include <charconv>
 
 namespace vxs {
 
@@ -15,6 +16,23 @@ static inline uint16_t read_u16(const uint8_t *&ip) {
   uint16_t val = (static_cast<uint16_t>(ip[0]) << 8) | static_cast<uint16_t>(ip[1]);
   ip += 2;
   return val;
+}
+
+// Shortest decimal string that reads back to exactly `d`, per std::to_chars'
+// floating-point contract (C++17, <charconv>) — the same "correctly
+// rounded, minimal digits" problem Steele & White's Dragon4 solved,
+// implemented in the standard library rather than by hand here. Strictly
+// better than a fixed setprecision: no trailing noise digits, and no risk
+// of printing too few digits to round-trip.
+static std::string format_double(double d) {
+  char buf[32];
+  auto res = std::to_chars(buf, buf + sizeof(buf), d);
+  std::string s(buf, res.ptr);
+  if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+      !std::isnan(d) && !std::isinf(d)) {
+    s += ".0";
+  }
+  return s;
 }
 
 // Helper to read 32-bit uint from bytecode
@@ -33,14 +51,7 @@ std::string VM::format_value(Value v) const {
     return std::to_string(v.as_int());
   }
   if (v.is_double()) {
-    double d = v.as_double();
-    std::ostringstream ss;
-    ss << std::setprecision(15) << d;
-    std::string s = ss.str();
-    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos && !std::isnan(d) && !std::isinf(d)) {
-      s += ".0";
-    }
-    return s;
+    return format_double(v.as_double());
   }
   if (v.is_char()) {
     char c = v.as_char();
@@ -109,7 +120,13 @@ std::string VM::format_value(Value v) const {
       }
       case ObjType::String: {
         ObjString *os = obj->as<ObjString>();
-        return "\"" + std::string(os->view()) + "\"";
+        std::string s = "\"";
+        for (char c : os->view()) {
+          if (c == '"' || c == '\\') s += '\\';
+          s += c;
+        }
+        s += "\"";
+        return s;
       }
       case ObjType::Symbol: {
         ObjSymbol *os = obj->as<ObjSymbol>();
@@ -1160,18 +1177,28 @@ void VM::init_primitives() {
   };
   def_global("exp", heap.make_subr("exp", subr_exp, 1, 1));
 
+  // floor/ceiling/round preserve exactness per R4RS (inexact in, inexact
+  // out) — matching the existing truncate below, which already got this
+  // right. round specifically uses round-half-to-even ("banker's
+  // rounding"), same as R4RS through R7RS all specify, and the same
+  // convention IEEE 754's default rounding mode uses: std::nearbyint
+  // (unlike std::round, which always rounds half away from zero) honors
+  // the current rounding mode, which defaults to round-to-nearest-even.
   auto subr_floor = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_int(static_cast<int32_t>(std::floor(args[0].as_real())));
+    if (args[0].is_int()) return args[0];
+    return Value::from_double(std::floor(args[0].as_real()));
   };
   def_global("floor", heap.make_subr("floor", subr_floor, 1, 1));
 
   auto subr_ceiling = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_int(static_cast<int32_t>(std::ceil(args[0].as_real())));
+    if (args[0].is_int()) return args[0];
+    return Value::from_double(std::ceil(args[0].as_real()));
   };
   def_global("ceiling", heap.make_subr("ceiling", subr_ceiling, 1, 1));
 
   auto subr_round = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_int(static_cast<int32_t>(std::round(args[0].as_real())));
+    if (args[0].is_int()) return args[0];
+    return Value::from_double(std::nearbyint(args[0].as_real()));
   };
   def_global("round", heap.make_subr("round", subr_round, 1, 1));
 
@@ -1206,12 +1233,18 @@ void VM::init_primitives() {
   };
   def_global("random", heap.make_subr("random", subr_random, 0, 1));
 
+  // R4RS exactness contagion: if any argument is inexact, the result must
+  // be inexact too, even when the winning value came from an exact
+  // argument — (max 3.9 4) is 4.0, not exact 4.
   auto subr_max = [](VM &, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_double(-std::numeric_limits<double>::infinity());
     Value best = args[0];
+    bool inexact = args[0].is_double();
     for (uint32_t i = 1; i < argc; ++i) {
+      if (args[i].is_double()) inexact = true;
       if (args[i].as_real() > best.as_real()) best = args[i];
     }
+    if (inexact && best.is_int()) return Value::from_double(best.as_real());
     return best;
   };
   def_global("max", heap.make_subr("max", subr_max, 1, UINT32_MAX));
@@ -1219,9 +1252,12 @@ void VM::init_primitives() {
   auto subr_min = [](VM &, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_double(std::numeric_limits<double>::infinity());
     Value best = args[0];
+    bool inexact = args[0].is_double();
     for (uint32_t i = 1; i < argc; ++i) {
+      if (args[i].is_double()) inexact = true;
       if (args[i].as_real() < best.as_real()) best = args[i];
     }
+    if (inexact && best.is_int()) return Value::from_double(best.as_real());
     return best;
   };
   def_global("min", heap.make_subr("min", subr_min, 1, UINT32_MAX));
@@ -1597,7 +1633,12 @@ void VM::init_primitives() {
     // right place instead of hitting EOF immediately.
     is->clear();
     is->seekg(start + static_cast<std::streamoff>(reader.position()));
-    return form;
+    // read has no compilation pass of its own (unlike code, which goes
+    // through the compiler's quote/quasiquote handling), so without this
+    // a [...]/{...} in the input would come back as the inert
+    // (vector ...)/(hash-map ...) call form the reader produces rather
+    // than an actual vector/map — see quote_materialize's comment.
+    return quote_materialize(vm, form);
   }, 0, 1));
 
   auto subr_filter = [](VM &vm, uint32_t argc, Value *args) -> Value {
@@ -2644,9 +2685,9 @@ void VM::init_primitives() {
       if (d == std::floor(d) && !std::isnan(d) && !std::isinf(d) && std::abs(d) < 1e16) {
         return vm.heap.make_string(std::to_string(static_cast<int64_t>(d)));
       }
-      std::stringstream ss;
-      ss << std::setprecision(15) << d;
-      return vm.heap.make_string(ss.str());
+      char buf[32];
+      auto res = std::to_chars(buf, buf + sizeof(buf), d);
+      return vm.heap.make_string(std::string_view(buf, res.ptr - buf));
     }
     return vm.heap.make_string("0");
   }, 1, 2));
@@ -2664,17 +2705,26 @@ void VM::init_primitives() {
     }
 
     if (radix != 10) {
-      // R4RS only requires exact (integer) parsing outside radix 10.
+      // R4RS only requires exact (integer) parsing outside radix 10 — no
+      // double fallback, so a magnitude that doesn't fit our 32-bit exact
+      // integers is just a parse failure here (unlike the radix-10 case
+      // below, which can fall back to inexact).
       char *end = nullptr;
       errno = 0;
       long long iv = std::strtoll(sv.data(), &end, radix);
-      if (end != sv.data() + sv.size() || errno == ERANGE) return Value::boolean_false();
+      if (end != sv.data() + sv.size() || errno == ERANGE ||
+          iv < INT32_MIN || iv > INT32_MAX) {
+        return Value::boolean_false();
+      }
       return Value::from_int(static_cast<int32_t>(iv));
     }
 
     char *end = nullptr;
+    errno = 0;
     long long iv = std::strtoll(sv.data(), &end, 10);
-    if (end == sv.data() + sv.size()) return Value::from_int(static_cast<int32_t>(iv));
+    bool int_ok = end == sv.data() + sv.size() && errno != ERANGE &&
+                  iv >= INT32_MIN && iv <= INT32_MAX;
+    if (int_ok) return Value::from_int(static_cast<int32_t>(iv));
     end = nullptr;
     double dv = std::strtod(sv.data(), &end);
     if (end == sv.data() + sv.size()) return Value::from_double(dv);
