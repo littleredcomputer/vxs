@@ -8,6 +8,7 @@
 #include "vx_vm.h"
 #include "vx_reader.h"
 #include "vx_compiler.h"
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -278,6 +279,26 @@ using namespace vxs;
 
 int main(int argc, char **argv) {
   VM vm;
+
+  // --gc-threshold <bytes>: override the initial auto-collection trigger
+  // (default 512KB) — mainly useful for shaking out GC-rooting bugs by
+  // forcing collections to fire far more (or less) often than they would
+  // organically. Can appear anywhere in argv; consumed here so the rest
+  // of argument dispatch below doesn't need to know about it. `filtered`
+  // must outlive this function (argv is repointed at its buffer), so it's
+  // declared at main()'s scope rather than in a nested block.
+  static std::vector<char *> filtered;
+  filtered.push_back(argv[0]);
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--gc-threshold" && i + 1 < argc) {
+      vm.heap.set_gc_threshold(std::strtoull(argv[i + 1], nullptr, 10));
+      ++i;
+    } else {
+      filtered.push_back(argv[i]);
+    }
+  }
+  argc = static_cast<int>(filtered.size());
+  argv = filtered.data();
 
   if (argc > 1) {
     std::string arg1 = argv[1];

@@ -297,9 +297,12 @@ void Heap::collect_garbage() {
   // 2. Sweep phase
   sweep();
 
-  // 3. Dynamic threshold adjustment (grow by 2x of live bytes, min 512KB)
-  size_t min_threshold = 512 * 1024;
-  gc_threshold = std::max(min_threshold, bytes_allocated * 2);
+  // 3. Dynamic threshold adjustment (grow by 2x of live bytes, floor is
+  // min_gc_threshold — normally 512KB, but overridable via
+  // set_gc_threshold/--gc-threshold so a caller lowering it for GC-pressure
+  // testing doesn't just get one aggressive collection before it snaps
+  // back to the default).
+  gc_threshold = std::max(min_gc_threshold, bytes_allocated * 2);
 }
 
 size_t Heap::sweep() {
@@ -1441,9 +1444,11 @@ void VM::init_primitives() {
 
   auto subr_list = [](VM &vm, uint32_t argc, Value *args) -> Value {
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (int i = static_cast<int>(argc) - 1; i >= 0; --i) {
       res = vm.heap.cons(args[i], res);
     }
+    vm.pop_temp_root();
     return res;
   };
   def_global("list", heap.make_subr("list", subr_list, 0, UINT32_MAX));
@@ -1462,10 +1467,12 @@ void VM::init_primitives() {
   auto subr_reverse = [](VM &vm, uint32_t, Value *args) -> Value {
     Value cur = args[0];
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     while (Heap::is_cons(cur)) {
       res = vm.heap.cons(Heap::car(cur), res);
       cur = Heap::cdr(cur);
     }
+    vm.pop_temp_root();
     return res;
   };
   def_global("reverse", heap.make_subr("reverse", subr_reverse, 1, 1));
@@ -1482,9 +1489,11 @@ void VM::init_primitives() {
       }
     }
     Value res = args[argc - 1];
+    vm.push_temp_root(&res);
     for (auto it = all_items.rbegin(); it != all_items.rend(); ++it) {
       res = vm.heap.cons(*it, res);
     }
+    vm.pop_temp_root();
     return res;
   };
   def_global("append", heap.make_subr("append", subr_append, 0, UINT32_MAX));
@@ -1523,9 +1532,19 @@ void VM::init_primitives() {
   auto subr_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc < 2) return Value::nil();
     Value fn = args[0];
+    // Builds the result in reverse call-order by consing onto `res`
+    // immediately after each call, rather than collecting raw call outputs
+    // into a std::vector first — an output value is a fresh allocation
+    // reachable from nothing else, so parking several of them in an
+    // unrooted C++ container while further calls run (and might GC) would
+    // leave the earlier ones to be collected out from under it. `res`
+    // itself stays protected via push_temp_root the whole time, and
+    // mark_roots re-reads it fresh on every collection, so it always sees
+    // wherever the chain-in-progress currently is.
     if (argc == 2) {
       Value cur = args[1];
-      std::vector<Value> results;
+      Value res = Value::nil();
+      vm.push_temp_root(&res);
       while (Heap::is_cons(cur)) {
         Value elem = Heap::car(cur);
         Value out = Value::nil();
@@ -1534,18 +1553,23 @@ void VM::init_primitives() {
         } else if (Heap::is_closure(fn)) {
           out = vm.call_closure(fn.as_ptr<ObjClosure>(), {elem});
         }
-        results.push_back(out);
+        res = vm.heap.cons(out, res);
         cur = Heap::cdr(cur);
       }
-      Value res = Value::nil();
-      for (auto it = results.rbegin(); it != results.rend(); ++it) {
-        res = vm.heap.cons(*it, res);
+      vm.pop_temp_root();
+      Value forward = Value::nil();
+      vm.push_temp_root(&forward);
+      while (Heap::is_cons(res)) {
+        forward = vm.heap.cons(Heap::car(res), forward);
+        res = Heap::cdr(res);
       }
-      return res;
+      vm.pop_temp_root();
+      return forward;
     }
     // N-ary map: (map proc list1 list2 ...)
     std::vector<Value> lists(args + 1, args + argc);
-    std::vector<Value> results;
+    Value res = Value::nil();
+    vm.push_temp_root(&res);
     while (true) {
       for (Value l : lists) {
         if (!Heap::is_cons(l)) goto done_map;
@@ -1562,14 +1586,18 @@ void VM::init_primitives() {
       } else if (Heap::is_closure(fn)) {
         out = vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
       }
-      results.push_back(out);
+      res = vm.heap.cons(out, res);
     }
   done_map:
-    Value res = Value::nil();
-    for (auto it = results.rbegin(); it != results.rend(); ++it) {
-      res = vm.heap.cons(*it, res);
+    vm.pop_temp_root();
+    Value forward = Value::nil();
+    vm.push_temp_root(&forward);
+    while (Heap::is_cons(res)) {
+      forward = vm.heap.cons(Heap::car(res), forward);
+      res = Heap::cdr(res);
     }
-    return res;
+    vm.pop_temp_root();
+    return forward;
   };
   def_global("map", heap.make_subr("map", subr_map, 2, UINT32_MAX));
 
@@ -1643,6 +1671,14 @@ void VM::init_primitives() {
     char c;
     while (is->get(c)) s += c;
     if (s.empty()) return Value::eof_obj();
+    // Covers quote_materialize below too, not just the read itself — it
+    // recursively reallocates the whole parsed tree (every cons cell, not
+    // just vector/map-shaped parts), and unlike the compiler's use of the
+    // same function (implicitly covered by compile_top_level's GCGuard),
+    // nothing here otherwise roots the freshly-read `form` between when
+    // the reader's own internal guard releases and quote_materialize
+    // finishes walking it.
+    GCGuard guard(vm.heap);
     Reader reader(vm, s);
     Value form = reader.read_form();
     // Only the reader's own single form should be consumed from the
@@ -1679,9 +1715,11 @@ void VM::init_primitives() {
       cur = Heap::cdr(cur);
     }
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (auto it = results.rbegin(); it != results.rend(); ++it) {
       res = vm.heap.cons(*it, res);
     }
+    vm.pop_temp_root();
     return res;
   };
   def_global("filter", heap.make_subr("filter", subr_filter, 2, 2));
@@ -2135,6 +2173,11 @@ void VM::init_primitives() {
     return vec;
   };
   def_global("vector", heap.make_subr("vector", subr_vector, 0, UINT32_MAX));
+  // Reserved name the reader desugars [...] to (vx_reader.h) — kept distinct
+  // from "vector" itself so quote/quasiquote/do/let's bracket-form detection
+  // (see quote_materialize etc. in vx_compiler.h) can't be confused by a
+  // user's own quoted list that happens to start with the symbol `vector`.
+  def_global("%bracket-vector", heap.make_subr("%bracket-vector", subr_vector, 0, UINT32_MAX));
 
   auto subr_make_vector = [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t size = static_cast<uint32_t>(args[0].as_int());
@@ -2207,9 +2250,11 @@ void VM::init_primitives() {
     if (!Heap::is_vector(args[0])) return Value::nil();
     ObjVector *vec = args[0].as_ptr<ObjVector>();
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (int i = static_cast<int>(vec->size) - 1; i >= 0; --i) {
       res = vm.heap.cons(vec->get(i), res);
     }
+    vm.pop_temp_root();
     return res;
   }, 1, 1));
 
@@ -2217,9 +2262,11 @@ void VM::init_primitives() {
     if (!Heap::is_string(args[0])) return Value::nil();
     std::string_view sv = args[0].as_ptr<ObjString>()->view();
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (int i = static_cast<int>(sv.size()) - 1; i >= 0; --i) {
       res = vm.heap.cons(Value::from_char(sv[i]), res);
     }
+    vm.pop_temp_root();
     return res;
   }, 1, 1));
 
@@ -2253,6 +2300,9 @@ void VM::init_primitives() {
     return vm.heap.make_map(std::move(kvs));
   };
   def_global("hash-map", heap.make_subr("hash-map", subr_hash_map, 0, UINT32_MAX));
+  // Reserved name the reader desugars {...} to — see the %bracket-vector
+  // comment above; same reasoning, for maps.
+  def_global("%brace-map", heap.make_subr("%brace-map", subr_hash_map, 0, UINT32_MAX));
   def_global("make-hash-map", heap.make_subr("make-hash-map", [](VM &vm, uint32_t, Value *) -> Value {
     return vm.heap.make_map({});
   }, 0, 0));
@@ -2300,9 +2350,11 @@ void VM::init_primitives() {
     if (!Heap::is_map(args[0])) return Value::nil();
     ObjMap *m = args[0].as_ptr<ObjMap>();
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (auto it = m->entries.rbegin(); it != m->entries.rend(); ++it) {
       res = vm.heap.cons(it->first, res);
     }
+    vm.pop_temp_root();
     return res;
   }, 1, 1));
 
@@ -2310,9 +2362,11 @@ void VM::init_primitives() {
     if (!Heap::is_map(args[0])) return Value::nil();
     ObjMap *m = args[0].as_ptr<ObjMap>();
     Value res = Value::nil();
+    vm.push_temp_root(&res);
     for (auto it = m->entries.rbegin(); it != m->entries.rend(); ++it) {
       res = vm.heap.cons(it->second, res);
     }
+    vm.pop_temp_root();
     return res;
   }, 1, 1));
 
@@ -2859,6 +2913,7 @@ void VM::init_primitives() {
     Value thunk = args[0];
     auto t0 = std::chrono::high_resolution_clock::now();
     Value res = Value::unspecified();
+    vm.push_temp_root(&res);
     if (Heap::is_closure(thunk)) {
       res = vm.call_closure(thunk.as_ptr<ObjClosure>(), {});
     } else if (Heap::is_subr(thunk)) {
@@ -2866,7 +2921,9 @@ void VM::init_primitives() {
     }
     auto t1 = std::chrono::high_resolution_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
-    return vm.heap.cons(Value::from_double(secs), res);
+    Value pair = vm.heap.cons(Value::from_double(secs), res);
+    vm.pop_temp_root();
+    return pair;
   }, 1, 1));
 
   def_global("load", heap.make_subr("load", [](VM &vm, uint32_t, Value *args) -> Value {
@@ -2900,6 +2957,19 @@ void VM::init_primitives() {
     }
     return last_res;
   }, 1, 1));
+
+  def_global("error", heap.make_subr("error", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::ostringstream oss;
+    vm.display_value(args[0], oss);
+    for (uint32_t i = 1; i < argc; i++) {
+      oss << " " << vm.format_value(args[i]);
+    }
+    if (vm.current_fiber) {
+      vm.current_fiber->state = Fiber::State::Error;
+      vm.current_fiber->error_message = "[Scheme Error] " + oss.str();
+    }
+    return Value::unspecified();
+  }, 1, UINT32_MAX));
 
   def_global("scheme-implementation-type", heap.make_subr("scheme-implementation-type", [](VM &vm, uint32_t, Value *) -> Value {
     return Value::from_symbol_id(vm.intern("vx-scheme"));

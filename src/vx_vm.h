@@ -367,7 +367,7 @@ struct VM {
       Fiber &f = *current_fiber;
       size_t base_depth = f.frames.size();
       push_closure_frame(f, closure, args);
-      StepResult res = run_dispatch(f, 10000000, base_depth);
+      StepResult res = run_dispatch(f, 100000000, base_depth);
       if (res != StepResult::Completed || f.state == Fiber::State::Error) {
         if (f.state != Fiber::State::Error) {
           f.state = Fiber::State::Error;
@@ -385,7 +385,7 @@ struct VM {
     // piggyback on, so fall back to a throwaway one, same as before.
     Fiber scratch;
     push_closure_frame(scratch, closure, args);
-    StepResult res = step_fiber(scratch, 10000000);
+    StepResult res = step_fiber(scratch, 100000000);
     if (res != StepResult::Completed || scratch.state == Fiber::State::Error) {
       if (scratch.error_message.empty()) {
         scratch.error_message = "[VM Error] call_closure: computation did not "
