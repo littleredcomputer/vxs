@@ -330,6 +330,12 @@ public:
     return Value::from_ptr(v);
   }
 
+  inline Value make_vector_from(const std::vector<Value> &elems) {
+    ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(elems.size()));
+    for (size_t i = 0; i < elems.size(); ++i) v->set(static_cast<uint32_t>(i), elems[i]);
+    return Value::from_ptr(v);
+  }
+
   inline Value make_map(std::vector<std::pair<Value, Value>> entries = {}) {
     ObjMap *m = allocate<ObjMap>(std::move(entries));
     return Value::from_ptr(m);
