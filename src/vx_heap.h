@@ -351,6 +351,22 @@ public:
     return Value::from_ptr(v);
   }
 
+  // An R7RS error-object from (error message irritant...) / raise's own
+  // wrapping — same trick as multivalue above: a flagged ObjVector, not
+  // a new heap type. Slot 0 is the message (whatever was given — this
+  // dialect's `error` accepts a leading tag symbol as readily as a
+  // string, e.g. assert's `(error 'assert "..." 'expr)`, so
+  // error-object-message doesn't enforce R7RS's stricter string-only
+  // reading), the rest are irritants.
+  static constexpr uint16_t FLAG_ERROR_OBJECT = 2;
+  inline Value make_error_object(Value message, const std::vector<Value> &irritants) {
+    ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(irritants.size()) + 1);
+    v->set(0, message);
+    for (size_t i = 0; i < irritants.size(); ++i) v->set(static_cast<uint32_t>(i) + 1, irritants[i]);
+    v->flags = FLAG_ERROR_OBJECT;
+    return Value::from_ptr(v);
+  }
+
   inline Value make_map(std::vector<std::pair<Value, Value>> entries = {}) {
     ObjMap *m = allocate<ObjMap>(std::move(entries));
     return Value::from_ptr(m);
@@ -417,6 +433,10 @@ public:
 
   static inline bool is_multivalue(Value v) {
     return is_vector(v) && (v.as_ptr<Obj>()->flags & FLAG_MULTIVALUE);
+  }
+
+  static inline bool is_error_object(Value v) {
+    return is_vector(v) && (v.as_ptr<Obj>()->flags & FLAG_ERROR_OBJECT);
   }
 
   static inline bool is_map(Value v) {

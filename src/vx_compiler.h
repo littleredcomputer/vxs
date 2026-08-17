@@ -469,6 +469,72 @@ private:
           return;
         }
 
+        // (guard (var clause...) body...) — R7RS structured exception
+        // handling. Desugars to (%guard (lambda (var) (cond clause...))
+        // (lambda () body...)) — inherits cond's own `=>` support for
+        // free, since the handler body genuinely IS a cond. If none of
+        // the clauses match and the user didn't supply their own
+        // (else ...), a trailing (else (raise var)) is appended: an
+        // unhandled guard re-raises (per R7RS) into the guard's own
+        // dynamic context, which for us just falls out of raising again
+        // from inside %guard's handler call — by then an ordinary,
+        // non-try-scoped C++ call, so it propagates outward exactly like
+        // any other raise. See %guard's own comment (vx_vm.cpp) for why
+        // this is a subr (yield-illegal inside, like call/cc) rather
+        // than inline like unwind-protect: it needs an actual C++ catch
+        // boundary, which only a nested call can provide.
+        if (op_name == "guard") {
+          Value spec = Heap::car(rest); // (var clause...)
+          Value var = Heap::car(spec);
+          Value clauses = Heap::cdr(spec);
+          Value body = Heap::cdr(rest);
+
+          bool has_else = false;
+          for (Value c = clauses; Heap::is_cons(c); c = Heap::cdr(c)) {
+            Value clause = Heap::car(c);
+            if (Heap::is_cons(clause) && Heap::car(clause).is_symbol() &&
+                vm.get_symbol_name(Heap::car(clause).as_symbol_id()) == "else") {
+              has_else = true;
+            }
+          }
+
+          Value cond_clauses = clauses;
+          if (!has_else) {
+            Value raise_call = vm.heap.cons(
+                Value::from_symbol_id(vm.intern("raise")),
+                vm.heap.cons(var, Value::nil()));
+            Value else_clause = vm.heap.cons(
+                Value::from_symbol_id(vm.intern("else")),
+                vm.heap.cons(raise_call, Value::nil()));
+            std::vector<Value> cs;
+            for (Value c = clauses; Heap::is_cons(c); c = Heap::cdr(c)) {
+              cs.push_back(Heap::car(c));
+            }
+            cs.push_back(else_clause);
+            Value built = Value::nil();
+            for (auto it = cs.rbegin(); it != cs.rend(); ++it) {
+              built = vm.heap.cons(*it, built);
+            }
+            cond_clauses = built;
+          }
+
+          Value cond_form = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("cond")), cond_clauses);
+          Value handler_lambda = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("lambda")),
+              vm.heap.cons(vm.heap.cons(var, Value::nil()),
+                           vm.heap.cons(cond_form, Value::nil())));
+          Value thunk_lambda = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("lambda")),
+              vm.heap.cons(Value::nil(), body));
+          Value guard_call = vm.heap.cons(
+              Value::from_symbol_id(vm.intern("%guard")),
+              vm.heap.cons(handler_lambda,
+                           vm.heap.cons(thunk_lambda, Value::nil())));
+          compile_expr(guard_call, chunk, is_tail);
+          return;
+        }
+
         // (let ((v e)...) body...) or (let [v e ...] body...)
         if (op_name == "let") {
           Value bindings = Heap::car(rest);

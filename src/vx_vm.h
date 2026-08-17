@@ -253,6 +253,20 @@ struct ContinuationEscape : std::runtime_error {
         target(t), value(v) {}
 };
 
+// raise/guard's exception type. Deliberately carries NO Value payload —
+// unlike ContinuationEscape above (whose value field turned out to need
+// a manual GC-rooting patch at its one call site once cleanups-during-
+// unwind became possible), the raised value instead lives in
+// VM::in_flight_raises, a plain vector mark_roots walks directly. A
+// std::string is safe to carry here since it holds no Scheme heap
+// references — see run_dispatch's file header for the same "no locks
+// needed, yield points are the boundaries" ethos: keeping Scheme values
+// in structures the GC already knows how to find is the same idea
+// applied to exception payloads instead of scheduling.
+struct RaiseEscape : std::runtime_error {
+  explicit RaiseEscape(const std::string &msg) : std::runtime_error(msg) {}
+};
+
 //=============================================================================
 // Virtual Machine & Global Environment
 //=============================================================================
@@ -302,6 +316,15 @@ struct VM {
   inline void pop_temp_root() { if (!temp_roots.empty()) temp_roots.pop_back(); }
   inline void push_temp_obj_root(Obj **o) { temp_obj_roots.push_back(o); }
   inline void pop_temp_obj_root() { if (!temp_obj_roots.empty()) temp_obj_roots.pop_back(); }
+
+  // The value(s) currently mid-raise — see RaiseEscape's comment.
+  // `raise` pushes before throwing; whichever %guard catch (or the
+  // top-level, for an uncaught raise) is next to see this RaiseEscape
+  // pops exactly one entry. A stack rather than a single Value because
+  // raises can nest (an unwind-protect cleanup running during an outer
+  // raise's unwind can itself raise) — LIFO matches how nested C++
+  // exception propagation already unwinds. mark_roots walks it directly.
+  std::vector<Value> in_flight_raises;
 
   // 2D Property table for (put sym prop val) and (get sym prop)
   std::map<std::pair<std::string, std::string>, Value> property_table;
