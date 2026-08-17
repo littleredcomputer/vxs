@@ -762,6 +762,74 @@ private:
           return;
         }
 
+        // (let-values (((a b) e1) ((c) e2) ...) body...) — like let*
+        // but each binding clause's formal list is bound to the multiple
+        // values (call-with-values) production of its expression.
+        // let-values is "parallel": e1/e2/... are all evaluated in the
+        // OUTER scope, none seeing each other's bindings (only body
+        // does) — matching plain `let` vs `let*`. Desugars to nested
+        // call-with-values calls; let-values additionally routes each
+        // clause through gensym'd formals first (see gensym_formals)
+        // so an inner producer expression can't accidentally resolve to
+        // an outer clause's real binding name, then rebinds the real
+        // names via one flat `let` wrapping the body.
+        if (op_name == "let-values" || op_name == "let*-values") {
+          bool parallel = (op_name == "let-values");
+          Value clauses = Heap::car(rest);
+          Value body = Heap::cdr(rest);
+
+          Value let_sym = Value::from_symbol_id(vm.intern("let"));
+          Value lambda_sym = Value::from_symbol_id(vm.intern("lambda"));
+          Value cwv_sym = Value::from_symbol_id(vm.intern("call-with-values"));
+
+          std::vector<std::pair<Value, Value>> clause_list; // (formals, expr)
+          Value cur = clauses;
+          while (Heap::is_cons(cur)) {
+            Value clause = Heap::car(cur);
+            clause_list.push_back({Heap::car(clause), Heap::car(Heap::cdr(clause))});
+            cur = Heap::cdr(cur);
+          }
+
+          if (clause_list.empty()) {
+            // (let-values () body...) — routes through `let` for its
+            // internal-define handling, same as let*'s empty case.
+            compile_expr(vm.heap.cons(let_sym, vm.heap.cons(Value::nil(), body)),
+                        chunk, is_tail);
+            return;
+          }
+
+          std::vector<Value> use_formals;
+          std::vector<std::pair<Value, Value>> real_temp_pairs;
+          for (auto &cl : clause_list) {
+            use_formals.push_back(parallel ? gensym_formals(cl.first, real_temp_pairs) : cl.first);
+          }
+
+          Value inner_body = body;
+          if (parallel) {
+            Value let_bindings = Value::nil();
+            for (auto it = real_temp_pairs.rbegin(); it != real_temp_pairs.rend(); ++it) {
+              Value pair_form = vm.heap.cons(it->first, vm.heap.cons(it->second, Value::nil()));
+              let_bindings = vm.heap.cons(pair_form, let_bindings);
+            }
+            Value let_form = vm.heap.cons(let_sym, vm.heap.cons(let_bindings, body));
+            inner_body = vm.heap.cons(let_form, Value::nil());
+          }
+
+          Value current_body = inner_body;
+          for (int i = static_cast<int>(clause_list.size()) - 1; i >= 0; --i) {
+            Value producer_lambda = vm.heap.cons(
+                lambda_sym, vm.heap.cons(Value::nil(),
+                                         vm.heap.cons(clause_list[i].second, Value::nil())));
+            Value consumer_lambda = vm.heap.cons(lambda_sym, vm.heap.cons(use_formals[i], current_body));
+            Value cwv_call = vm.heap.cons(
+                cwv_sym, vm.heap.cons(producer_lambda, vm.heap.cons(consumer_lambda, Value::nil())));
+            current_body = vm.heap.cons(cwv_call, Value::nil());
+          }
+
+          compile_expr(Heap::car(current_body), chunk, is_tail);
+          return;
+        }
+
         // (do ((var init [step]) ...) (test expr...) cmd...) or (do [var init
         // [step] ...] ...)
         if (op_name == "do") {
@@ -1096,6 +1164,28 @@ private:
     }
     upvalues.push_back({index, is_local});
     return static_cast<int>(upvalues.size() - 1);
+  }
+
+  // Produces a same-shaped copy of `formals` (a lambda-style formal
+  // list — proper, dotted, or a bare symbol) with every name replaced by
+  // a fresh gensym, recording each (real-name, temp-name) pair in
+  // `out_pairs`. Used by let-values (see below) to evaluate each
+  // binding clause's producer expression in a scope isolated from every
+  // OTHER clause's bindings — true "parallel" let-values semantics —
+  // by binding through anonymous temporaries first and only introducing
+  // the real names afterward, in one flat `let` around the body.
+  Value gensym_formals(Value formals, std::vector<std::pair<Value, Value>> &out_pairs) {
+    if (formals.is_symbol()) {
+      Value temp = Value::from_symbol_id(vm.intern("$lv__" + std::to_string(vm.next_gensym_id++)));
+      out_pairs.push_back({formals, temp});
+      return temp;
+    }
+    if (Heap::is_cons(formals)) {
+      Value temp_head = Value::from_symbol_id(vm.intern("$lv__" + std::to_string(vm.next_gensym_id++)));
+      out_pairs.push_back({Heap::car(formals), temp_head});
+      return vm.heap.cons(temp_head, gensym_formals(Heap::cdr(formals), out_pairs));
+    }
+    return formals; // nil tail of a proper list
   }
 
   struct BindingPair {

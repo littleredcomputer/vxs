@@ -336,6 +336,21 @@ public:
     return Value::from_ptr(v);
   }
 
+  // A "multiple values" bundle from (values a b ...) — an ObjVector like
+  // any other, just tagged via the otherwise-unused Obj::flags field so
+  // call-with-values can tell it apart from a real vector the producer
+  // returned on purpose. (values x) with exactly one argument is *not*
+  // wrapped — it returns x directly, per R5RS's "same effect as if x had
+  // been returned" — so this constructor only ever fires for 0 or 2+
+  // values, keeping the common single-value case a plain, unwrapped Value.
+  static constexpr uint16_t FLAG_MULTIVALUE = 1;
+  inline Value make_multivalue(const std::vector<Value> &elems) {
+    ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(elems.size()));
+    for (size_t i = 0; i < elems.size(); ++i) v->set(static_cast<uint32_t>(i), elems[i]);
+    v->flags = FLAG_MULTIVALUE;
+    return Value::from_ptr(v);
+  }
+
   inline Value make_map(std::vector<std::pair<Value, Value>> entries = {}) {
     ObjMap *m = allocate<ObjMap>(std::move(entries));
     return Value::from_ptr(m);
@@ -398,6 +413,10 @@ public:
 
   static inline bool is_vector(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Vector;
+  }
+
+  static inline bool is_multivalue(Value v) {
+    return is_vector(v) && (v.as_ptr<Obj>()->flags & FLAG_MULTIVALUE);
   }
 
   static inline bool is_map(Value v) {
