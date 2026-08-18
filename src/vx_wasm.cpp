@@ -99,6 +99,39 @@ static void js_console_log(const char *text) { std::cout << "[CONSOLE.LOG] " << 
 
 // Register Canvas & Web primitives
 #ifdef __EMSCRIPTEN__
+// The host-side object table. Lives on globalThis so the embedder (app.js,
+// a test harness, eventually the WebGPU bindings) can put objects in and
+// read them back out; the VM only ever sees the integer.
+EM_JS(void, js_ensure_handle_table, (), {
+  if (!globalThis.vxsHandles) {
+    globalThis.vxsHandles = {
+      next: 1,
+      map: new Map(),
+      put: function(obj) { var id = this.next++; this.map.set(id, obj); return id; },
+      get: function(id) { return this.map.get(id); },
+      release: function(id) { return this.map.delete(id); },
+      size: function() { return this.map.size; }
+    };
+  }
+});
+
+// Drop the host's reference so the browser can collect the underlying
+// object. For a GPU resource the caller should also have called its own
+// destroy() — releasing the table entry only removes OUR hold on it.
+EM_JS(void, js_release_handle, (int id), {
+  if (globalThis.vxsHandles) globalThis.vxsHandles.release(id);
+});
+
+EM_JS(int, js_handle_count, (), {
+  return globalThis.vxsHandles ? globalThis.vxsHandles.size() : 0;
+});
+#else
+static void js_ensure_handle_table() {}
+static void js_release_handle(int) {}
+static int js_handle_count() { return 0; }
+#endif
+
+#ifdef __EMSCRIPTEN__
 // Start a timer that will settle `token` when it fires. The callback runs
 // from the JS event loop — i.e. only once the VM has returned control —
 // so settling can never re-enter a running dispatch. It just flips a flag
@@ -319,6 +352,11 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE
 int vxs_init() {
   g_vm = std::make_unique<VM>();
+  js_ensure_handle_table();
+  // Teach the VM how to drop a host object when Scheme releases a handle.
+  g_vm->host_handle_releaser = [](uint32_t id) {
+    js_release_handle(static_cast<int>(id));
+  };
   register_wasm_primitives(*g_vm);
   return 1;
 }
@@ -551,6 +589,26 @@ int vxs_settle_string(int token, const char *value) {
 
 // A rejected promise settles the future as failed; touching it then raises,
 // so an ordinary (guard ...) catches a GPU error like any other condition.
+// Settle with a HANDLE to a host object the promise resolved to — a
+// GPUAdapter, GPUDevice, GPUBuffer. `id` is an index the caller already
+// put into globalThis.vxsHandles; `kind` names it for error messages and
+// predicates ("gpu-device", "gpu-buffer", ...).
+EMSCRIPTEN_KEEPALIVE
+int vxs_settle_handle(int token, int id, const char *kind) {
+  if (!g_vm) return 0;
+  Value h = g_vm->heap.make_handle(static_cast<uint32_t>(id),
+                                   g_vm->intern(kind ? kind : "host-object"));
+  return g_vm->settle_external(static_cast<uint32_t>(token), h, false) ? 1 : 0;
+}
+
+// How many host objects we are holding. Nothing collects these, so this is
+// the leak instrument: a workbench can watch it, and a number that only
+// climbs is the bug.
+EMSCRIPTEN_KEEPALIVE
+int vxs_host_handle_count() {
+  return js_handle_count();
+}
+
 EMSCRIPTEN_KEEPALIVE
 int vxs_settle_error(int token, const char *message) {
   if (!g_vm) return 0;

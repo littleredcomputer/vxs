@@ -611,6 +611,16 @@ public:
     f->backing_future = Value::nil();
   }
 
+  // How to drop the host-side object a handle names. Installed by the
+  // embedder — the wasm layer wires this to its JS table; a native CLI
+  // has no host objects, so the default no-op is correct there rather
+  // than merely harmless. Keeps the VM free of any emscripten dependency.
+  std::function<void(uint32_t)> host_handle_releaser;
+
+  inline void release_host_handle(uint32_t id) {
+    if (host_handle_releaser) host_handle_releaser(id);
+  }
+
   // Futures awaiting something outside the VM, keyed by the token handed
   // to whoever will settle them.
   //
