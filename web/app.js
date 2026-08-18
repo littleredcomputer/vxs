@@ -271,6 +271,205 @@
     (spawn-particle i x y (if (= vx 0) 2 vx) (if (= vy 0) 2 vy) r g b rad)))
 `,
 
+    wrangle: `;;; ==========================================================
+;;; Point-Wrangle: fields, nodes, and the one bridge between them
+;;; ==========================================================
+;;; Two algebras, and the split is the whole point:
+;;;
+;;;   NODE   points -> points   touches memory; a future compute dispatch
+;;;   FIELD  pos    -> value    pure; a future WGSL *function*
+;;;
+;;; Fields compose with each other (warp, curl, zoom); exactly one
+;;; bridge -- advect -- turns a field into a node. Watch the flow
+;;; character change every ~3s: that is \`switch\` routing FIELDS, while
+;;; everything downstream of it stays untouched.
+
+(define (v3 x y z) (vector x y z))
+(define (v3x p) (vector-ref p 0))
+(define (v3y p) (vector-ref p 1))
+(define (v3z p) (vector-ref p 2))
+(define (v3+ a b) (v3 (+ (v3x a) (v3x b)) (+ (v3y a) (v3y b)) (+ (v3z a) (v3z b))))
+(define (v3- a b) (v3 (- (v3x a) (v3x b)) (- (v3y a) (v3y b)) (- (v3z a) (v3z b))))
+(define (v3scale s a) (v3 (* s (v3x a)) (* s (v3y a)) (* s (v3z a))))
+
+;;; ---------------------------- FIELDS ----------------------------
+;;; A field is an ordinary unary procedure, pos -> value. What it
+;;; CLOSES OVER (t, frequency) is a future GPU uniform; its STRUCTURE
+;;; is the future shader. That is why rebuilding a field every frame
+;;; below costs a closure, never a recompile.
+
+(define (wave t)
+  (lambda (p)
+    (* 0.5 (+ (sin (+ (v3x p) t))
+              (cos (+ (* 1.3 (v3y p)) (* 0.9 t)))
+              (sin (+ (* 0.7 (v3z p)) (* 1.1 t)))))))
+
+(define (fscale s f) (lambda (p) (v3scale s (f p))))   ; scales OUTPUT
+(define (fzoom  s f) (lambda (p) (f (v3scale s p))))   ; scales DOMAIN
+(define (warp f g)   (lambda (p) (f (v3+ p (g p)))))   ; domain distortion
+
+;; One partial derivative, by central difference. curl needs only 6 of
+;; the 9 partials, so asking for them individually costs 12 field
+;; evaluations instead of the 18 that three full gradients would.
+;; (A compiler could differentiate the field tree symbolically and pay
+;; ~3 -- this runtime cost is exactly the argument for that.)
+(define eps 0.05)
+(define (partial f axis)
+  (lambda (p)
+    (let ((h (v3 (if (= axis 0) eps 0.0)
+                 (if (= axis 1) eps 0.0)
+                 (if (= axis 2) eps 0.0))))
+      (/ (- (f (v3+ p h)) (f (v3- p h))) (* 2.0 eps)))))
+
+;; Three scalar potentials -> a DIVERGENCE-FREE vector field. That is
+;; what stops advected points collapsing into sinks: they swirl, they
+;; do not clump.
+(define (curl3 y1 y2 y3)
+  (let ((d3y (partial y3 1)) (d2z (partial y2 2))
+        (d1z (partial y1 2)) (d3x (partial y3 0))
+        (d2x (partial y2 0)) (d1y (partial y1 1)))
+    (lambda (p)
+      (v3 (- (d3y p) (d2z p))
+          (- (d1z p) (d3x p))
+          (- (d2x p) (d1y p))))))
+
+;;; ---------------------------- NODES -----------------------------
+;;; @P/@ptnum are deliberately unhygienic ambient bindings the macro
+;;; injects -- that is the point of the sigil, and here it is an
+;;; ordinary macro rather than VEX's parser hack.
+
+(defmacro (point-wrangle points . body)
+  \`(let ((n# (vector-length ,points)))
+     (do ((i# 0 (+ i# 1)))
+         ((= i# n#))
+       (let ((@P (vector-ref ,points i#))
+             (@ptnum i#))
+         (vector-set! ,points i# (begin ,@body))))))
+
+(define (as-node wrangle-thunk)
+  (lambda (points) (wrangle-thunk points) points))
+
+(define (pipe . nodes)
+  (lambda (points)
+    (for-each (lambda (n) (n points)) nodes)
+    points))
+
+;; Routes procedures. It has no idea whether they are nodes or fields,
+;; which is why the same combinator works at both levels.
+(define (switch selector . branches)
+  (lambda (x) ((list-ref branches (selector)) x)))
+
+;; THE bridge: field -> node. The only place the two algebras meet.
+(define (advect f dt)
+  (as-node (lambda (pts)
+             (point-wrangle pts (v3+ @P (v3scale dt (f @P)))))))
+
+;; A node that is not field-driven at all -- keeps the cloud in frame.
+;; Note it only acts OUTSIDE radius r. A uniform shrink cannot work
+;; here: curl flow is divergence-free, so it neither expands nor
+;; contracts volume, and nothing would oppose a constant inward pull --
+;; the cloud would collapse to a point. Acting only on escapees gives
+;; the ball of radius r as a genuine equilibrium.
+(define (contain r k)
+  (as-node (lambda (pts)
+             (point-wrangle pts
+               (let ((d (sqrt (+ (* (v3x @P) (v3x @P))
+                                 (* (v3y @P) (v3y @P))
+                                 (* (v3z @P) (v3z @P))))))
+                 (if (> d r)
+                     (v3scale (/ (+ r (* (- 1.0 k) (- d r))) d) @P)
+                     @P))))))
+
+(define (make-point-cube n spacing)
+  (let* ((total (* n n n))
+         (points (make-vector total))
+         (offset (* -0.5 spacing (- n 1))))
+    (do ((i 0 (+ i 1)))
+        ((= i total) points)
+      (let ((xi (modulo i n))
+            (yi (modulo (quotient i n) n))
+            (zi (quotient i (* n n))))
+        (vector-set! points i
+          (v3 (+ offset (* spacing xi))
+              (+ offset (* spacing yi))
+              (+ offset (* spacing zi))))))))
+
+;;; --------------------------- THE SCENE --------------------------
+
+;; Composed flow fields. Both are CONSTRUCTORS taking t: the closure
+;; captures it, so per-frame rebuilding is an allocation here and would
+;; be a uniform write on the GPU.
+(define (flow t)
+  (curl3 (fzoom 0.6 (wave t))
+         (fzoom 0.6 (wave (+ t 17.0)))
+         (fzoom 0.6 (wave (+ t 31.0)))))
+
+;; A cheap (non-curl) vector field, 3 wave evaluations. Used only to
+;; distort the domain -- warping does not need to be divergence-free.
+(define (ripple t)
+  (let ((w1 (wave t)) (w2 (wave (+ t 5.0))) (w3 (wave (+ t 9.0))))
+    (lambda (p) (v3 (w1 p) (w2 p) (w3 p)))))
+
+;; The same flow, sampled through a distorted domain. Pure composition,
+;; no new machinery -- and warping with ripple rather than another
+;; flow keeps this at 15 field evaluations instead of 24.
+(define (warped-flow t)
+  (warp (flow t) (fscale 0.5 (ripple (* 0.5 t)))))
+
+;; 4^3 = 64 points. Deliberately modest: 12 finite-difference field
+;; evaluations per point per frame is what an interpreter can afford at
+;; 60fps. A compiler differentiating the field tree symbolically would
+;; pay ~3, and this cube could be orders of magnitude denser.
+(define cube (make-point-cube 4 1.8))
+(define t 0.0)
+(define dt 0.05)
+(define frame 0)
+
+;; switch routing FIELD CONSTRUCTORS. advect never learns which it got.
+(define pick-field
+  (switch (lambda () (modulo (quotient frame 180) 2)) flow warped-flow))
+
+(define settle (contain 3.0 0.05))
+
+;; Fixed isometric-ish view. Rotation constants hoisted out of the
+;; per-point loop. No camera controls yet.
+(define ry 0.6)
+(define rx 0.4)
+(define cos-ry (cos ry))
+(define sin-ry (sin ry))
+(define cos-rx (cos rx))
+(define sin-rx (sin rx))
+
+(define (draw-cube points)
+  (let ((n (vector-length points))
+        (cx (/ (canvas-width) 2))
+        (cy (/ (canvas-height) 2)))
+    (do ((i 0 (+ i 1)))
+        ((= i n))
+      (let* ((p (vector-ref points i))
+             (x (v3x p)) (y (v3y p)) (z (v3z p))
+             (x1 (+ (* x cos-ry) (* z sin-ry)))
+             (z1 (+ (* (- x) sin-ry) (* z cos-ry)))
+             (y2 (- (* y cos-rx) (* z1 sin-rx)))
+             (z2 (+ (* y sin-rx) (* z1 cos-rx)))
+             (s (/ 260.0 (+ 8.0 z2)))
+             (b (max 0.15 (min 1.0 (/ s 40.0)))))
+        (canvas-draw-circle (+ cx (* x1 s)) (+ cy (* y2 s))
+                            (max 1.0 (* s 0.05))
+                            (* 0.35 b) (* 0.8 b) 1.0 0.85)))))
+
+(future
+  (let loop ()
+    (canvas-clear 0.02 0.03 0.05 1.0)
+    ;; Rebuilt every frame: the field's params move, its structure does not.
+    ((pipe (advect (pick-field t) dt) settle) cube)
+    (draw-cube cube)
+    (set! t (+ t dt))
+    (set! frame (+ frame 1))
+    (yield)
+    (loop)))
+`,
+
     attractor: `;;; ==========================================================
 ;;; Chaos Game / Barnsley Fern Attractor
 ;;; ==========================================================
