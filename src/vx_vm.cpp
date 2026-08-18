@@ -2292,6 +2292,64 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 1, 2));
 
+  // format — four directives and no more:
+  //   ~a  display (human-readable, strings unquoted)
+  //   ~s  write   (machine-readable, strings quoted)
+  //   ~%  newline
+  //   ~~  a literal tilde
+  //
+  // Deliberately NOT Common Lisp's FORMAT. That is a genuinely powerful
+  // mini-language — ~{~a~^, ~} to emit a comma-separated argument list is
+  // exactly what code generation wants — and also a famously write-only
+  // one, with iteration, conditionals and argument-jumping. The iteration
+  // directive is the thin end of that wedge; a `join` procedure written in
+  // Scheme reads better than a directive nobody can remember.
+  //
+  // Destination follows the usual convention: a leading port writes there
+  // and returns unspecified, otherwise the result is returned as a string.
+  def_global("format", heap.make_subr("format", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    uint32_t i = 0;
+    ObjPort *dest = nullptr;
+    if (argc > 0 && Heap::is_port(args[0])) {
+      dest = args[0].as_ptr<ObjPort>();
+      i = 1;
+    }
+    if (i >= argc || !Heap::is_string(args[i])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] format: expected a format string";
+      }
+      return Value::unspecified();
+    }
+    std::string_view fmt = args[i].as_ptr<ObjString>()->view();
+    uint32_t next_arg = i + 1;
+    std::ostringstream buf;
+    for (size_t k = 0; k < fmt.size(); ++k) {
+      if (fmt[k] != '~' || k + 1 == fmt.size()) { buf << fmt[k]; continue; }
+      char d = fmt[++k];
+      switch (d) {
+        case 'a': case 'A':
+          if (next_arg < argc) vm.display_value(args[next_arg++], buf);
+          break;
+        case 's': case 'S':
+          if (next_arg < argc) buf << vm.format_value(args[next_arg++]);
+          break;
+        case '%': case 'n': buf << '\n'; break;
+        case '~': buf << '~'; break;
+        default:
+          // Unknown directive: emit it verbatim rather than guessing.
+          buf << '~' << d;
+          break;
+      }
+    }
+    if (dest) {
+      if (dest->out) *dest->out << buf.str();
+      return Value::unspecified();
+    }
+    return vm.heap.make_string(buf.str());
+  }, 1, UINT32_MAX));
+
   // %set-current-output-port! — internal-only (reserved-name convention,
   // see %bracket-vector/%brace-map), not exported as a general Scheme
   // mutator. Real parameter objects (make-parameter/parameterize) would
@@ -2321,6 +2379,42 @@ void VM::init_primitives() {
     return vm.heap.make_output_file_port(std::move(ofs));
   }, 1, 1));
 
+  // --- String ports (R7RS / SRFI-6) ---------------------------------
+  // The idiomatic Scheme answer to "build a string incrementally", and
+  // the right backing for generating source text: one growable buffer,
+  // linear appends, and every existing writer works on it because it is
+  // just a port.
+  def_global("open-output-string", heap.make_subr("open-output-string", [](VM &vm, uint32_t, Value *) -> Value {
+    return vm.heap.make_output_string_port();
+  }, 0, 0));
+
+  def_global("get-output-string", heap.make_subr("get-output-string", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjPort *p = Heap::is_port(args[0]) ? args[0].as_ptr<ObjPort>() : nullptr;
+    if (!p || !p->oss) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] get-output-string: contract violation, expected a string "
+            "output port, got " + vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    return vm.heap.make_string(p->oss->str());
+  }, 1, 1));
+
+  def_global("open-input-string", heap.make_subr("open-input-string", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] open-input-string: contract violation, expected string, got " +
+            vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    return vm.heap.make_input_string_port(std::string(args[0].as_ptr<ObjString>()->view()));
+  }, 1, 1));
+
   // with-output-to-file / call-with-input-file / call-with-output-file:
   // bootstrapped in Scheme (same pattern as force/assert above) rather
   // than as C++ subrs — unwind-protect now provides exactly the
@@ -2341,6 +2435,19 @@ void VM::init_primitives() {
       "          (unwind-protect (thunk)"
       "            (%set-current-output-port! prev)"
       "            (close-output-port port))))))"
+      // Same shape as with-output-to-file: rebind, run, restore under
+      // unwind-protect so an escape or a raise still restores the port.
+      // No close needed — a string port owns no OS resource.
+      "(define (with-output-to-string thunk)"
+      "  (let ((port (open-output-string))"
+      "        (prev (current-output-port)))"
+      "    (%set-current-output-port! port)"
+      "    (unwind-protect (begin (thunk) (get-output-string port))"
+      "      (%set-current-output-port! prev))))"
+      "(define (call-with-output-string proc)"
+      "  (let ((port (open-output-string)))"
+      "    (proc port)"
+      "    (get-output-string port)))"
       "(define (call-with-input-file filename proc)"
       "  (let ((port (open-input-file filename)))"
       "    (if (not port) (error 'call-with-input-file \"could not open file:\" filename)"

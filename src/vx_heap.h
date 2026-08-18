@@ -9,6 +9,7 @@
 #include <string_view>
 #include <functional>
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <memory>
 
@@ -278,6 +279,14 @@ struct ObjPort : Obj {
   bool owns_stream = false; // true for opened files; false for stdin/stdout
   std::unique_ptr<std::ifstream> ifs; // owned storage for a file input port
   std::unique_ptr<std::ofstream> ofs; // owned storage for a file output port
+  // Owned storage for a STRING port. A string port is a port like any
+  // other — that is the whole point: `display`, `write`, `newline` and any
+  // user procedure that takes a port work on it unchanged, with no second
+  // API. Accumulating with string-append instead would be O(n^2) copying
+  // and a fresh ObjString per step, which is exactly the wrong shape for
+  // generating a page of shader source.
+  std::unique_ptr<std::ostringstream> oss;
+  std::unique_ptr<std::istringstream> iss;
   std::istream *in = nullptr;  // the stream to actually read from
   std::ostream *out = nullptr; // the stream to actually write to
 
@@ -413,6 +422,23 @@ public:
     p->owns_stream = true;
     p->out = f.get();
     p->ofs = std::move(f);
+    return Value::from_ptr(p);
+  }
+
+  // String ports. Unlike file ports these own no OS resource, so closing
+  // is a no-op and forgetting to close leaks nothing — get-output-string
+  // stays readable afterwards, which is what callers expect.
+  inline Value make_output_string_port() {
+    ObjPort *p = allocate<ObjPort>(false);
+    p->oss = std::make_unique<std::ostringstream>();
+    p->out = p->oss.get();
+    return Value::from_ptr(p);
+  }
+
+  inline Value make_input_string_port(const std::string &s) {
+    ObjPort *p = allocate<ObjPort>(true);
+    p->iss = std::make_unique<std::istringstream>(s);
+    p->in = p->iss.get();
     return Value::from_ptr(p);
   }
 

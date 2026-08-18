@@ -108,6 +108,39 @@
           (loop (+ i 1) (+ acc nx))))))
 (zero-alloc "steady-state frame loop over a buffer allocates nothing" frame-body)
 
+;; --- string building ----------------------------------------------------
+;; A string port's buffer grows in C++ storage, not the Scheme heap, so
+;; emitting a page of source text costs a CONSTANT number of heap objects
+;; regardless of length. string-append accumulation costs one object per
+;; append and copies quadratically. This is the difference between shader
+;; codegen being invisible to the collector and being a GC event.
+
+(define (append-build n)
+  (let loop ((i 0) (s ""))
+    (if (= i n) (string-length s) (loop (+ i 1) (string-append s "line;\n")))))
+
+(define (port-build n)
+  (let ((p (open-output-string)))
+    (let loop ((i 0))
+      (if (= i n)
+          (string-length (get-output-string p))
+          (begin (display "line;\n" p) (loop (+ i 1)))))))
+
+(define (objects-for f n)
+  (f 20)                                     ; warm
+  (let* ((a0 (objects-allocated)) (r (f n)) (a1 (objects-allocated)))
+    (- a1 a0)))
+
+;; The invariant is that the port's cost does not GROW with output size —
+;; asserted as a comparison rather than an exact count, so an unrelated
+;; change in how many objects a port needs cannot make this brittle.
+(assert-equal "a string port's object cost is flat in output size"
+              #t
+              (= (objects-for port-build 400) (objects-for port-build 1600)))
+(assert-equal "string-append's object cost grows with output size"
+              #t
+              (> (objects-for append-build 1600) (objects-for append-build 400)))
+
 ;; --- the documented exception -------------------------------------------
 ;; Variadic CLOSURES cons their rest list (one cons per rest arg); variadic
 ;; subrs do not, because they receive a Value* into the stack instead. This
