@@ -102,6 +102,25 @@ test-aot: vx-scheme
 	  exit 1; \
 	fi
 
+# AddressSanitizer. Deliberately NOT part of `test` — it needs its own -O0
+# build and runs several times slower, so it belongs before committing VM
+# work rather than in the edit loop.
+#
+# It has already paid for itself: the use-after-free in touch presented as
+# a bare segfault, and ASan turned that into three stack traces naming the
+# allocation, the free and the read. That is the difference between "the
+# scheduler deletes fibers and touch holds a raw pointer" as a hypothesis
+# and as a fact.
+asan: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h
+	@echo "=== BUILDING + RUNNING SUITE UNDER ADDRESSSANITIZER ==="
+	$(Q)$(CXX) -std=c++20 -O0 -g -fsanitize=address -fno-omit-frame-pointer \
+	    -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER) \
+	    vx_vm.cpp main.cpp -o vx-scheme-asan
+	$(Q)cd .. && src/vx-scheme-asan testcases/run_suite.scm
+	$(Q)cd ../testcases && ../src/vx-scheme-asan vx-test.scm
+	@rm -f vx-scheme-asan
+	@echo "  ✅ [PASS] no ASan reports"
+
 # Deliberately NOT part of `test`: these print maze art, series tables and
 # pi digits, and check nothing. test-r4rs runs the same programs against
 # golden files and reports a total time. This target is for when you
@@ -116,5 +135,5 @@ bench: vx-scheme
 	./vx-scheme ../testcases/series.scm
 
 clean:
-	rm -f *.o vx-scheme vxs-* test_fibers ack_bin ack_aot.out a.out
+	rm -f *.o vx-scheme vx-scheme-asan vxs-* test_fibers ack_bin ack_aot.out a.out
 	rm -rf *.dSYM
