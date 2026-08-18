@@ -220,6 +220,24 @@ struct Fiber {
   std::vector<Value> saved_continuation;
   Fiber *parent_fiber = nullptr;
 
+  // The future this fiber COMPUTES (nil if it wasn't spawned by `future`).
+  // ObjFuture holds a raw Fiber* with no reverse link, so when the
+  // scheduler reaps a completed fiber it needs a way back to settle the
+  // future and clear that pointer — otherwise the future is left holding
+  // freed memory and the next `touch` reads it. Held as a Value so
+  // mark_fiber traces it; see the invariant note on ObjFuture.
+  Value backing_future = Value::nil();
+
+  // The future this fiber is BLOCKED on, nil when runnable. A blocked
+  // fiber deliberately stays in active_fibers — it is just a suspended
+  // fiber that re-suspends until its future settles. Keeping it in the
+  // ring means no second root set for the collector to remember to trace,
+  // which is one fewer invariant to keep not-forgetting. The field earns
+  // its place by making "blocked" observable: an embedder can report it,
+  // and a wait nothing can ever satisfy becomes a diagnosable deadlock
+  // rather than a silent hang.
+  Value awaited = Value::nil();
+
   inline Fiber()
       : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}
 
@@ -563,9 +581,35 @@ public:
   // browser's own event loop; the embedder stays responsive and the
   // preempted-count says why. No fiber ever observes another fiber's
   // effects at a non-yield boundary.
+  // `exclude`, when set, is skipped entirely. Used by a nested touch: that
+  // fiber is mid-dispatch further up the C++ stack, so stepping it again
+  // from here would re-enter it recursively.
   size_t step_all_active_fibers(
       size_t instructions_per_fiber = UNBOUNDED,
-      std::chrono::milliseconds wall_clock_budget = std::chrono::milliseconds::max());
+      std::chrono::milliseconds wall_clock_budget = std::chrono::milliseconds::max(),
+      Fiber *exclude = nullptr);
+
+  // Settle the future a finishing fiber was computing, and sever the
+  // future's pointer to it. MUST be called immediately before deleting any
+  // fiber the scheduler reaps: ObjFuture holds a raw Fiber*, so without
+  // this the future is left pointing at freed memory and the next touch
+  // reads it (heap-use-after-free, reachable from three lines of Scheme).
+  inline void settle_backing_future(Fiber *f) {
+    if (!f || !Heap::is_future(f->backing_future)) return;
+    ObjFuture *fut = f->backing_future.as_ptr<ObjFuture>();
+    if (!fut->is_completed) {
+      fut->is_completed = true;
+      if (f->state == Fiber::State::Error) {
+        fut->is_error = true;
+        fut->result = heap.make_string(
+            f->error_message.empty() ? "future failed" : f->error_message);
+      } else {
+        fut->result = f->result;
+      }
+    }
+    fut->fiber = nullptr;   // the invariant: never stale
+    f->backing_future = Value::nil();
+  }
 
   // The deadline-preempted fiber owed an exclusive resume — see above.
   Fiber *preempted_fiber = nullptr;

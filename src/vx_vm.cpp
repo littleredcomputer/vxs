@@ -189,6 +189,8 @@ void Heap::mark_fiber(Fiber *f) {
     }
   }
   mark_value(f->result);
+  mark_value(f->backing_future);
+  mark_value(f->awaited);
   for (Value v : f->saved_continuation) {
     mark_value(v);
   }
@@ -1005,6 +1007,10 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         active_fibers.push_back(child);
 
         Value fut_val = heap.make_future(child);
+        // Reverse link, so the scheduler can settle this future when the
+        // child finishes. The child is already in active_fibers, so it is
+        // rooted across the allocation above.
+        child->backing_future = fut_val;
         f.push(fut_val);
         break;
       }
@@ -1018,26 +1024,90 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         }
         ObjFuture *fut = fut_val.as_ptr<ObjFuture>();
         if (fut->is_completed) {
-          f.push(fut->result);
-        } else {
-          // If not completed, run child until completion
-          while (fut->fiber && fut->fiber->state != Fiber::State::Completed && fut->fiber->state != Fiber::State::Error) {
-            step_fiber(*fut->fiber, 1000);
+          f.awaited = Value::nil();   // no longer waiting on anything
+          if (fut->is_error) {
+            f.state = Fiber::State::Error;
+            f.error_message = Heap::is_string(fut->result)
+                ? std::string(fut->result.as_ptr<ObjString>()->view())
+                : "[VM Error] touch: awaited computation failed";
+            return StepResult::Error;
           }
-          fut->is_completed = true;
-          fut->result = fut->fiber->result;
           f.push(fut->result);
-          // Clean up finished fiber from active list
-          for (auto it = active_fibers.begin(); it != active_fibers.end(); ++it) {
-            if (*it == fut->fiber) {
-              active_fibers.erase(it);
-              delete fut->fiber;
-              fut->fiber = nullptr;
-              break;
+          break;
+        }
+
+        // Nested inside a native call (load/map/apply/for-each/force):
+        // this fiber's continuation includes C++ frames from
+        // call_closure, so it physically cannot suspend — the same reason
+        // (yield) is rejected there. Drive the computing fiber directly
+        // instead. That is the old behaviour, kept ONLY where suspending
+        // is impossible, and now null-safe and deadline-bounded instead
+        // of an unbounded loop over a possibly-freed pointer.
+        if (stop_at_depth > 0) {
+          if (!fut->fiber) {
+            f.state = Fiber::State::Error;
+            f.error_message = "[VM Error] touch: cannot await a future computed "
+                              "outside the VM from inside map/apply/load — "
+                              "touch it from a fiber instead";
+            return StepResult::Error;
+          }
+          // Pump the whole scheduler, not just this future's fiber: what
+          // we await may itself be waiting on a third fiber, and driving
+          // one in isolation livelocks the chain. Everyone but us runs.
+          while (!fut->is_completed) {
+            if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >= deadline) {
+              frame->ip = ip - 1;   // resumable: re-touch on the next slice
+              f.push(fut_val);
+              return StepResult::Preempted;
+            }
+            step_all_active_fibers(max_instructions, std::chrono::milliseconds::max(), &f);
+            if (fut->is_completed) break;
+            // Can anything still make progress? Every other fiber being
+            // blocked on an unsettled future means no, and spinning would
+            // just hang. Report it instead.
+            bool progress_possible = false;
+            for (Fiber *cand : active_fibers) {
+              if (cand == &f) continue;
+              if (!Heap::is_future(cand->awaited)) { progress_possible = true; break; }
+              if (cand->awaited.as_ptr<ObjFuture>()->is_completed) { progress_possible = true; break; }
+            }
+            if (!progress_possible) {
+              f.state = Fiber::State::Error;
+              f.error_message = "[VM Error] touch: awaiting a future that nothing "
+                                "can complete (deadlock)";
+              return StepResult::Error;
             }
           }
+          if (fut->is_error) {
+            f.state = Fiber::State::Error;
+            f.error_message = Heap::is_string(fut->result)
+                ? std::string(fut->result.as_ptr<ObjString>()->view())
+                : "[VM Error] touch: awaited computation failed";
+            return StepResult::Error;
+          }
+          f.push(fut->result);
+          break;
         }
-        break;
+
+        // Not ready. Previously this drove the child fiber inline —
+        //   while (fut->fiber && ...) step_fiber(*fut->fiber, 1000);
+        // which had three defects: it read fut->fiber without knowing the
+        // scheduler may already have deleted it (use-after-free), it ran
+        // unbounded with no deadline (a hole straight through the frame
+        // budget), and it dereferenced a null fiber for any future the VM
+        // is not itself computing.
+        //
+        // Instead: suspend, and let the scheduler make progress. Rewind to
+        // re-execute this very OP_TOUCH on resume, with its operand pushed
+        // back — so waking up re-tests the condition rather than trusting
+        // anything cached. The fiber stays in active_fibers while blocked
+        // (skipped, not removed) so it needs no second root set and the
+        // collector keeps tracing its stack.
+        f.push(fut_val);
+        frame->ip = ip - 1;   // back to the OP_TOUCH byte itself
+        f.awaited = fut_val;
+        f.state = Fiber::State::Suspended;
+        return StepResult::Yielded;
       }
 
       default:
@@ -1060,7 +1130,8 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
 // Step all active background fibers — see the declaration's comment for
 // the shared-deadline and exclusive-resume (preempted_fiber) policies.
 size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
-                                  std::chrono::milliseconds wall_clock_budget) {
+                                  std::chrono::milliseconds wall_clock_budget,
+                                  Fiber *exclude) {
   auto deadline = (wall_clock_budget == std::chrono::milliseconds::max())
                       ? NO_DEADLINE
                       : std::chrono::steady_clock::now() + wall_clock_budget;
@@ -1069,7 +1140,7 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
   // A fiber the deadline cut off mid-flight last call is owed an
   // exclusive resume: nothing else may step until it reaches its own
   // yield, so no sibling ever observes its half-finished work.
-  if (preempted_fiber) {
+  if (preempted_fiber && preempted_fiber != exclude) {
     auto it = std::find(active_fibers.begin(), active_fibers.end(), preempted_fiber);
     if (it == active_fibers.end()) {
       preempted_fiber = nullptr; // it died elsewhere; nothing owed
@@ -1083,6 +1154,7 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
       if (res == StepResult::Completed || res == StepResult::Error) {
         size_t pos = static_cast<size_t>(it - active_fibers.begin());
         active_fibers.erase(it);
+        settle_backing_future(f);
         delete f;
         // Everything after pos shifted down one; keep the cursor on the
         // same fiber it was pointing at.
@@ -1108,10 +1180,17 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
     }
     if (round_cursor >= active_fibers.size()) round_cursor = 0;
     Fiber *f = active_fibers[round_cursor];
+    if (f == exclude) {   // mid-dispatch above us; stepping it would recurse
+      ++visited;
+      ++round_cursor;
+      if (round_cursor >= active_fibers.size()) round_cursor = 0;
+      continue;
+    }
     StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
     ++visited;
     if (res == StepResult::Completed || res == StepResult::Error) {
       active_fibers.erase(active_fibers.begin() + round_cursor);
+      settle_backing_future(f);
       delete f;
       // Successor shifted into this slot: leave the cursor where it is.
     } else if (res == StepResult::Preempted) {
