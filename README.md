@@ -1,4 +1,4 @@
-# Vx-Scheme
+# vxs
 
 A small, fast, NaN-boxed Scheme implementation with a single-pass
 bytecode compiler and a cooperative fiber scheduler — built to run
@@ -19,6 +19,23 @@ compactness while retargeting it: 64-bit NaN-boxed values instead of a
 heap-allocated variant type, a chunked/deque-backed VM stack instead of
 a reallocating one, and WebAssembly as a first-class target instead of
 an afterthought.
+
+## The name
+
+**vxs** — say it "vee-excess." It's named for VxWorks, the real-time OS
+the 2002 original was built on, and that lineage turns out to be more
+than sentimental: the scheduler enforces a wall-clock frame budget, no
+well-behaved fiber can be starved by its siblings, and a steady-state
+loop that builds no aggregates allocates *nothing* — so the collector
+never runs during animation. Bounded latency, no starvation, no
+unbounded pauses in the hot path. Those are real-time values, inherited
+as design taste rather than as a deployment constraint.
+
+It's Scheme-shaped rather than Scheme-bounded: bracket vectors, map
+literals, keywords, and green threads all live past the standard's edge,
+so the system is *vxs* and R4RS conformance is a property it has. The
+command-line binary keeps the old name — `vx-scheme` — because that is
+what twenty-four years of muscle memory types.
 
 ## Features
 

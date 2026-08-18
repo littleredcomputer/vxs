@@ -99,7 +99,7 @@
        type-examples))
 (set! i 0)
 (define j 0)
-;; Vx-Scheme deviation: vectors are first-class callable procedures here
+;; vxs deviation: vectors are first-class callable procedures here
 ;; ((#(v) idx) reads like a Clojure-style callable collection), so
 ;; procedure? and vector? are not disjoint for vector values as R4RS
 ;; expects. Skip just that one cross-check rather than dropping either
@@ -450,7 +450,7 @@
 (define char-standard-case char-upcase)
 (if (string=? (symbol->string (quote A)) "a")
     (set! char-standard-case char-downcase))
-;; Vx-Scheme deviation: symbols are case-SENSITIVE (no R4RS-mandated
+;; vxs deviation: symbols are case-SENSITIVE (no R4RS-mandated
 ;; case folding at read time, section 6.4) -- matches the convention the
 ;; wider modern Scheme/Clojure world settled on rather than R4RS here.
 ;; (symbol->string (quote a)) and (symbol->string (quote A)) are simply
@@ -1218,7 +1218,7 @@
 (newline)
 (test-delay)
 (newline)
-;; Vx-Scheme deviation: call/cc is real but escape-only (single-shot,
+;; vxs deviation: call/cc is real but escape-only (single-shot,
 ;; upward unwind via a C++ exception under the hood — see
 ;; ContinuationEscape in vx_vm.h) — deliberately not general re-entrant
 ;; continuations. test-cont's next-leaf-generator specifically needs the

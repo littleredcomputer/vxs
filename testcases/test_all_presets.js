@@ -1,5 +1,5 @@
 // testcases/test_all_presets.js
-const createVxSchemeModule = require('../web/vxs.js');
+const createVxsModule = require('../web/vxs.js');
 
 // Mock canvas and window functions for Node environment
 global.vxsCanvasClear = (r, g, b, a) => {};
@@ -13,7 +13,7 @@ global.vxsMouseX = () => 400;
 global.vxsMouseY = () => 300;
 global.vxsMouseDown = () => 0;
 
-createVxSchemeModule().then((VXS) => {
+createVxsModule().then((VXS) => {
   console.log('=== [1] INITIALIZING WASM SCHEME CORE ===');
   const init = VXS._vxs_init();
   console.log('Init status:', init);

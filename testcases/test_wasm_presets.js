@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const createVxSchemeModule = require('../web/vxs.js');
+const createVxsModule = require('../web/vxs.js');
 
 const presets = {
   particles: `
@@ -154,35 +154,90 @@ const presets = {
 `
 };
 
+// How many fibers each preset is expected to leave running after load.
+// null = don't care (the preset finishes synchronously or its count is
+// not the interesting property).
+const expectedFibers = {
+  particles: 11,   // 10 spawned + 1 fade controller
+  attractor: 1,
+  mcmc: 1,
+  wave: 1,
+  fibers: null,
+  repl: 0,
+};
+
 async function run() {
   const wasmPath = path.join(__dirname, '../web/vxs.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
 
-  const M = await createVxSchemeModule({
+  // The repl/fibers presets `display` their own output. That is the
+  // program working, not information about the test, so swallow it —
+  // otherwise a passing run buries its own result in program chatter.
+  global.vxsPrint = () => {};
+
+  const M = await createVxsModule({
     wasmBinary: wasmBuffer
   });
   M._vxs_init();
   const vxsEval = M.cwrap('vxs_eval', 'string', ['string']);
-  const vxsStep = M.cwrap('vxs_step_fibers', 'number', []);
+  const vxsStep = M.cwrap('vxs_step_fibers', 'number', ['number']);
   const vxsCount = M.cwrap('vxs_active_fibers_count', 'number', []);
   const vxsClear = M.cwrap('vxs_clear_fibers', null, []);
 
-  console.log("=== RUNNING ALL 6 PRESETS IN WEBASSEMBLY ENGINE ===");
+  const names = Object.keys(presets);
+  console.log(`=== RUNNING ALL ${names.length} PRESETS IN WEBASSEMBLY ENGINE ===`);
+
+  let passed = 0;
+  let failed = 0;
+  const fail = (name, why) => {
+    console.log(`  ❌ [FAIL] ${name.padEnd(12)} ${why}`);
+    failed++;
+  };
+
   for (const [name, code] of Object.entries(presets)) {
-    console.log(`\nTesting preset: [${name}]`);
     vxsClear();
     const out = vxsEval(code);
-    console.log(`  -> Output: ${out}`);
-    const active = vxsCount();
-    console.log(`  -> Active fibers: ${active}`);
-    if (active > 0) {
-      vxsStep(200);
-      console.log(`  -> Stepped 200 instructions. Remaining active: ${vxsCount()}`);
+
+    if (typeof out === 'string' && /error|exception/i.test(out)) {
+      fail(name, `evaluation reported: ${out}`);
+      continue;
     }
+
+    const active = vxsCount();
+    const want = expectedFibers[name];
+    if (want !== null && want !== undefined && active !== want) {
+      fail(name, `expected ${want} active fiber(s), got ${active}`);
+      continue;
+    }
+
+    // Pump the real scheduler path (0 = run each fiber to its own yield
+    // under the wall-clock backstop), not the legacy instruction cap.
+    let stepped = 0;
+    for (let i = 0; i < 10 && vxsCount() > 0; i++) { vxsStep(0); stepped++; }
+
+    if (vxsCount() > 0 && stepped === 0) {
+      fail(name, 'fibers active but scheduler made no progress');
+      continue;
+    }
+
+    const detail = active > 0
+      ? `${active} fiber(s), stepped ${stepped} frame(s) cleanly`
+      : `completed synchronously`;
+    console.log(`  ✅ [PASS] ${name.padEnd(12)} ${detail}`);
+    passed++;
   }
-  console.log("\n✨ ALL 6 PRESETS VERIFIED 100% WORKING ON WASM! ✨");
+
+  console.log(`\n────────────────────────────────────────────────────────────────`);
+  console.log(`Presets: ${names.length} | Passed: ${passed} | Failed: ${failed}`);
+  if (failed === 0) {
+    console.log('✨ ALL PRESETS VERIFIED WORKING ON WASM! ✨');
+  } else {
+    console.log('💥 PRESET VERIFICATION FAILED');
+    process.exit(1);
+  }
 }
 
 run().catch(e => {
   console.error("FATAL ERROR IN RUN():", e);
+  process.exit(1);
 });

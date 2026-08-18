@@ -1,5 +1,5 @@
 ;;----------------------------------------------------------------------
-;; Vx-Scheme Ground-Up Test Framework
+;; vxs Ground-Up Test Framework
 ;;----------------------------------------------------------------------
 
 (if (not (defined? '*test-framework-loaded*))

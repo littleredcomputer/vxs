@@ -29,7 +29,7 @@ static Value eval_scheme(VM &vm, const std::string &code) {
 }
 
 int main() {
-  std::cout << "=== RUNNING VX-SCHEME MARK-AND-SWEEP GC UNIT & STRESS TESTS ===" << std::endl;
+  std::cout << "=== RUNNING VXS MARK-AND-SWEEP GC UNIT & STRESS TESTS ===" << std::endl;
 
   // Test 1: Transient Garbage Reclamation
   {

@@ -3138,7 +3138,7 @@ void VM::init_primitives() {
 
   // R7RS's answer to "why won't for-each/map walk a vector": separate,
   // type-specific procedures rather than generalizing for-each/map
-  // themselves (see yesterday's for-each fix — vx-scheme follows
+  // themselves (see yesterday's for-each fix — vxs follows
   // mainstream Scheme here, not Clojure's single-seq-abstraction model).
   auto subr_vector_for_each = [](VM &vm, uint32_t argc, Value *args) -> Value {
     Value fn = args[0];
@@ -3428,8 +3428,9 @@ void VM::init_primitives() {
     return res;
   }, 1, 1));
 
+  // The SYSTEM is vxs; `vx-scheme` is only the command-line binary's name.
   def_global("scheme-implementation-type", heap.make_subr("scheme-implementation-type", [](VM &vm, uint32_t, Value *) -> Value {
-    return Value::from_symbol_id(vm.intern("vx-scheme"));
+    return Value::from_symbol_id(vm.intern("vxs"));
   }, 0, 0));
 
   def_global("exit", heap.make_subr("exit", [](VM &, uint32_t argc, Value *args) -> Value {
@@ -3441,7 +3442,7 @@ void VM::init_primitives() {
     return Value::from_symbol_id(vm.intern("native"));
   }, 0, 0));
 
-  def_global("vx-scheme-implementation-type", heap.make_subr("vx-scheme-implementation-type", [](VM &vm, uint32_t, Value *) -> Value {
+  def_global("vxs-implementation-type", heap.make_subr("vxs-implementation-type", [](VM &vm, uint32_t, Value *) -> Value {
     return Value::from_symbol_id(vm.intern("vm"));
   }, 0, 0));
 

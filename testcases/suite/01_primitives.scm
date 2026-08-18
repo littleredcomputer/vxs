@@ -129,9 +129,9 @@
 (assert-equal "keyword->string" "foo" (keyword->string :foo))
 (assert-equal "string->keyword" :bar (string->keyword "bar"))
 
-(let ((m {:name "Vx-Scheme" :version 0.8 :fast? #t}))
+(let ((m {:name "vxs" :version 0.8 :fast? #t}))
   (assert-true "map? on map" (map? m))
-  (assert-equal "get from map" "Vx-Scheme" (get m :name))
+  (assert-equal "get from map" "vxs" (get m :name))
   (assert-equal "map as procedure" 0.8 (m :version))
   (assert-equal "keyword as procedure" #t (:fast? m)))
 

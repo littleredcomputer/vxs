@@ -1,5 +1,5 @@
 //----------------------------------------------------------------------
-// vx-scheme : Modern 64-Bit NaN-Boxed Scheme Engine
+// vxs — command-line driver for the vx-scheme binary
 // Copyright (c) 2002-2026 Colin Smith.
 //----------------------------------------------------------------------
 
@@ -106,7 +106,7 @@ static bool is_balanced(const std::string &code) {
 }
 
 static void run_repl(VM &vm) {
-  std::cout << "Vx-Scheme 0.8 (64-bit NaN-Boxed Bytecode Engine)" << std::endl;
+  std::cout << "vxs 0.8 (64-bit NaN-Boxed Bytecode Engine)" << std::endl;
   std::cout << "Type (exit) or Ctrl+D to quit." << std::endl;
 
   std::string buffer;
@@ -261,7 +261,7 @@ static std::string generate_aot_source(VM &compile_vm, ObjClosure *root_closure)
   collect_closures(root_closure, closures, seen);
 
   std::ostringstream out;
-  out << R"(// Auto-generated AOT Bytecode by Vx-Scheme Compiler
+  out << R"(// Auto-generated AOT Bytecode by vxs Compiler
 #include "vx_value.h"
 #include "vx_heap.h"
 #include "vx_vm.h"

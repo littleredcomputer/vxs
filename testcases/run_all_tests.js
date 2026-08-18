@@ -1,13 +1,13 @@
 const fs = require('fs');
 const path = require('path');
-const createVxSchemeModule = require('../web/vxs.js');
+const createVxsModule = require('../web/vxs.js');
 const { runTestSuite } = require('../web/test_suite.js');
 
 async function main() {
   const wasmPath = path.join(__dirname, '../web/vxs.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
 
-  const M = await createVxSchemeModule({
+  const M = await createVxsModule({
     wasmBinary: wasmBuffer
   });
   M._vxs_init();
@@ -16,7 +16,7 @@ async function main() {
   const vxsClearFibers = M.cwrap('vxs_clear_fibers', null, []);
 
   console.log('╔════════════════════════════════════════════════════════════════╗');
-  console.log('║   VX-SCHEME WEBASSEMBLY STRUCTURED UNIT TEST MATRIX RUNNER     ║');
+  console.log('║   VXS WEBASSEMBLY STRUCTURED UNIT TEST MATRIX RUNNER     ║');
   console.log('╚════════════════════════════════════════════════════════════════╝\n');
 
   const summary = await runTestSuite(vxsEvalJson, vxsClearFibers);

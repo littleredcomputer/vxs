@@ -386,7 +386,13 @@ int vxs_step_fibers(int instructions_per_fiber) {
   }
   ++g_step_calls;
   g_preempt_total += preempted;
-  if (preempted > 0) {
+  // Only meaningful on the default (deadline) path: there, a preemption
+  // means a fiber ran past the frame budget without yielding, which is a
+  // bug in that fiber and worth hearing about. Under an explicit
+  // instruction cap the caller ASKED to be cut off at N instructions, so
+  // preemption is the requested behaviour and there is no frame budget to
+  // exceed — warning there just prints a falsehood on every call.
+  if (preempted > 0 && instructions_per_fiber <= 0) {
     fprintf(stderr, "[vxs] %zu fiber(s) exceeded the frame budget without yielding\n", preempted);
   }
   return static_cast<int>(g_vm->active_fibers.size());

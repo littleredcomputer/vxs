@@ -1,11 +1,11 @@
 ;;----------------------------------------------------------------------
-;; Vx-Scheme Master Test Suite Runner
+;; vxs Master Test Suite Runner
 ;;----------------------------------------------------------------------
 
 (load "testcases/test_framework.scm")
 
 (display "\n================================================================\n")
-(display "     🚀 RUNNING VX-SCHEME GROUND-UP TEST SUITE 🚀\n")
+(display "     🚀 RUNNING VXS GROUND-UP TEST SUITE 🚀\n")
 (display "================================================================\n")
 
 (load "testcases/suite/01_primitives.scm")

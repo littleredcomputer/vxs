@@ -1,8 +1,8 @@
 // testcases/test_wasm.js
-const createVxSchemeModule = require('../web/vxs.js');
+const createVxsModule = require('../web/vxs.js');
 
-createVxSchemeModule().then((VXS) => {
-  console.log('[1] Initializing Vx-Scheme Wasm Core...');
+createVxsModule().then((VXS) => {
+  console.log('[1] Initializing vxs Wasm Core...');
   const init = VXS._vxs_init();
   console.log('    vxs_init returned:', init);
 

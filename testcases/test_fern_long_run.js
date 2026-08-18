@@ -1,10 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const createVxSchemeModule = require('../web/vxs.js');
+const createVxsModule = require('../web/vxs.js');
 
 async function testFernLongRun() {
   const wasmBuffer = fs.readFileSync(path.join(__dirname, '../web/vxs.wasm'));
-  const M = await createVxSchemeModule({ wasmBinary: wasmBuffer });
+  const M = await createVxsModule({ wasmBinary: wasmBuffer });
   M._vxs_init();
 
   const vxsEvalJson = M.cwrap('vxs_eval_json', 'string', ['string']);

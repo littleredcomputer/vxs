@@ -26,12 +26,12 @@
 ;;; BOYER -- Logic programming benchmark, originally written by Bob Boyer.
 ;;; Fairly CONS intensive.
 
-;;; Vx-Scheme: As in SICP 2ed. p. 271, our "get" primitive returns 
+;;; vxs: As in SICP 2ed. p. 271, our "get" primitive returns 
 ;;; #f for a nonexistent property.  This code, on the other hand,
 ;;; is expecting to receive '() in that case.  We've changed all 
 ;;; the existing 'gets' to cl-get, defined below.
 
-(if (eq? (scheme-implementation-type) 'vx-scheme)
+(if (eq? (scheme-implementation-type) 'vxs)
     (define (cl-get symbol prop)
       (or (get symbol prop) '())))
 
