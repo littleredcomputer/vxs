@@ -199,12 +199,24 @@ struct ObjClosure : Obj {
 //-----------------------------------------------------------------------------
 struct ObjFuture : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Future;
+
+  // INVARIANT: `fiber` is either a live fiber still in the scheduler, or
+  // nullptr. It is never a stale pointer. The scheduler settles a future
+  // and clears this the moment the computing fiber completes (see
+  // step_all_active_fibers), because it deletes that fiber immediately
+  // afterwards. A future with fiber == nullptr and is_completed == false
+  // is legitimate: it is awaiting something outside the VM entirely.
   Fiber *fiber;
   Value result;
   bool is_completed;
+  // Set when the computing fiber died with an error: `result` then carries
+  // what to report, and touching raises rather than silently yielding a
+  // bogus value.
+  bool is_error;
 
   inline explicit ObjFuture(Fiber *f)
-      : Obj(ObjType::Future), fiber(f), result(Value::unspecified()), is_completed(false) {}
+      : Obj(ObjType::Future), fiber(f), result(Value::unspecified()),
+        is_completed(false), is_error(false) {}
 };
 
 //-----------------------------------------------------------------------------

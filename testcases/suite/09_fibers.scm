@@ -85,6 +85,44 @@
 (run-fibers)
 (assert-equal "run-fibers with nothing active is harmless" #t #t)
 
+;; --- touch and the lifetime of the computing fiber ----------------------
+;; ObjFuture holds a raw Fiber*, and the scheduler deletes fibers the
+;; moment they complete. Touching afterwards used to read freed memory —
+;; a heap-use-after-free reachable from three lines of Scheme, confirmed
+;; under ASan. The scheduler now settles the future and severs the pointer
+;; before reaping, so `fiber` is either live or null but never stale.
+
+(define reaped (future (+ 1 2)))
+(run-fibers)                       ; completes AND deletes the computing fiber
+(assert-equal "touch after the scheduler reaped the fiber" 3 (touch reaped))
+(assert-equal "touching a settled future again is stable" 3 (touch reaped))
+
+;; A future touched before it has run must block the toucher and resume
+;; with the value — not drive the child inline, which is what used to blow
+;; through the frame budget with no deadline.
+(assert-equal "touch of a not-yet-run future yields the value" 42
+              (touch (future (* 6 7))))
+
+(assert-equal "two pending futures, both touched" 100
+              (let ((f1 (future (+ 10 20)))
+                    (f2 (future (+ 30 40))))
+                (+ (touch f1) (touch f2))))
+
+;; A fiber can touch a future computed by another fiber.
+(define inner (future (* 3 4)))
+(define outer (future (+ 1 (touch inner))))
+(assert-equal "a fiber may touch another fiber's future" 13 (touch outer))
+
+;; Touching the same future from two different fibers: both get the value,
+;; and the computation runs once.
+(define runs 0)
+(define shared-fut (future (begin (set! runs (+ runs 1)) 'once)))
+(define a (future (touch shared-fut)))
+(define b (future (touch shared-fut)))
+(assert-equal "two fibers touching one future agree" '(once once)
+              (list (touch a) (touch b)))
+(assert-equal "the future's body ran exactly once" 1 runs)
+
 ;; --- fibers see shared mutable state at yield boundaries ----------------
 ;; Cooperative scheduling's whole contract: no fiber observes another's
 ;; half-finished work, because control only changes hands at (yield).

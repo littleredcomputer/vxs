@@ -232,6 +232,40 @@ using namespace vxs;
 
 static std::string g_eval_result_buffer;
 
+// A synchronously-evaluated form can suspend — on (yield), or on (touch)
+// of a future that has not settled. Drive the scheduler and resume it
+// until it finishes or the deadline expires. Without this the form is
+// abandoned mid-expression and quietly evaluates to #<unspecified>.
+//
+// Still bounded by the SAME deadline the caller passed: this is the
+// browser's main thread, and pumping forever is exactly the tab freeze
+// the deadline exists to prevent. A future that can only be settled from
+// outside the VM — a promise, once those exist — therefore cannot be
+// awaited from a synchronous eval at all, and correctly reports a
+// timeout. The way to await one is from a fiber, driven by
+// requestAnimationFrame, which is the whole point of the design.
+static VM::StepResult pump_until_settled(Fiber &fiber, VM::StepResult res,
+                                         std::chrono::steady_clock::time_point deadline) {
+  while (res == VM::StepResult::Yielded &&
+         fiber.state == Fiber::State::Suspended &&
+         std::chrono::steady_clock::now() < deadline) {
+    g_vm->step_all_active_fibers(VM::UNBOUNDED, std::chrono::milliseconds::max());
+    if (Heap::is_future(fiber.awaited) && g_vm->active_fibers.empty()) {
+      ObjFuture *awaited = fiber.awaited.as_ptr<ObjFuture>();
+      if (!awaited->is_completed && !awaited->fiber) {
+        // Nothing in the VM can ever settle this one.
+        return VM::StepResult::Preempted;
+      }
+    }
+    res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
+  }
+  // Still suspended with the clock run out: a timeout, reported as one.
+  if (res == VM::StepResult::Yielded && fiber.state == Fiber::State::Suspended) {
+    return VM::StepResult::Preempted;
+  }
+  return res;
+}
+
 // Separate from g_eval_result_buffer on purpose — see vxs_stats_json.
 static std::string g_stats_buffer;
 // Scheduler counters the VM itself has no reason to keep: these describe
@@ -289,8 +323,9 @@ const char *vxs_eval_json(const char *code) {
     // for a one-shot "run what's in the buffer" action. A hit deadline
     // is reported as a timeout, never dressed up as a result — that
     // would be the Yielded/Preempted conflation rebuilt one layer up.
-    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED,
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(750));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
+    res = pump_until_settled(fiber, res, deadline);
     auto t_end = std::chrono::high_resolution_clock::now();
     double time_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
 
@@ -348,8 +383,9 @@ const char *vxs_eval(const char *code) {
     fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
 
     // Same deadline treatment as vxs_eval_json above.
-    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED,
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(750));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
+    res = pump_until_settled(fiber, res, deadline);
     if (res == VM::StepResult::Preempted) {
       g_eval_result_buffer = "[Timeout] evaluation exceeded 750ms and was stopped";
     } else if (res == VM::StepResult::Error) {

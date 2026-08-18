@@ -37,6 +37,31 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
       // UNBOUNDED: a top-level script that never terminates is the
       // program's bug, same as in any interpreter — not the VM's to cap.
       VM::StepResult res = vm.step_fiber(fiber);
+
+      // A top-level form can suspend: on (yield), or on (touch) of a
+      // future that has not settled yet. Drive the scheduler and resume,
+      // which is the native embedder's counterpart to what
+      // requestAnimationFrame does in the browser. Without this the form
+      // is silently abandoned mid-expression and evaluates to nothing.
+      while (res == VM::StepResult::Yielded &&
+             fiber.state == Fiber::State::Suspended) {
+        vm.step_all_active_fibers();
+        // Blocked on a future that nothing left can settle: no fiber is
+        // computing it and none is running to start. Report it rather
+        // than spinning forever — a hang here is indistinguishable from
+        // a slow program, and this is neither.
+        if (Heap::is_future(fiber.awaited) && vm.active_fibers.empty()) {
+          ObjFuture *awaited = fiber.awaited.as_ptr<ObjFuture>();
+          if (!awaited->is_completed && !awaited->fiber) {
+            ok = false;
+            err_msg = "[VM Error] touch: awaiting a future that nothing "
+                      "can complete (deadlock)";
+            return Value::unspecified();
+          }
+        }
+        res = vm.step_fiber(fiber);
+      }
+
       if (res == VM::StepResult::Error || fiber.state == Fiber::State::Error) {
         ok = false;
         err_msg = fiber.error_message.empty() ? "[VM Error] Execution error" : fiber.error_message;
