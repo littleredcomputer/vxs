@@ -98,7 +98,35 @@ static void js_console_log(const char *text) { std::cout << "[CONSOLE.LOG] " << 
 #endif
 
 // Register Canvas & Web primitives
+#ifdef __EMSCRIPTEN__
+// Start a timer that will settle `token` when it fires. The callback runs
+// from the JS event loop — i.e. only once the VM has returned control —
+// so settling can never re-enter a running dispatch. It just flips a flag
+// on the future; the blocked fiber notices on the next scheduler tick,
+// because touch re-executes and re-tests rather than caching anything.
+EM_JS(void, js_settle_after, (int token, double ms), {
+  setTimeout(function() {
+    if (Module && Module._vxs_settle_number) Module._vxs_settle_number(token, ms);
+  }, ms);
+});
+#else
+static void js_settle_after(int, double) {}
+#endif
+
 static void register_wasm_primitives(VM &vm) {
+  // (sleep ms) -> future. The first consumer of the external-future path,
+  // and useful in its own right: a fiber can wait without blocking the
+  // browser, because waiting means "suspend and let the scheduler run",
+  // not "spin".
+  vm.def_global("sleep", vm.heap.make_subr("sleep", [](VM &vm, uint32_t, Value *args) -> Value {
+    double ms = args[0].is_int() ? static_cast<double>(args[0].as_int())
+                                 : args[0].as_real();
+    Value fut = vm.heap.make_external_future();
+    uint32_t token = vm.register_external(fut);
+    js_settle_after(static_cast<int>(token), ms);
+    return fut;
+  }, 1, 1));
+
   auto subr_clear = [](VM &, uint32_t argc, Value *args) -> Value {
     double r = argc > 0 ? args[0].as_real() : 0.0;
     double g = argc > 1 ? args[1].as_real() : 0.0;
@@ -253,7 +281,20 @@ static VM::StepResult pump_until_settled(Fiber &fiber, VM::StepResult res,
     if (Heap::is_future(fiber.awaited) && g_vm->active_fibers.empty()) {
       ObjFuture *awaited = fiber.awaited.as_ptr<ObjFuture>();
       if (!awaited->is_completed && !awaited->fiber) {
-        // Nothing in the VM can ever settle this one.
+        // An EXTERNAL future can never settle during a synchronous eval:
+        // the JS event loop cannot run while we hold the main thread, so
+        // pumping just burns the deadline and reports a useless timeout.
+        // Bail immediately with guidance instead — the way to await one is
+        // from a fiber, driven by requestAnimationFrame.
+        if (awaited->external) {
+          fiber.state = Fiber::State::Error;
+          fiber.error_message =
+              "[VM Error] touch: cannot await an external future from a "
+              "synchronous evaluation — the event loop cannot run. Await it "
+              "inside (future ...) instead, and let the frame loop drive it.";
+          return VM::StepResult::Error;
+        }
+        // Otherwise nothing in the VM can ever settle it: a real deadlock.
         return VM::StepResult::Preempted;
       }
     }
@@ -481,6 +522,49 @@ void vxs_clear_fibers() {
   if (!g_vm) return;
   for (Fiber *f : g_vm->active_fibers) delete f;
   g_vm->active_fibers.clear();
+  g_vm->preempted_fiber = nullptr;
+  // Drop the roots on anything still in flight. Callbacks already
+  // scheduled will fire into a world with no matching token, which
+  // settle_external handles as the quiet no-op it should be.
+  g_vm->pending_externals.clear();
+}
+
+// --- settling a future from outside the VM ---------------------------
+// Called from JS when a promise (or timer, or GPU callback) resolves.
+// Returns 1 if a waiter was settled, 0 if the token is unknown — which is
+// routine, not an error: the callback outlives its future whenever the
+// page reloads, fibers are cleared, or a request is cancelled.
+EMSCRIPTEN_KEEPALIVE
+int vxs_settle_number(int token, double value) {
+  if (!g_vm) return 0;
+  return g_vm->settle_external(static_cast<uint32_t>(token),
+                               Value::from_double(value), false) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int vxs_settle_string(int token, const char *value) {
+  if (!g_vm) return 0;
+  return g_vm->settle_external(static_cast<uint32_t>(token),
+                               g_vm->heap.make_string(value ? value : ""),
+                               false) ? 1 : 0;
+}
+
+// A rejected promise settles the future as failed; touching it then raises,
+// so an ordinary (guard ...) catches a GPU error like any other condition.
+EMSCRIPTEN_KEEPALIVE
+int vxs_settle_error(int token, const char *message) {
+  if (!g_vm) return 0;
+  return g_vm->settle_external(static_cast<uint32_t>(token),
+                               g_vm->heap.make_string(message ? message : "external failure"),
+                               true) ? 1 : 0;
+}
+
+// How many futures are awaiting the outside world — surfaced so a
+// workbench can distinguish "idle" from "waiting on the GPU".
+EMSCRIPTEN_KEEPALIVE
+int vxs_pending_externals() {
+  if (!g_vm) return 0;
+  return static_cast<int>(g_vm->pending_externals.size());
 }
 
 } // extern "C"

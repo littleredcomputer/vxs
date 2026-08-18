@@ -214,10 +214,16 @@ struct ObjFuture : Obj {
   // what to report, and touching raises rather than silently yielding a
   // bogus value.
   bool is_error;
+  // Settled from OUTSIDE the VM — a JS promise, a timer, a GPU callback.
+  // Without this bit a pending external future is indistinguishable from
+  // a deadlock: both are "not completed, no fiber computing it". One is a
+  // bug, the other is just a slow GPU, and conflating them makes every
+  // legitimate async call report a deadlock.
+  bool external;
 
   inline explicit ObjFuture(Fiber *f)
       : Obj(ObjType::Future), fiber(f), result(Value::unspecified()),
-        is_completed(false), is_error(false) {}
+        is_completed(false), is_error(false), external(false) {}
 };
 
 //-----------------------------------------------------------------------------
@@ -459,6 +465,13 @@ public:
 
   inline Value make_future(Fiber *fiber) {
     ObjFuture *fut = allocate<ObjFuture>(fiber);
+    return Value::from_ptr(fut);
+  }
+
+  // A future no fiber computes: something outside the VM will settle it.
+  inline Value make_external_future() {
+    ObjFuture *fut = allocate<ObjFuture>(nullptr);
+    fut->external = true;
     return Value::from_ptr(fut);
   }
 
