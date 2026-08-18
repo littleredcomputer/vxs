@@ -1081,36 +1081,55 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
       }
       preempted_fiber = nullptr;
       if (res == StepResult::Completed || res == StepResult::Error) {
-        active_fibers.erase(std::find(active_fibers.begin(), active_fibers.end(), f));
+        size_t pos = static_cast<size_t>(it - active_fibers.begin());
+        active_fibers.erase(it);
         delete f;
+        // Everything after pos shifted down one; keep the cursor on the
+        // same fiber it was pointing at.
+        if (round_cursor > pos) --round_cursor;
       }
       // it yielded (or finished) — the round may proceed below
     }
   }
 
-  for (size_t i = 0; i < active_fibers.size(); ) {
+  // Round-robin from where the last round left off. Visiting at most one
+  // full lap keeps a single call bounded even with no deadline set, which
+  // is what (run-fibers) relies on to make exactly one pass per round.
+  const size_t lap = active_fibers.size();
+  size_t visited = 0;
+  while (visited < lap && !active_fibers.empty()) {
     // Deadline already spent: don't start another fiber against it
     // (its first check is 1024 instructions in — it would overshoot).
+    // The cursor stays put, so the next call picks up exactly here — that
+    // is what turns "too much work" into every fiber running slower
+    // rather than a lucky prefix running at full rate and the rest never.
     if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >= deadline) {
       break;
     }
-    Fiber *f = active_fibers[i];
+    if (round_cursor >= active_fibers.size()) round_cursor = 0;
+    Fiber *f = active_fibers[round_cursor];
     StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
+    ++visited;
     if (res == StepResult::Completed || res == StepResult::Error) {
-      active_fibers.erase(active_fibers.begin() + i);
+      active_fibers.erase(active_fibers.begin() + round_cursor);
       delete f;
+      // Successor shifted into this slot: leave the cursor where it is.
     } else if (res == StepResult::Preempted) {
       // First preemption ends the round: this fiber takes the exclusive-
       // resume slot, and no sibling may step past it — under an
       // instruction cap this serializes progress into atomic inter-yield
       // sections rather than interleaving mid-flight fibers (the old,
       // unsound behavior), and under a deadline the budget is spent
-      // anyway.
+      // anyway. Advance past it so that once it finally yields, the round
+      // resumes with its siblings rather than re-serving it immediately.
       ++preempted_count;
       preempted_fiber = f;
+      ++round_cursor;
+      if (round_cursor >= active_fibers.size()) round_cursor = 0;
       break;
     } else {
-      ++i;
+      ++round_cursor;
+      if (round_cursor >= active_fibers.size()) round_cursor = 0;
     }
   }
   return preempted_count;
