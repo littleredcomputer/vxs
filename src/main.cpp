@@ -52,6 +52,17 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
         // a slow program, and this is neither.
         if (Heap::is_future(fiber.awaited) && vm.active_fibers.empty()) {
           ObjFuture *awaited = fiber.awaited.as_ptr<ObjFuture>();
+          // `external` is the difference between a deadlock and a slow
+          // GPU: both look like "not completed, no fiber". Only the first
+          // is a bug. (The native CLI has no event loop to settle an
+          // external future, so one here really is terminal — but say so
+          // in those terms rather than calling it a deadlock.)
+          if (!awaited->is_completed && !awaited->fiber && awaited->external) {
+            ok = false;
+            err_msg = "[VM Error] touch: awaiting an external future, but this "
+                      "host has no event loop to settle it";
+            return Value::unspecified();
+          }
           if (!awaited->is_completed && !awaited->fiber) {
             ok = false;
             err_msg = "[VM Error] touch: awaiting a future that nothing "

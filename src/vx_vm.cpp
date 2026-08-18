@@ -289,6 +289,12 @@ void VM::mark_roots(Heap &h) {
   for (Value v : in_flight_raises) {
     h.mark_value(v);
   }
+  // In-flight external futures. Nothing else may be holding these: the
+  // program can drop a future before anyone touches it, and the callback
+  // that will settle it lives outside the VM entirely.
+  for (const auto &kv : pending_externals) {
+    h.mark_value(kv.second);
+  }
 }
 
 void Heap::collect_garbage() {
@@ -1025,13 +1031,7 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         ObjFuture *fut = fut_val.as_ptr<ObjFuture>();
         if (fut->is_completed) {
           f.awaited = Value::nil();   // no longer waiting on anything
-          if (fut->is_error) {
-            f.state = Fiber::State::Error;
-            f.error_message = Heap::is_string(fut->result)
-                ? std::string(fut->result.as_ptr<ObjString>()->view())
-                : "[VM Error] touch: awaited computation failed";
-            return StepResult::Error;
-          }
+          if (fut->is_error) raise_failed_future(fut);
           f.push(fut->result);
           break;
         }
@@ -1078,13 +1078,7 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
               return StepResult::Error;
             }
           }
-          if (fut->is_error) {
-            f.state = Fiber::State::Error;
-            f.error_message = Heap::is_string(fut->result)
-                ? std::string(fut->result.as_ptr<ObjString>()->view())
-                : "[VM Error] touch: awaited computation failed";
-            return StepResult::Error;
-          }
+          if (fut->is_error) raise_failed_future(fut);
           f.push(fut->result);
           break;
         }

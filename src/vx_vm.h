@@ -611,6 +611,63 @@ public:
     f->backing_future = Value::nil();
   }
 
+  // Futures awaiting something outside the VM, keyed by the token handed
+  // to whoever will settle them.
+  //
+  // This table is a GC ROOT, and that is the whole reason it exists rather
+  // than passing an ObjFuture* out to JS. Between starting an async call
+  // and its callback firing, Scheme may well drop every reference to the
+  // future — nothing has touched it yet, so nothing holds it — at which
+  // point the collector reclaims it and the callback settles into freed
+  // memory. Exactly the use-after-free fixed in the touch rewrite,
+  // arriving from the opposite direction. Registration roots it; settling
+  // or clearing un-roots it.
+  std::unordered_map<uint32_t, Value> pending_externals;
+  uint32_t next_external_token = 1;
+
+  // Touching a failed future RAISES rather than killing the fiber, so a
+  // rejected promise — a GPU device that never arrived, a shader that
+  // failed to compile — is caught by an ordinary (guard ...) like any
+  // other condition. Setting Fiber::State::Error instead would make GPU
+  // failures the one category of error Scheme code cannot handle, which
+  // is precisely backwards for the thing most likely to fail.
+  [[noreturn]] inline void raise_failed_future(ObjFuture *fut) {
+    Value msg = Heap::is_string(fut->result)
+                    ? fut->result
+                    : heap.make_string("awaited computation failed");
+    Value err = heap.make_error_object(msg, {});
+    in_flight_raises.push_back(err);
+    throw RaiseEscape(Heap::is_string(msg)
+                          ? std::string(msg.as_ptr<ObjString>()->view())
+                          : "awaited computation failed");
+  }
+
+  // Hand back a token for something outside the VM to settle later.
+  inline uint32_t register_external(Value future) {
+    uint32_t token = next_external_token++;
+    pending_externals[token] = future;
+    return token;
+  }
+
+  // Settle a pending external future. An UNKNOWN TOKEN IS A QUIET NO-OP,
+  // returning false: the callback outlives the thing it was going to
+  // resolve all the time — page teardown, vxs_clear_fibers, a cancelled
+  // request, a promise landing in a world that no longer has a waiter.
+  // That is normal operation, not an error to report.
+  inline bool settle_external(uint32_t token, Value result, bool is_error) {
+    auto it = pending_externals.find(token);
+    if (it == pending_externals.end()) return false;
+    Value fut_val = it->second;
+    pending_externals.erase(it);          // un-root it
+    if (!Heap::is_future(fut_val)) return false;
+    ObjFuture *fut = fut_val.as_ptr<ObjFuture>();
+    if (fut->is_completed) return false;  // already settled; first wins
+    fut->is_completed = true;
+    fut->is_error = is_error;
+    fut->result = result;
+    return true;
+  }
+
   // The deadline-preempted fiber owed an exclusive resume — see above.
   Fiber *preempted_fiber = nullptr;
 

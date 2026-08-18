@@ -11,7 +11,7 @@ EMFLAGS         = -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(D
                   -s EXPORT_NAME='createVxsModule' \
                   -s ENVIRONMENT='web,node' \
                   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8"]' \
-                  -s EXPORTED_FUNCTIONS='["_vxs_init","_vxs_eval","_vxs_eval_json","_vxs_step_fibers","_vxs_active_fibers_count","_vxs_clear_fibers","_vxs_stats_json","_malloc","_free"]' \
+                  -s EXPORTED_FUNCTIONS='["_vxs_init","_vxs_eval","_vxs_eval_json","_vxs_step_fibers","_vxs_active_fibers_count","_vxs_clear_fibers","_vxs_stats_json","_vxs_settle_number","_vxs_settle_string","_vxs_settle_error","_vxs_pending_externals","_malloc","_free"]' \
                   -s ALLOW_MEMORY_GROWTH=1 \
                   -s NO_EXIT_RUNTIME=1
 
@@ -39,7 +39,7 @@ wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler
 	$(Q)mkdir -p ../web
 	$(Q)$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
 
-test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-aot test-r4rs
+test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-async test-aot test-r4rs
 	@echo ""
 	@echo "════════════════════════════════════════════════════════════════"
 	@echo "  ✨ ALL TEST PHASES PASSED ✨"
@@ -72,6 +72,15 @@ test-unit:
 test-wasm:
 	@echo "=== RUNNING WASM PRESETS & FIBER SCHEDULER TESTS ==="
 	$(Q)$(NODE) ../testcases/test_wasm_presets.js
+
+# Externally-settled futures. Necessarily lives here rather than in the
+# Scheme suite: the point is that a fiber blocks until the JS EVENT LOOP
+# settles it, which needs a host with an event loop and a driver that
+# returns control between steps. setTimeout stands in for the
+# promise-returning WebGPU calls this exists for.
+test-async:
+	@echo "=== RUNNING ASYNC / EXTERNAL FUTURE TESTS ==="
+	$(Q)$(NODE) ../testcases/test_async_futures.js
 
 # AOT: compile a program to a standalone native binary and check what it
 # prints against the same golden file the interpreter is held to. Used to
