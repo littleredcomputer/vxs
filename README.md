@@ -20,23 +20,6 @@ heap-allocated variant type, a chunked/deque-backed VM stack instead of
 a reallocating one, and WebAssembly as a first-class target instead of
 an afterthought.
 
-## The name
-
-**vxs** — say it "vee-excess." It's named for VxWorks, the real-time OS
-the 2002 original was built on, and that lineage turns out to be more
-than sentimental: the scheduler enforces a wall-clock frame budget, no
-well-behaved fiber can be starved by its siblings, and a steady-state
-loop that builds no aggregates allocates *nothing* — so the collector
-never runs during animation. Bounded latency, no starvation, no
-unbounded pauses in the hot path. Those are real-time values, inherited
-as design taste rather than as a deployment constraint.
-
-It's Scheme-shaped rather than Scheme-bounded: bracket vectors, map
-literals, keywords, and green threads all live past the standard's edge,
-so the system is *vxs* and R4RS conformance is a property it has. The
-command-line binary keeps the old name — `vx-scheme` — because that is
-what twenty-four years of muscle memory types.
-
 ## Features
 
 - **NaN-boxed values** — every Scheme value (fixnums, flonums, pairs,
@@ -78,6 +61,52 @@ presets) is plain static files — no build step:
 cd web && python3 -m http.server
 # then open http://localhost:8000
 ```
+
+## Embedding from JavaScript
+
+The WASM module runs under Node as readily as in a browser. The whole of
+a minimal setup:
+
+```js
+const createVxsModule = require('./web/vxs.js');
+
+createVxsModule().then((VXS) => {
+  VXS._vxs_init();
+  const ev = (code) => VXS.ccall('vxs_eval', 'string', ['string'], [code]);
+
+  console.log(ev('(+ 1 2 3)'));                              // 6
+  console.log(ev('(map (lambda (x) (* x x)) (list 1 2 3))')); // (1 4 9)
+});
+```
+
+No canvas stubs are needed unless your Scheme actually draws — the
+drawing hooks are optional and check for their host functions first.
+
+**Fibers need someone to step them.** `(future ...)` creates a fiber but
+does not run it. From inside Scheme, `(run-fibers)` drives them to
+completion. From the host — which is what a frame loop does — call
+`vxs_step_fibers(0)` until no fibers remain:
+
+```js
+const step = VXS.cwrap('vxs_step_fibers', 'number', ['number']);
+while (VXS._vxs_active_fibers_count() > 0) step(0);
+```
+
+**Anything asynchronous needs the host to return to the event loop.** A
+fiber blocked on a promise-backed future — `(touch (sleep 30))`, and in
+time the promise-returning GPU calls — can only make progress while the
+VM is *not* running. So the driving loop must yield between steps:
+
+```js
+while (VXS._vxs_active_fibers_count() > 0) {
+  step(0);
+  await new Promise((r) => setTimeout(r, 4));   // give the loop a turn
+}
+```
+
+In a browser that `await` is simply `requestAnimationFrame`. Awaiting
+such a future from a synchronous `vxs_eval` cannot work for the same
+reason, and says so rather than stalling.
 
 ## Deviations from R4RS
 
