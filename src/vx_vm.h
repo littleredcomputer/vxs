@@ -570,6 +570,14 @@ public:
   // The deadline-preempted fiber owed an exclusive resume — see above.
   Fiber *preempted_fiber = nullptr;
 
+  // Where the next scheduling round resumes. A round cut short by the
+  // wall-clock budget must continue from where it stopped, not restart at
+  // index 0 — otherwise the same prefix of active_fibers wins every frame
+  // and every fiber past the cutoff is starved forever, however well it
+  // yields. (Measured before this existed: with 2000 fibers against an 8ms
+  // budget, fiber 0 ran on all 120 ticks and 1649 fibers ran zero times.)
+  size_t round_cursor = 0;
+
   // Shared dispatch loop body. step_fiber calls this with stop_at_depth=0
   // (today's behavior: run until the fiber is genuinely done). call_closure
   // calls it directly with stop_at_depth set to the frame depth it started

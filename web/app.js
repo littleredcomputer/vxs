@@ -166,12 +166,17 @@
       const dSec = Math.max(1e-3, (time - lastStats.t) / 1000);
       const perFrame = Math.round(dObj / dFrames);
       const mbPerSec = (dBytes / dSec / (1024 * 1024)).toFixed(1);
-      tagAlloc.textContent = `${perFrame.toLocaleString()} obj/f · ${mbPerSec} MB/s · ${s.gc_count} GC`;
-      // Allocation is the interpreter's dominant tax here (GC itself is
-      // cheap — it sweeps an almost entirely dead nursery), so flag a
-      // heavy churn rate rather than a large heap.
-      tagAlloc.style.color = perFrame > 2000 ? 'var(--accent-amber, #e0a030)'
-                                             : 'var(--text-secondary)';
+      // GC as a RATE, not the cumulative count: a monotonic counter only
+      // tells you how long the page has been open. Collections/sec is what
+      // says whether pressure is changing.
+      const gcPerSec = ((s.gc_count - lastStats.gc_count) / dSec).toFixed(1);
+      tagAlloc.textContent = `${perFrame.toLocaleString()} obj/f · ${mbPerSec} MB/s · ${gcPerSec} GC/s`;
+      // No color-coding on obj/frame. Absolute churn is workload-relative
+      // — 2,000/frame is alarming for 8 points and unremarkable for 512 —
+      // so any fixed threshold here is just a permanently-lit warning
+      // light, which is worse than none. Judge this against a baseline for
+      // the same scene, not against a constant.
+      tagAlloc.style.color = 'var(--text-secondary)';
     }
     tagHeap.textContent =
       `${s.live_objects.toLocaleString()} live · ${(s.live_bytes / 1024).toFixed(0)} KB`;
