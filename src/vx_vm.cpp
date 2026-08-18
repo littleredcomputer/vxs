@@ -302,8 +302,12 @@ void Heap::collect_garbage() {
     blacken_obj(obj);
   }
 
-  // 2. Sweep phase
-  sweep();
+  // 2. Sweep phase (sweep() already counts what it reclaimed; keep it
+  // rather than discarding, so "did that collection actually do work?"
+  // is answerable without a profiler.)
+  last_gc_freed = sweep();
+  total_objects_freed += last_gc_freed;
+  ++gc_count;
 
   // 3. Dynamic threshold adjustment (grow by 2x of live bytes, floor is
   // min_gc_threshold — normally 512KB, but overridable via
@@ -497,6 +501,18 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         } else {
           slot_ref = f.top();
         }
+        break;
+      }
+
+      case OP_INIT_LOCAL: {
+        uint16_t slot = read_u16(ip);
+        // Unconditional raw store — the one thing OP_SET_LOCAL must not do.
+        // Entering a scope creates a NEW binding, so if a previous entry's
+        // binding was captured (OP_CLOSURE boxes the slot in place), this
+        // must overwrite the slot rather than assign through that box. The
+        // old box stays owned by the closure that captured it, which is
+        // exactly the fresh-binding-per-entry semantics `let` requires.
+        f.stack[frame->stack_base + slot] = f.pop();
         break;
       }
 
@@ -3234,6 +3250,36 @@ void VM::init_primitives() {
   def_global("gc", heap.make_subr("gc", [](VM &vm, uint32_t, Value *) -> Value {
     vm.collect_garbage();
     return Value::unspecified();
+  }, 0, 0));
+
+  // (vm-stats) -> association list of runtime counters. Same numbers the
+  // wasm build serves over vxs_stats_json, available here so allocation
+  // behaviour is measurable from a plain CLI benchmark instead of being
+  // inferred from wall-clock deltas.
+  def_global("vm-stats", heap.make_subr("vm-stats", [](VM &vm, uint32_t, Value *) -> Value {
+    GCGuard guard(vm.heap);
+    auto entry = [&vm](const char *name, size_t v) {
+      return vm.heap.cons(vm.heap.cons(Value::from_symbol_id(vm.intern(name)),
+                                       Value::from_double(static_cast<double>(v))),
+                          Value::nil());
+    };
+    // Built back-to-front so the list reads in the order written here.
+    Value list = Value::nil();
+    auto push = [&](const char *name, size_t v) {
+      Value cell = entry(name, v);
+      Heap::set_cdr(cell, list);
+      list = cell;
+    };
+    push("active-fibers", vm.active_fibers.size());
+    push("gc-last-freed", vm.heap.get_last_gc_freed());
+    push("gc-count", vm.heap.get_gc_count());
+    push("gc-threshold", vm.heap.get_gc_threshold());
+    push("total-objects-freed", vm.heap.get_total_objects_freed());
+    push("total-objects-allocated", vm.heap.get_total_objects_allocated());
+    push("total-bytes-allocated", vm.heap.get_total_bytes_allocated());
+    push("live-objects", vm.heap.get_live_objects());
+    push("live-bytes", vm.heap.get_bytes_allocated());
+    return list;
   }, 0, 0));
 
   auto subr_procedure_p = [](VM &, uint32_t, Value *args) -> Value {

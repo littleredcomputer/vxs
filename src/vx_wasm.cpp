@@ -232,6 +232,13 @@ using namespace vxs;
 
 static std::string g_eval_result_buffer;
 
+// Separate from g_eval_result_buffer on purpose — see vxs_stats_json.
+static std::string g_stats_buffer;
+// Scheduler counters the VM itself has no reason to keep: these describe
+// how the embedder has been pumping it, not the VM's own state.
+static size_t g_step_calls = 0;
+static size_t g_preempt_total = 0;
+
 extern "C" {
 
 EMSCRIPTEN_KEEPALIVE
@@ -377,10 +384,48 @@ int vxs_step_fibers(int instructions_per_fiber) {
   } else {
     preempted = g_vm->step_all_active_fibers(VM::UNBOUNDED, std::chrono::milliseconds(8));
   }
+  ++g_step_calls;
+  g_preempt_total += preempted;
   if (preempted > 0) {
     fprintf(stderr, "[vxs] %zu fiber(s) exceeded the frame budget without yielding\n", preempted);
   }
   return static_cast<int>(g_vm->active_fibers.size());
+}
+
+// Runtime counters as JSON. One export rather than a dozen numeric ones:
+// it matches vxs_eval_json's idiom, and new counters can be added without
+// touching the Makefile's export list.
+//
+// Deliberately its own buffer, NOT g_eval_result_buffer — polling stats
+// must never invalidate the char* a caller is still holding from an eval.
+//
+// The live_* pair is instantaneous; the total_* pair is cumulative and
+// never decreases, which is what makes allocation RATE measurable. Live
+// bytes alone cannot tell "allocates nothing" apart from "allocates
+// furiously and collects all of it" — the difference this whole workload
+// turns on.
+EMSCRIPTEN_KEEPALIVE
+const char *vxs_stats_json() {
+  if (!g_vm) {
+    g_stats_buffer = "{\"ready\":false}";
+    return g_stats_buffer.c_str();
+  }
+  const Heap &h = g_vm->heap;
+  g_stats_buffer =
+      std::string("{\"ready\":true") +
+      ",\"live_bytes\":" + std::to_string(h.get_bytes_allocated()) +
+      ",\"live_objects\":" + std::to_string(h.get_live_objects()) +
+      ",\"total_bytes_allocated\":" + std::to_string(h.get_total_bytes_allocated()) +
+      ",\"total_objects_allocated\":" + std::to_string(h.get_total_objects_allocated()) +
+      ",\"total_objects_freed\":" + std::to_string(h.get_total_objects_freed()) +
+      ",\"gc_count\":" + std::to_string(h.get_gc_count()) +
+      ",\"gc_last_freed\":" + std::to_string(h.get_last_gc_freed()) +
+      ",\"gc_threshold\":" + std::to_string(h.get_gc_threshold()) +
+      ",\"active_fibers\":" + std::to_string(g_vm->active_fibers.size()) +
+      ",\"step_calls\":" + std::to_string(g_step_calls) +
+      ",\"fibers_preempted_total\":" + std::to_string(g_preempt_total) +
+      "}";
+  return g_stats_buffer.c_str();
 }
 
 EMSCRIPTEN_KEEPALIVE

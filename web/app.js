@@ -18,6 +18,8 @@
   const terminalBody = document.getElementById('terminal-body');
   const tagFps = document.getElementById('tag-fps');
   const tagFibers = document.getElementById('tag-fibers');
+  const tagAlloc = document.getElementById('tag-alloc');
+  const tagHeap = document.getElementById('tag-heap');
   const evalTime = document.getElementById('eval-time');
   const mouseCoords = document.getElementById('mouse-coords');
   const fibersToggleText = document.getElementById('fibers-toggle-text');
@@ -29,6 +31,13 @@
   let vxsStepFibers = null;
   let vxsActiveFibersCount = null;
   let vxsClearFibers = null;
+  let vxsStatsJson = null;
+
+  // Previous stats sample, so the overlay can report allocation RATE.
+  // Cumulative totals are the only way to distinguish "allocates nothing"
+  // from "allocates furiously and collects all of it" — a live-bytes
+  // reading looks identical in both cases.
+  let lastStats = null;
   let isWasmReady = false;
   let fibersRunning = true;
   let mouseX = 400;
@@ -139,6 +148,38 @@
     }
   }
 
+  // Heap/GC overlay. Rates are per *rendered frame*, differenced against
+  // the previous sample rather than read as an absolute.
+  function updateHeapTelemetry(time) {
+    let s;
+    try {
+      s = JSON.parse(vxsStatsJson());
+    } catch (e) {
+      return;
+    }
+    if (!s.ready) return;
+
+    if (lastStats) {
+      const dFrames = Math.max(1, s.step_calls - lastStats.step_calls);
+      const dObj = s.total_objects_allocated - lastStats.total_objects_allocated;
+      const dBytes = s.total_bytes_allocated - lastStats.total_bytes_allocated;
+      const dSec = Math.max(1e-3, (time - lastStats.t) / 1000);
+      const perFrame = Math.round(dObj / dFrames);
+      const mbPerSec = (dBytes / dSec / (1024 * 1024)).toFixed(1);
+      tagAlloc.textContent = `${perFrame.toLocaleString()} obj/f · ${mbPerSec} MB/s · ${s.gc_count} GC`;
+      // Allocation is the interpreter's dominant tax here (GC itself is
+      // cheap — it sweeps an almost entirely dead nursery), so flag a
+      // heavy churn rate rather than a large heap.
+      tagAlloc.style.color = perFrame > 2000 ? 'var(--accent-amber, #e0a030)'
+                                             : 'var(--text-secondary)';
+    }
+    tagHeap.textContent =
+      `${s.live_objects.toLocaleString()} live · ${(s.live_bytes / 1024).toFixed(0)} KB`;
+
+    s.t = time;
+    lastStats = s;
+  }
+
   // Animation & Fiber Stepping Loop (60 FPS)
   function renderLoop(time) {
     // Compute FPS
@@ -146,6 +187,10 @@
     if (time - lastFrameTime >= 500) {
       currentFps = Math.round((frameCount * 1000) / (time - lastFrameTime));
       tagFps.textContent = `${currentFps} FPS`;
+      // Sample heap counters on the same half-second cadence as FPS —
+      // often enough to be live, rare enough that JSON.parse never shows
+      // up in the frame budget it is supposed to be measuring.
+      if (isWasmReady && vxsStatsJson) updateHeapTelemetry(time);
       frameCount = 0;
       lastFrameTime = time;
     }
@@ -482,6 +527,7 @@
       vxsStepFibers = Module.cwrap('vxs_step_fibers', 'number', []);
       vxsActiveFibersCount = Module.cwrap('vxs_active_fibers_count', 'number', []);
       vxsClearFibers = Module.cwrap('vxs_clear_fibers', null, []);
+      vxsStatsJson = Module.cwrap('vxs_stats_json', 'string', []);
 
       isWasmReady = true;
       statusBadge.classList.add('active');

@@ -11,7 +11,7 @@ EMFLAGS         = -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(D
                   -s EXPORT_NAME='createVxSchemeModule' \
                   -s ENVIRONMENT='web,node' \
                   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8"]' \
-                  -s EXPORTED_FUNCTIONS='["_vxs_init","_vxs_eval","_vxs_eval_json","_vxs_step_fibers","_vxs_active_fibers_count","_vxs_clear_fibers","_malloc","_free"]' \
+                  -s EXPORTED_FUNCTIONS='["_vxs_init","_vxs_eval","_vxs_eval_json","_vxs_step_fibers","_vxs_active_fibers_count","_vxs_clear_fibers","_vxs_stats_json","_malloc","_free"]' \
                   -s ALLOW_MEMORY_GROWTH=1 \
                   -s NO_EXIT_RUNTIME=1
 

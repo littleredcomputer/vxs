@@ -287,7 +287,9 @@ public:
   Heap()
       : head_obj(nullptr), bytes_allocated(0),
         gc_threshold(512 * 1024), min_gc_threshold(512 * 1024),
-        gc_paused_depth(0), vm(nullptr) {}
+        gc_paused_depth(0), vm(nullptr),
+        total_bytes_allocated(0), total_objects_allocated(0),
+        total_objects_freed(0), gc_count(0), last_gc_freed(0) {}
 
   ~Heap() {
     free_all();
@@ -488,6 +490,20 @@ public:
   // Tracking
   size_t get_bytes_allocated() const { return bytes_allocated; }
   size_t get_gc_threshold() const { return gc_threshold; }
+
+  // Observability counters. bytes_allocated/live_objects are instantaneous
+  // (what the heap holds now); the total_* pair is cumulative since startup
+  // and never decreases, which is what makes allocation *rate* measurable —
+  // a live-bytes reading alone cannot distinguish "allocates nothing" from
+  // "allocates furiously and collects it all".
+  size_t get_total_bytes_allocated() const { return total_bytes_allocated; }
+  size_t get_total_objects_allocated() const { return total_objects_allocated; }
+  size_t get_total_objects_freed() const { return total_objects_freed; }
+  size_t get_live_objects() const {
+    return total_objects_allocated - total_objects_freed;
+  }
+  size_t get_gc_count() const { return gc_count; }
+  size_t get_last_gc_freed() const { return last_gc_freed; }
   // Sets both the immediate threshold and the floor collect_garbage()
   // grows back to afterward (see min_gc_threshold below) — otherwise a
   // caller lowering this for e.g. GC-pressure testing would only affect
@@ -531,7 +547,12 @@ public:
     T *obj = new (mem) T(std::forward<Args>(args)...);
     obj->next_all = head_obj;
     head_obj = obj;
-    bytes_allocated += obj_allocated_size(obj);
+    // The cumulative counters ride the same cache line as bytes_allocated,
+    // which this path already dirties — two increments, no extra size call.
+    const size_t sz = obj_allocated_size(obj);
+    bytes_allocated += sz;
+    total_bytes_allocated += sz;
+    ++total_objects_allocated;
     return obj;
   }
 
@@ -572,6 +593,13 @@ private:
   int gc_paused_depth;
   VM *vm;
   std::vector<Obj *> gray_stack;
+
+  // Cumulative observability counters — see the getters above.
+  size_t total_bytes_allocated;
+  size_t total_objects_allocated;
+  size_t total_objects_freed;
+  size_t gc_count;
+  size_t last_gc_freed;
 };
 
 // RAII Scope Guard for pausing GC
