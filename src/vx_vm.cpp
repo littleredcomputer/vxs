@@ -1838,14 +1838,20 @@ void VM::init_primitives() {
         res = vm.heap.cons(out, res);
         cur = Heap::cdr(cur);
       }
-      vm.pop_temp_root();
+      // `res` STAYS ROOTED across the reversal. Dropping it here and
+      // rooting only `forward` was a use-after-free: the reversal itself
+      // allocates, that cons can collect, and the reversed-so-far chain in
+      // `res` is reachable from nothing else — so the walk read freed
+      // memory. Found by ASan on vx-test.scm, which allocates hard enough
+      // to land a collection inside this loop.
       Value forward = Value::nil();
       vm.push_temp_root(&forward);
       while (Heap::is_cons(res)) {
         forward = vm.heap.cons(Heap::car(res), forward);
         res = Heap::cdr(res);
       }
-      vm.pop_temp_root();
+      vm.pop_temp_root();   // forward
+      vm.pop_temp_root();   // res
       return forward;
     }
     // N-ary map: (map proc list1 list2 ...)
@@ -1871,14 +1877,16 @@ void VM::init_primitives() {
       res = vm.heap.cons(out, res);
     }
   done_map:
-    vm.pop_temp_root();
+    // Same rooting fix as the 2-argument path above: `res` must survive
+    // the reversal, which allocates.
     Value forward = Value::nil();
     vm.push_temp_root(&forward);
     while (Heap::is_cons(res)) {
       forward = vm.heap.cons(Heap::car(res), forward);
       res = Heap::cdr(res);
     }
-    vm.pop_temp_root();
+    vm.pop_temp_root();   // forward
+    vm.pop_temp_root();   // res
     return forward;
   };
   def_global("map", heap.make_subr("map", subr_map, 2, UINT32_MAX));
