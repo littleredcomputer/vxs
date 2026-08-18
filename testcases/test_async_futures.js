@@ -112,6 +112,51 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   chk('synchronous await reports guidance, not a hang', true,
       /cannot await an external future/.test(syncAttempt));
 
+  // ---- handles to host objects -------------------------------------
+  // A GPUDevice cannot cross into wasm, so the host keeps it in a table
+  // and Scheme holds an opaque index. Exercised here with a plain JS
+  // object; a real GPU resource takes the identical path.
+  console.log('\n=== HOST HANDLES ===');
+
+  const settleHandle = VXS.cwrap('vxs_settle_handle', 'number',
+                                 ['number', 'number', 'string']);
+  const hostHandleCount = VXS.cwrap('vxs_host_handle_count', 'number', []);
+
+  const before = hostHandleCount();
+  const fakeDevice = { name: 'fake-device', destroyed: false };
+  const id = globalThis.vxsHandles.put(fakeDevice);
+  chk('host table holds the object', before + 1, hostHandleCount());
+
+  // Start from a clean slate so exactly one token is outstanding and the
+  // scan below is unambiguous. (Tokens are internal — a real binding
+  // never exposes them, because the primitive that starts the promise
+  // also hands the token to JS itself.)
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define dev 'none) (define f2 (sleep 1000000))
+      (future (set! dev (touch f2)))`);
+  step(0);
+  chk('exactly one external is outstanding', 1, pendingExternals());
+
+  // Settle it with the handle rather than letting the timer win.
+  let handled = 0;
+  for (let t = 1; t < 500 && !handled; t++) handled = settleHandle(t, id, 'gpu-device');
+  chk('settled a future with a handle', 1, handled);
+  await pump();
+
+  chk('Scheme received a handle',    '#t',         ev('(handle? dev)'));
+  chk('the handle carries its kind', 'gpu-device', ev('(handle-kind dev)'));
+  chk('a fresh handle is not released', '#f',      ev('(handle-released? dev)'));
+
+  // Releasing marks the OBJECT: every alias sees it, which is why a
+  // handle is a heap object rather than a copied integer.
+  ev('(define alias dev)');
+  chk('release reports it did something', '#t', ev('(handle-release! dev)'));
+  chk('the alias sees the release too',   '#t', ev('(handle-released? alias)'));
+  chk('releasing twice is idempotent',    '#f', ev('(handle-release! dev)'));
+  chk('host table dropped the object',    before, hostHandleCount());
+  chk('the JS object itself survives (we only dropped our hold)',
+      'fake-device', fakeDevice.name);
+
   console.log('\n────────────────────────────────────────────────────────────────');
   console.log(`External futures: ${passed + failed} | Passed: ${passed} | Failed: ${failed}`);
   if (failed === 0) {

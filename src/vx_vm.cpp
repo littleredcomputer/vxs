@@ -159,6 +159,11 @@ std::string VM::format_value(Value v) const {
         return std::string("#<") + (p->is_input ? "input" : "output") +
                "-port" + (p->closed ? " (closed)" : "") + ">";
       }
+      case ObjType::Handle: {
+        ObjHandle *h = obj->as<ObjHandle>();
+        return std::string("#<") + get_symbol_name(h->kind) + " " +
+               std::to_string(h->id) + (h->released ? " (released)" : "") + ">";
+      }
     }
   }
   return "#<unknown>";
@@ -255,6 +260,7 @@ void Heap::blacken_obj(Obj *obj) {
     case ObjType::Subr:
     case ObjType::Fiber:
     case ObjType::Port:
+    case ObjType::Handle:
       // Leaf objects - no child references
       break;
   }
@@ -2371,6 +2377,48 @@ void VM::init_primitives() {
     auto ofs = std::make_unique<std::ofstream>(std::string(args[0].as_ptr<ObjString>()->view()));
     if (!ofs->is_open()) return Value::boolean_false();
     return vm.heap.make_output_file_port(std::move(ofs));
+  }, 1, 1));
+
+  // --- Handles to host-side objects ---------------------------------
+  // A handle names something the VM cannot hold: a GPUDevice, a buffer, a
+  // pipeline. Ownership is explicit because nothing else can be — the
+  // collector will never call destroy(), and a finalizer would run at an
+  // unpredictable time, which for a GPU resource is the same as not
+  // running. See handle-release! for what that costs and buys.
+  def_global("handle?", heap.make_subr("handle?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_handle(args[0]));
+  }, 1, 1));
+
+  def_global("handle-kind", heap.make_subr("handle-kind", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) return Value::boolean_false();
+    return Value::from_symbol_id(args[0].as_ptr<ObjHandle>()->kind);
+  }, 1, 1));
+
+  def_global("handle-released?", heap.make_subr("handle-released?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) return Value::boolean_false();
+    return Value::from_bool(args[0].as_ptr<ObjHandle>()->released);
+  }, 1, 1));
+
+  // Releasing marks the OBJECT, not the reference, which is exactly why a
+  // handle is a heap object: every alias sees the release, so
+  //   (let ((b buf)) (handle-release! buf) (use b))
+  // fails loudly instead of using a destroyed GPU resource. Idempotent —
+  // releasing twice is fine, since cleanup paths overlap in practice.
+  def_global("handle-release!", heap.make_subr("handle-release!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) {
+      if (vm.current_fiber) {
+        vm.current_fiber->state = Fiber::State::Error;
+        vm.current_fiber->error_message =
+            "[VM Error] handle-release!: contract violation, expected a handle, got " +
+            vm.format_value(args[0]);
+      }
+      return Value::unspecified();
+    }
+    ObjHandle *h = args[0].as_ptr<ObjHandle>();
+    if (h->released) return Value::boolean_false();   // already gone
+    h->released = true;
+    vm.release_host_handle(h->id);
+    return Value::boolean_true();
   }, 1, 1));
 
   // --- String ports (R7RS / SRFI-6) ---------------------------------

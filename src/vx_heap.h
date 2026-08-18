@@ -30,7 +30,8 @@ enum class ObjType : uint8_t {
   Future,
   Map,
   Upvalue,
-  Port
+  Port,
+  Handle
 };
 
 // Base object header for all heap-allocated objects
@@ -306,6 +307,31 @@ struct ObjPort : Obj {
   }
 };
 
+//-----------------------------------------------------------------------------
+// 11. Handle — an opaque reference to something living outside the VM
+//-----------------------------------------------------------------------------
+// A GPUDevice, GPUBuffer or GPUPipeline cannot cross into wasm, so the host
+// keeps the object in a table and we hold an integer index into it.
+//
+// This is a HEAP OBJECT rather than a NaN-boxed integer, and that is the
+// whole design: releasing one reference must invalidate every reference,
+// which needs shared mutable state. `(let ((b buf)) (release! buf) (use b))`
+// has to fail, and would not if a handle were a copied immediate.
+//
+// Nothing collects these. The GC will never call destroy() on a GPU buffer,
+// and a finalizer would be non-deterministic besides — so ownership is
+// explicit, `released` is checked on use, and the live count is exposed so
+// a leak is something you can watch rather than something you discover.
+struct ObjHandle : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Handle;
+  uint32_t id;        // index into the host-side table
+  uint32_t kind;      // interned symbol: 'gpu-device, 'gpu-buffer, ...
+  bool released;
+
+  inline ObjHandle(uint32_t handle_id, uint32_t kind_sym)
+      : Obj(ObjType::Handle), id(handle_id), kind(kind_sym), released(false) {}
+};
+
 //=============================================================================
 // Heap & Slab Allocator with Mark-and-Sweep Garbage Collector
 //=============================================================================
@@ -468,6 +494,10 @@ public:
     return Value::from_ptr(fut);
   }
 
+  inline Value make_handle(uint32_t id, uint32_t kind_sym) {
+    return Value::from_ptr(allocate<ObjHandle>(id, kind_sym));
+  }
+
   // A future no fiber computes: something outside the VM will settle it.
   inline Value make_external_future() {
     ObjFuture *fut = allocate<ObjFuture>(nullptr);
@@ -518,6 +548,10 @@ public:
 
   static inline bool is_port(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Port;
+  }
+
+  static inline bool is_handle(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Handle;
   }
 
   static inline Value car(Value v) {
@@ -579,6 +613,7 @@ public:
       case ObjType::Map:     return sizeof(ObjMap) + static_cast<ObjMap*>(obj)->entries.capacity() * sizeof(std::pair<Value, Value>);
       case ObjType::Upvalue: return sizeof(ObjUpvalue);
       case ObjType::Port:    return sizeof(ObjPort);
+      case ObjType::Handle:  return sizeof(ObjHandle);
     }
     return sizeof(Obj);
   }
@@ -633,6 +668,7 @@ private:
       case ObjType::Map:     static_cast<ObjMap*>(obj)->~ObjMap(); break;
       case ObjType::Upvalue: static_cast<ObjUpvalue*>(obj)->~ObjUpvalue(); break;
       case ObjType::Port:    static_cast<ObjPort*>(obj)->~ObjPort(); break;
+      case ObjType::Handle:  break;  // trivially destructible
     }
     std::free(obj);
   }
