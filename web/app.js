@@ -1,4 +1,4 @@
-// app.js: Vx-Scheme WebAssembly Creative Concurrency Workbench
+// app.js: vxs WebAssembly Creative Concurrency Workbench
 
 (function() {
   'use strict';
@@ -722,8 +722,8 @@
     terminalBody.innerHTML = '';
   });
 
-  // Wasm Initializer (createVxSchemeModule Promise)
-  createVxSchemeModule().then((Module) => {
+  // Wasm Initializer (createVxsModule Promise)
+  createVxsModule().then((Module) => {
     try {
       Module._vxs_init();
       vxsEval = Module.cwrap('vxs_eval', 'string', ['string']);

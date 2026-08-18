@@ -10,7 +10,7 @@
 ; better constants, as proposed by Park.
 ; By Ozan Yigit
 
-;;; tweaked for vx-scheme testsuite by Colin Smith
+;;; tweaked for the vxs testsuite by Colin Smith
 
 (define bitwise-and logand)
 (define bitwise-not lognot)
