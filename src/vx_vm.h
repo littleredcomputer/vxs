@@ -75,7 +75,15 @@ enum Opcode : uint8_t {
   // are fiber state and survive suspension like everything else the
   // fiber owns.
   OP_PUSH_WINDER,
-  OP_POP_WINDER
+  OP_POP_WINDER,
+
+  // Bind a fresh local: pop the operand stack into a slot, overwriting it
+  // UNCONDITIONALLY. Deliberately not OP_SET_LOCAL, which writes *through*
+  // an ObjUpvalue box if the slot holds one — see the dispatch comment.
+  // Appended at the end of the enum on purpose: AOT output (main.cpp)
+  // emits raw opcode bytes, so renumbering existing ops would invalidate
+  // any previously generated binary.
+  OP_INIT_LOCAL
 };
 
 //=============================================================================

@@ -10,6 +10,12 @@
 
 namespace vxs {
 
+// Build-time escape hatch used only for A/B benchmarking the inline `let`
+// path against the old closure-per-scope compilation. Defaults to enabled.
+#ifndef VXS_INLINE_LET_DISABLED
+#define VXS_INLINE_LET_DISABLED 0
+#endif
+
 struct Local {
   std::string name;
   int depth;
@@ -605,6 +611,72 @@ private:
             }
             chunk.code.push_back(is_tail ? OP_TAIL_CALL : OP_CALL);
             chunk.code.push_back(static_cast<uint8_t>(inits.size()));
+            return;
+          }
+
+          // ---- Fast path: bind into the enclosing frame, body inline ----
+          //
+          // The fallback below compiles `let` as ((lambda (v...) body) e...),
+          // which allocates an ObjClosure on every ENTRY to the scope —
+          // measured at 1 object per `let`, and since let*/letrec/do/case/when
+          // all desugar through here, it was the single largest allocation
+          // source in ordinary Scheme code (the wrangle demo was burning
+          // ~4,600 objects/frame, 99.2% of it immediate garbage).
+          //
+          // Instead the bindings can occupy local slots in the frame we are
+          // already in, with the body compiled inline: no closure, no call.
+          // The body's tail position becomes the enclosing function's, which
+          // is strictly better for TCO than bouncing through OP_TAIL_CALL.
+          //
+          // Capture remains correct thanks to OP_INIT_LOCAL's unconditional
+          // store. If an inner lambda captures one of these bindings,
+          // OP_CLOSURE boxes the slot in place; re-entering the scope
+          // overwrites the slot with a raw value and leaves that box owned
+          // by the closure holding it — a fresh binding per entry, which is
+          // what `let` means. (OP_SET_LOCAL would instead assign *through*
+          // the stale box and corrupt the earlier binding.)
+          //
+          // Bail-out: a body with leading internal (define ...) forms needs
+          // the fresh letrec scope compile_function establishes, so those
+          // keep the old path rather than leaking definitions into the
+          // enclosing scope.
+          if (!VXS_INLINE_LET_DISABLED && !body_starts_with_define(let_body)) {
+            auto inline_pairs = parse_bindings(bindings);
+
+            // 1. Initializers all evaluate in the OUTER scope — the new
+            //    names must not be visible to them (parallel let).
+            for (const auto &pr : inline_pairs) {
+              compile_expr(pr.val, chunk, false);
+            }
+
+            // 2. Now the names come into scope, and the values are popped
+            //    back off in reverse (the operand stack is LIFO).
+            size_t saved_locals = locals.size();
+            std::vector<int> slots;
+            slots.reserve(inline_pairs.size());
+            for (const auto &pr : inline_pairs) {
+              slots.push_back(add_local(vm.get_symbol_name(pr.var.as_symbol_id())));
+            }
+            for (size_t i = slots.size(); i-- > 0;) {
+              emit_op(OP_INIT_LOCAL, static_cast<uint16_t>(slots[i]), chunk);
+            }
+
+            // 3. Body, inline. Its last form inherits OUR tail position.
+            Value bexp = let_body;
+            if (bexp.is_nil()) {
+              chunk.code.push_back(OP_UNSPECIFIED);
+            } else {
+              while (Heap::is_cons(bexp)) {
+                bool is_last = Heap::cdr(bexp).is_nil();
+                compile_expr(Heap::car(bexp), chunk, is_last && is_tail);
+                if (!is_last) chunk.code.push_back(OP_POP);
+                bexp = Heap::cdr(bexp);
+              }
+            }
+
+            // Names go out of scope; max_locals keeps the high-water mark,
+            // so sibling scopes reuse these slots.
+            locals.resize(saved_locals);
             return;
           }
 
@@ -1253,6 +1325,19 @@ private:
                   BytecodeChunk &chunk) {
     chunk.code[offset_index] = static_cast<uint8_t>((jump_amount >> 8) & 0xFF);
     chunk.code[offset_index + 1] = static_cast<uint8_t>(jump_amount & 0xFF);
+  }
+
+  // True if the body opens with an internal (define ...). Such bodies need
+  // the letrec scope compile_function builds, so the inline `let` path
+  // declines them. Only the leading run matters — that is the same window
+  // compile_function scans.
+  bool body_starts_with_define(Value body) {
+    if (!Heap::is_cons(body)) return false;
+    Value form = Heap::car(body);
+    if (!Heap::is_cons(form)) return false;
+    Value head = Heap::car(form);
+    if (!head.is_symbol()) return false;
+    return vm.get_symbol_name(head.as_symbol_id()) == "define";
   }
 
   int add_local(const std::string &name) {
