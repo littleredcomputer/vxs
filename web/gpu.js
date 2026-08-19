@@ -21,8 +21,18 @@
   }
   function clear() { logEl.textContent = ''; }
 
-  // Scheme's (display ...) lands here.
-  window.vxsPrint = function (text) { if (text !== '') log(text); };
+  // Scheme's (display ...) lands here — once per call, not once per line,
+  // so buffer until a newline arrives. Otherwise
+  //   (display "  got ") (display kind) (newline)
+  // becomes three separate lines instead of one.
+  var pending = '';
+  window.vxsPrint = function (text) {
+    if (text === '') return;
+    pending += text;
+    var parts = pending.split('\n');
+    pending = parts.pop();          // trailing partial line stays buffered
+    parts.forEach(function (line) { log(line); });
+  };
 
   // The shader. Written out in full rather than with the vec2f/vec4f
   // shorthands, which are newer aliases — the long forms work everywhere.
@@ -132,9 +142,11 @@
     requestAnimationFrame(frame);
   }
 
-  // Turn on the C++-side EM_JS tracing before init, so request-adapter
-  // narrates itself to the console.
-  globalThis.vxsDebugGpu = true;
+  // C++-side EM_JS tracing for the adapter/device handshake. Off by
+  // default now that it works; set vxsDebugGpu = true in the console (or
+  // append ?debug to the URL) and reload to get it back. It earned its
+  // keep once and will again.
+  globalThis.vxsDebugGpu = /[?&]debug\b/.test(location.search);
 
   createVxsModule().then(function (M) {
     VXS = M;
