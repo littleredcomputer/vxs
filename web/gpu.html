@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>vxs | WebGPU proof of concept</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 24px;
+      background: #0b0e13; color: #d8dee9;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+    .sub { color: #7c8797; margin-bottom: 20px; }
+    .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+    canvas {
+      background: #05070a; border: 1px solid #232a35; border-radius: 6px;
+      width: 420px; height: 420px; display: block;
+    }
+    .panel { flex: 1; min-width: 340px; }
+    pre {
+      background: #070a0f; border: 1px solid #232a35; border-radius: 6px;
+      padding: 12px; margin: 0 0 12px; overflow-x: auto;
+      font: 12px/1.55 "SF Mono", Menlo, monospace; color: #9fb0c4;
+      max-height: 260px;
+    }
+    #log { min-height: 120px; white-space: pre-wrap; }
+    .ok   { color: #86e29b; }
+    .err  { color: #ff8a80; font-weight: 600; }
+    .meta { color: #7c8797; }
+    button {
+      background: #1d6fd4; color: #fff; border: 0; border-radius: 5px;
+      padding: 8px 16px; font-size: 13px; cursor: pointer; margin-right: 8px;
+    }
+    button:hover { background: #2a7fe4; }
+  </style>
+</head>
+<body>
+  <h1>vxs &mdash; WebGPU proof of concept</h1>
+  <div class="sub">
+    A triangle, drawn by a Scheme fiber that awaits the adapter and device as
+    ordinary futures.
+  </div>
+
+  <div class="row">
+    <canvas id="gpu-canvas" width="420" height="420"></canvas>
+    <div class="panel">
+      <button id="btn-run">Run</button>
+      <button id="btn-clear">Clear log</button>
+      <pre id="log" class="meta">loading vxs.wasm…</pre>
+      <div class="sub" style="margin:12px 0 6px">The Scheme it runs:</div>
+      <pre id="src"></pre>
+    </div>
+  </div>
+
+  <script src="vxs.js"></script>
+  <script src="gpu.js"></script>
+</body>
+</html>

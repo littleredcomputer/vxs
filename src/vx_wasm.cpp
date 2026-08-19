@@ -146,7 +146,175 @@ EM_JS(void, js_settle_after, (int token, double ms), {
 static void js_settle_after(int, double) {}
 #endif
 
+//=============================================================================
+// WebGPU — first contact
+//=============================================================================
+// Deliberately small. The point is not to wrap WebGPU; it is to prove the
+// machinery underneath end to end against REAL promises and REAL host
+// objects: (touch (request-adapter)) blocks a fiber, the browser settles
+// it from the event loop, the fiber resumes holding a handle, and the same
+// again for the device. Pipeline construction stays in JS for now — those
+// become primitives once there is something to vary.
+#ifdef __EMSCRIPTEN__
+EM_JS(int, js_gpu_available, (), {
+  return (globalThis.navigator && navigator.gpu) ? 1 : 0;
+});
+
+// Both of these settle a token rather than returning: they are promises,
+// so a value cannot come back synchronously. A rejection settles as an
+// ERROR, which means an ordinary (guard ...) in Scheme catches "this
+// machine has no WebGPU" exactly like any other condition.
+EM_JS(void, js_request_adapter, (int token), {
+  var fail = function(msg) {
+    Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
+  };
+  if (!globalThis.navigator || !navigator.gpu) { fail("WebGPU unavailable: navigator.gpu is undefined"); return; }
+  try {
+    navigator.gpu.requestAdapter().then(function(a) {
+      if (!a) { fail("requestAdapter returned null (no compatible adapter)"); return; }
+      var id = globalThis.vxsHandles.put(a);
+      Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
+                   [token, id, 'gpu-adapter']);
+    }, function(e) { fail("requestAdapter rejected: " + e); });
+  } catch (e) { fail("requestAdapter threw: " + e); }
+});
+
+EM_JS(void, js_request_device, (int token, int adapterId), {
+  var fail = function(msg) {
+    Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
+  };
+  var adapter = globalThis.vxsHandles ? globalThis.vxsHandles.get(adapterId) : null;
+  if (!adapter) { fail("request-device: adapter handle is not live"); return; }
+  try {
+    adapter.requestDevice().then(function(d) {
+      var id = globalThis.vxsHandles.put(d);
+      Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
+                   [token, id, 'gpu-device']);
+    }, function(e) { fail("requestDevice rejected: " + e); });
+  } catch (e) { fail("requestDevice threw: " + e); }
+});
+
+// Draw one triangle with the given WGSL. Returns 0 on success, or a
+// negative code whose message is fetched separately — EM_JS cannot return
+// a string without malloc gymnastics, and an error path is not worth them.
+EM_JS(int, js_gpu_draw, (int deviceId, const char *wgslPtr, const char *canvasIdPtr), {
+  var wgsl = UTF8ToString(wgslPtr);
+  var canvasId = UTF8ToString(canvasIdPtr);
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) { globalThis.vxsGpuError = "no canvas with id " + canvasId; return -2; }
+    var ctx = canvas.getContext('webgpu');
+    if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -3; }
+
+    var format = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
+
+    var module = device.createShaderModule({ code: wgsl });
+
+    // EXPLICIT pipeline layout, never layout:"auto". With auto, bind group
+    // layouts are derived per pipeline, so bind groups become
+    // pipeline-specific and every recompile invalidates them — which
+    // forecloses hot-swap before it is even attempted. This triangle binds
+    // nothing, so the layout is empty; the habit is the point.
+    var layout = device.createPipelineLayout({ bindGroupLayouts: [] });
+
+    var pipeline = device.createRenderPipeline({
+      layout: layout,
+      vertex:   { module: module, entryPoint: 'vs' },
+      fragment: { module: module, entryPoint: 'fs', targets: [{ format: format }] },
+      primitive: { topology: 'triangle-list' }
+    });
+
+    var encoder = device.createCommandEncoder();
+    var pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0.02, g: 0.03, b: 0.05, a: 1.0 },
+        loadOp: 'clear',
+        storeOp: 'store'
+      }]
+    });
+    pass.setPipeline(pipeline);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -4;
+  }
+});
+
+EM_JS(char *, js_gpu_last_error, (), {
+  var s = globalThis.vxsGpuError || "";
+  var n = lengthBytesUTF8(s) + 1;
+  var p = _malloc(n);
+  stringToUTF8(s, p, n);
+  return p;
+});
+#else
+static int js_gpu_available() { return 0; }
+static void js_request_adapter(int) {}
+static void js_request_device(int, int) {}
+static int js_gpu_draw(int, const char *, const char *) { return -1; }
+static char *js_gpu_last_error() { return nullptr; }
+#endif
+
 static void register_wasm_primitives(VM &vm) {
+  vm.def_global("gpu-available?", vm.heap.make_subr("gpu-available?", [](VM &, uint32_t, Value *) -> Value {
+    return Value::from_bool(js_gpu_available() != 0);
+  }, 0, 0));
+
+  vm.def_global("request-adapter", vm.heap.make_subr("request-adapter", [](VM &vm, uint32_t, Value *) -> Value {
+    Value fut = vm.heap.make_external_future();
+    uint32_t token = vm.register_external(fut);
+    js_request_adapter(static_cast<int>(token));
+    return fut;
+  }, 0, 0));
+
+  vm.def_global("request-device", vm.heap.make_subr("request-device", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) {
+      vm.raise_contract("request-device: expected an adapter handle, got " +
+                        vm.format_value(args[0]));
+    }
+    ObjHandle *a = args[0].as_ptr<ObjHandle>();
+    if (a->released) vm.raise_contract("request-device: adapter handle was released");
+    Value fut = vm.heap.make_external_future();
+    uint32_t token = vm.register_external(fut);
+    js_request_device(static_cast<int>(token), static_cast<int>(a->id));
+    return fut;
+  }, 1, 1));
+
+  // (gpu-draw-triangle! device wgsl [canvas-id]) — synchronous: encoding
+  // and submitting are not promise-returning. The GPU works afterwards on
+  // its own schedule, which is exactly why nothing here needs to wait.
+  vm.def_global("gpu-draw-triangle!", vm.heap.make_subr("gpu-draw-triangle!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) {
+      vm.raise_contract("gpu-draw-triangle!: expected a device handle, got " +
+                        vm.format_value(args[0]));
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-draw-triangle!: device handle was released");
+    if (!Heap::is_string(args[1])) {
+      vm.raise_contract("gpu-draw-triangle!: expected WGSL source as a string");
+    }
+    std::string wgsl(args[1].as_ptr<ObjString>()->view());
+    std::string canvas_id = (argc > 2 && Heap::is_string(args[2]))
+        ? std::string(args[2].as_ptr<ObjString>()->view())
+        : std::string("gpu-canvas");
+    int rc = js_gpu_draw(static_cast<int>(d->id), wgsl.c_str(), canvas_id.c_str());
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-draw-triangle!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 2, 3));
+
   // (sleep ms) -> future. The first consumer of the external-future path,
   // and useful in its own right: a fiber can wait without blocking the
   // browser, because waiting means "suspend and let the scheduler run",
