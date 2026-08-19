@@ -300,6 +300,70 @@
 (run-kernel-loop rings "vxs-gpu-canvas")
 `,
 
+    points: `;;; ==========================================================
+;;; GPU Instanced Points — Scheme fills a buffer, the GPU draws it
+;;; ==========================================================
+;;; A second harness. The plasma kernels draw ONE full-screen quad and
+;;; compute a colour per pixel; this draws one small quad per POINT and
+;;; reads each point's attributes from a storage buffer.
+;;;
+;;; The buffer is six floats per point — x, y, size, r, g, b — flat rather
+;;; than an array of structs. WGSL gives vec3<f32> a 16-byte alignment
+;;; inside a storage array, so a struct would not pack the way the same
+;;; fields pack here, and the mismatch is silent: points simply appear in
+;;; the wrong places.
+;;;
+;;; Scheme fills the buffer every frame. That is the point of this step:
+;;; the path host -> buffer -> GPU works before any compute pass exists.
+;;; Watch the obj/f and GC counters — this is the CPU cost that a compute
+;;; wrangle will later delete.
+
+(load "lib/gpu.scm")
+(load "lib/threefry.scm")
+
+(define N 700)
+(define buf (make-points N))
+(define pts (points-view buf))
+
+;;; Threefry doing what a counter-based RNG is for: randomness indexed by
+;;; POINT NUMBER rather than drawn from a stream. No state, no ordering,
+;;; and the same cloud every run.
+(define (rand01 i k)
+  (u32->unit (vector-ref (threefry4x32 (vector i 0 0 0) (vector k 0 0 0)) 0)))
+
+(define radius   (make-vector N 0.0))
+(define phase    (make-vector N 0.0))
+(define speed    (make-vector N 0.0))
+(define hue      (make-vector N 0.0))
+
+(let fill ((i 0))
+  (if (< i N)
+      (begin
+        (vector-set! radius i (* 0.85 (sqrt (rand01 i 1))))
+        (vector-set! phase  i (* 6.2831 (rand01 i 2)))
+        (vector-set! speed  i (+ 0.15 (* 0.9 (rand01 i 3))))
+        (vector-set! hue    i (rand01 i 4))
+        (fill (+ i 1)))))
+
+(define (update! t)
+  (let loop ((i 0))
+    (if (< i N)
+        (let* ((r (vector-ref radius i))
+               (a (+ (vector-ref phase i) (* t (vector-ref speed i))))
+               (h (vector-ref hue i))
+               (wob (+ 1.0 (* 0.12 (sin (+ (* 3.0 a) t))))))
+          (point-set! pts i
+                      (* r wob (cos a))
+                      (* r wob (sin a))
+                      (+ 0.006 (* 0.012 h))
+                      (+ 0.25 (* 0.75 h))
+                      (+ 0.35 (* 0.45 (sin (+ a t))))
+                      (+ 0.55 (* 0.45 (cos (* 0.7 t)))))
+          (loop (+ i 1))))))
+
+(run-points-loop buf N update! "vxs-gpu-canvas")
+`,
+
     fibers: `;;; ==========================================================
 ;;; Multi-Fiber Task Concurrency with Future & Touch
 ;;; ==========================================================
@@ -355,7 +419,7 @@
   };
 
   // Which presets draw through WebGPU rather than the 2D context.
-  const GPU_PRESETS = { plasma: true, rings: true };
+  const GPU_PRESETS = { plasma: true, rings: true, points: true };
 
   function showSurface(preset) {
     const wantsGpu = !!GPU_PRESETS[preset];
