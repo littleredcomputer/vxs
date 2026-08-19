@@ -26,13 +26,12 @@
   //   (display "  got ") (display kind) (newline)
   // becomes three separate lines instead of one.
   var pending = '';
-  window.vxsPrint = function (text) {
-    if (text === '') return;
-    pending += text;
-    var parts = pending.split('\n');
-    pending = parts.pop();          // trailing partial line stays buffered
-    parts.forEach(function (line) { log(line); });
-  };
+  // The VM now delivers one COMPLETE LINE per call — line buffering moved
+  // into the sink port's streambuf, where it serves every page rather than
+  // being reimplemented per page. Splitting on '\n' here would find none
+  // and buffer forever, so this just logs what it is handed. An empty
+  // string is a blank line, which is worth showing.
+  window.vxsPrint = function (text) { log(text); };
 
   // The shader. Written out in full rather than with the vec2f/vec4f
   // shorthands, which are newer aliases — the long forms work everywhere.

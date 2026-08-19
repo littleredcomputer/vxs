@@ -68,17 +68,32 @@ EM_JS(double, js_now, (), {
   return (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0.0;
 });
 
-EM_JS(void, js_print_output, (const char *text), {
-  if (typeof globalThis !== 'undefined' && globalThis.vxsPrint) {
-    globalThis.vxsPrint(UTF8ToString(text));
-  } else if (typeof console !== 'undefined' && console.log) {
+EM_JS(void, js_console_log, (const char *text), {
+  if (typeof console !== 'undefined' && console.log) {
     console.log(UTF8ToString(text));
   }
 });
 
-EM_JS(void, js_console_log, (const char *text), {
-  if (typeof console !== 'undefined' && console.log) {
-    console.log(UTF8ToString(text));
+// One hook for every output port in the browser. The port carries a sink
+// NAME and JS decides where that name goes, so a page can add a sink (a
+// div, localStorage, a websocket) without any new C++ — the names below
+// are just the two that ship by default.
+EM_JS(void, js_sink_write, (const char *name, const char *text), {
+  var n = UTF8ToString(name);
+  var s = UTF8ToString(text);
+  if (typeof globalThis !== 'undefined' && globalThis.vxsSinks &&
+      typeof globalThis.vxsSinks[n] === 'function') {
+    globalThis.vxsSinks[n](s);
+    return;
+  }
+  if (n === 'console') {
+    if (typeof console !== 'undefined' && console.log) console.log(s);
+    return;
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.vxsPrint) {
+    globalThis.vxsPrint(s);
+  } else if (typeof console !== 'undefined' && console.log) {
+    console.log(s);
   }
 });
 #else
@@ -93,9 +108,87 @@ static double js_canvas_mouse_x() { return 0.0; }
 static double js_canvas_mouse_y() { return 0.0; }
 static int js_canvas_mouse_down() { return 0; }
 static double js_now() { return 0.0; }
-static void js_print_output(const char *text) { std::cout << text << std::flush; }
 static void js_console_log(const char *text) { std::cout << "[CONSOLE.LOG] " << text << std::endl; }
+static void js_sink_write(const char *name, const char *text) {
+  if (std::string(name) == "console") std::cout << "[CONSOLE.LOG] " << text << std::endl;
+  else std::cout << text << std::flush;
+}
 #endif
+
+// A streambuf that forwards to a named JS sink, one COMPLETE LINE at a
+// time. Line buffering rather than per-write forwarding because the JS
+// terminal appends a div per call: unbuffered, (display '(1 2)) would
+// arrive as five separate lines. It also fixes the reverse bug — before
+// this, `(display "x = ") (display 42)` produced two terminal lines
+// instead of one, because each display call was its own call into JS.
+//
+// A trailing partial line stays buffered until a newline or an explicit
+// flush; vxs_eval/vxs_eval_json flush at the end of evaluation so nothing
+// is left stranded.
+class SinkBuf : public std::streambuf {
+public:
+  explicit SinkBuf(std::string sink_name) : name_(std::move(sink_name)) {}
+  ~SinkBuf() override { emit_pending(); }
+
+protected:
+  int overflow(int ch) override {
+    if (ch == traits_type::eof()) return traits_type::not_eof(ch);
+    char c = static_cast<char>(ch);
+    if (c == '\n') {
+      emit(pending_);
+      pending_.clear();
+    } else {
+      pending_.push_back(c);
+    }
+    return ch;
+  }
+
+  std::streamsize xsputn(const char *s, std::streamsize n) override {
+    for (std::streamsize i = 0; i < n; ++i) overflow(traits_type::to_int_type(s[i]));
+    return n;
+  }
+
+  int sync() override {
+    emit_pending();
+    return 0;
+  }
+
+private:
+  void emit_pending() {
+    if (pending_.empty()) return;
+    emit(pending_);
+    pending_.clear();
+  }
+  void emit(const std::string &line) { js_sink_write(name_.c_str(), line.c_str()); }
+
+  std::string name_;
+  std::string pending_;
+};
+
+static Value make_sink_port(VM &vm, const std::string &name) {
+  return vm.heap.make_custom_output_port(std::make_unique<SinkBuf>(name));
+}
+
+// The two sinks that ship by default. Held as plain Values because both are
+// ALSO bound as VM globals, and that binding is what keeps them alive — a
+// registry of every sink port here would not be a GC root, so it would
+// dangle the moment one became unreachable from Scheme.
+static Value g_terminal_port = Value::unspecified();
+static Value g_console_port = Value::unspecified();
+
+// Flush at the end of evaluation so a trailing partial line — a `display`
+// with no newline — reaches the page instead of sitting in the buffer.
+// Ports from open-output-sink are the caller's to flush with
+// flush-output-port, or they flush themselves when collected.
+static void flush_default_sinks(VM &vm) {
+  Value ports[3] = {vm.current_out_port, g_terminal_port, g_console_port};
+  for (Value p : ports) {
+    if (Heap::is_port(p)) {
+      ObjPort *op = p.as_ptr<ObjPort>();
+      if (op->out) op->out->flush();
+    }
+  }
+}
 
 // Register Canvas & Web primitives
 #ifdef __EMSCRIPTEN__
@@ -449,22 +542,28 @@ static void register_wasm_primitives(VM &vm) {
   };
   vm.def_global("current-time", vm.heap.make_subr("current-time", subr_now, 0, 0));
 
-  auto subr_display = [](VM &vm, uint32_t argc, Value *args) -> Value {
-    std::ostringstream ss;
-    for (uint32_t i = 0; i < argc; ++i) {
-      vm.display_value(args[i], ss);
-    }
-    std::string s = ss.str();
-    js_print_output(s.c_str());
-    return Value::unspecified();
-  };
-  vm.def_global("display", vm.heap.make_subr("display", subr_display, 1, UINT32_MAX));
+  // `display` and `newline` are deliberately NOT overridden here. They used
+  // to be — each built a string and shoved it at js_print_output — which
+  // meant they ignored their port argument entirely, so (display x port)
+  // wrote to the terminal AND printed the port object, and string ports
+  // never worked in the browser at all. The problem was being fixed one
+  // layer too high: the core's display already resolves an explicit port
+  // and falls back to current-output-port. All the browser actually needs
+  // is for the DEFAULT port to lead somewhere, which vxs_init now arranges
+  // by making stdout a sink port. Everything else follows.
 
-  auto subr_newline = [](VM &, uint32_t, Value *) -> Value {
-    js_print_output("\n");
-    return Value::unspecified();
+  // A port writing to a named JS sink. Pages register handlers on
+  // globalThis.vxsSinks, so appending to a div — or anywhere else — needs
+  // no new primitive here.
+  auto subr_open_sink = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::string name = "terminal";
+    if (argc > 0 && Heap::is_string(args[0])) {
+      name = std::string(args[0].as_ptr<ObjString>()->view());
+    }
+    return make_sink_port(vm, name);
   };
-  vm.def_global("newline", vm.heap.make_subr("newline", subr_newline, 0, 0));
+  vm.def_global("open-output-sink",
+                vm.heap.make_subr("open-output-sink", subr_open_sink, 0, 1));
 
   auto subr_console_log = [](VM &vm, uint32_t argc, Value *args) -> Value {
     std::ostringstream ss;
@@ -547,6 +646,20 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE
 int vxs_init() {
   g_vm = std::make_unique<VM>();
+
+  // Point stdout at the page BEFORE anything can print. std::cout goes
+  // nowhere in a browser, so the default output port has to be a sink
+  // port; with that in place the ordinary port machinery does the rest,
+  // and no output procedure needs overriding.
+  g_terminal_port = make_sink_port(*g_vm, "terminal");
+  g_console_port = make_sink_port(*g_vm, "console");
+  g_vm->stdout_port = g_terminal_port;
+  g_vm->current_out_port = g_terminal_port;
+  // Bound as globals so the GC keeps them, and so Scheme can name them:
+  //   (display "to the js console" console-port)
+  g_vm->def_global("terminal-port", g_terminal_port);
+  g_vm->def_global("console-port", g_console_port);
+
   js_ensure_handle_table();
   // Teach the VM how to drop a host object when Scheme releases a handle.
   g_vm->host_handle_releaser = [](uint32_t id) {
@@ -575,7 +688,8 @@ const char *vxs_eval_json(const char *code) {
   if (!g_vm) vxs_init();
   if (!code || *code == '\0') {
     g_eval_result_buffer = "{\"ok\":true,\"result\":\"\",\"type\":\"nil\",\"active_fibers\":0}";
-    return g_eval_result_buffer.c_str();
+    flush_default_sinks(*g_vm);
+  return g_eval_result_buffer.c_str();
   }
 
   auto t_start = std::chrono::high_resolution_clock::now();
@@ -634,6 +748,7 @@ const char *vxs_eval_json(const char *code) {
     g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(e.what()) + "\",\"error_type\":\"exception\"}";
   }
 
+  flush_default_sinks(*g_vm);
   return g_eval_result_buffer.c_str();
 }
 
@@ -642,7 +757,8 @@ const char *vxs_eval(const char *code) {
   if (!g_vm) vxs_init();
   if (!code || *code == '\0') {
     g_eval_result_buffer = "";
-    return g_eval_result_buffer.c_str();
+    flush_default_sinks(*g_vm);
+  return g_eval_result_buffer.c_str();
   }
 
   try {
@@ -674,6 +790,7 @@ const char *vxs_eval(const char *code) {
     g_eval_result_buffer = "[Evaluation Error] " + std::string(e.what());
   }
 
+  flush_default_sinks(*g_vm);
   return g_eval_result_buffer.c_str();
 }
 
