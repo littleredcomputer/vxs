@@ -1076,10 +1076,23 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         // of an unbounded loop over a possibly-freed pointer.
         if (stop_at_depth > 0) {
           if (!fut->fiber) {
+            // An EXTERNAL future can only be settled by the host event
+            // loop, and we cannot return to it from here: this fiber's
+            // continuation includes C++ frames (guard, map, apply,
+            // for-each, load, force all call back in through
+            // call_closure), so it physically cannot suspend.
+            //
+            // `guard` is the one that bites in practice — wrapping a GPU
+            // call in an error handler is the obvious thing to write, and
+            // it is exactly what cannot work. Say so, name the fix, and
+            // do not pretend this is about map.
             f.state = Fiber::State::Error;
-            f.error_message = "[VM Error] touch: cannot await a future computed "
-                              "outside the VM from inside map/apply/load — "
-                              "touch it from a fiber instead";
+            f.error_message =
+                "[VM Error] touch: cannot await a host-settled future here. "
+                "This touch is inside guard/map/apply/for-each/load, whose "
+                "continuation includes native frames, so the fiber cannot "
+                "suspend and the event loop can never run to settle it. "
+                "Await it in the fiber body directly, outside that form.";
             return StepResult::Error;
           }
           // Pump the whole scheduler, not just this future's fiber: what
@@ -1177,6 +1190,9 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
       }
       preempted_fiber = nullptr;
       if (res == StepResult::Completed || res == StepResult::Error) {
+        if (res == StepResult::Error && !f->error_message.empty()) {
+          fiber_errors.push_back(f->error_message);
+        }
         size_t pos = static_cast<size_t>(it - active_fibers.begin());
         active_fibers.erase(it);
         settle_backing_future(f);
@@ -1214,6 +1230,9 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
     StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
     ++visited;
     if (res == StepResult::Completed || res == StepResult::Error) {
+      if (res == StepResult::Error && !f->error_message.empty()) {
+        fiber_errors.push_back(f->error_message);
+      }
       active_fibers.erase(active_fibers.begin() + round_cursor);
       settle_backing_future(f);
       delete f;

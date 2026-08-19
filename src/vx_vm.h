@@ -647,6 +647,14 @@ public:
     if (host_handle_releaser) host_handle_releaser(id);
   }
 
+  // Messages from fibers that DIED while the scheduler was stepping them.
+  // Without this they were silently discarded: step_all_active_fibers
+  // reaps an errored fiber exactly like a completed one, so a fiber that
+  // blew up inside a frame simply vanished — no output, no trace, nothing
+  // to search for. That cost a full debugging round trip on the first real
+  // GPU page. The embedder drains this and reports.
+  std::vector<std::string> fiber_errors;
+
   // Futures awaiting something outside the VM, keyed by the token handed
   // to whoever will settle them.
   //

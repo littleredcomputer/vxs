@@ -165,31 +165,58 @@ EM_JS(int, js_gpu_available, (), {
 // ERROR, which means an ordinary (guard ...) in Scheme catches "this
 // machine has no WebGPU" exactly like any other condition.
 EM_JS(void, js_request_adapter, (int token), {
-  var fail = function(msg) {
-    Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
+  var D = function() {
+    if (globalThis.vxsDebugGpu) console.log.apply(console, ['[vxs gpu]'].concat([].slice.call(arguments)));
   };
+  var fail = function(msg) {
+    D('settling error for token', token, msg);
+    var r = Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
+    D('  settle_error returned', r);
+  };
+  D('request-adapter: token', token,
+    '| Module?', typeof Module, '| ccall?', typeof (Module && Module.ccall),
+    '| handles?', typeof globalThis.vxsHandles);
   if (!globalThis.navigator || !navigator.gpu) { fail("WebGPU unavailable: navigator.gpu is undefined"); return; }
   try {
-    navigator.gpu.requestAdapter().then(function(a) {
+    var p = navigator.gpu.requestAdapter();
+    D('  requestAdapter() returned', p && typeof p.then);
+    p.then(function(a) {
+      D('  resolved with', a ? 'an adapter' : 'null');
       if (!a) { fail("requestAdapter returned null (no compatible adapter)"); return; }
-      var id = globalThis.vxsHandles.put(a);
-      Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
-                   [token, id, 'gpu-adapter']);
-    }, function(e) { fail("requestAdapter rejected: " + e); });
+      try {
+        var id = globalThis.vxsHandles.put(a);
+        D('  handle id', id, '-> settling token', token);
+        var r = Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
+                             [token, id, 'gpu-adapter']);
+        D('  settle_handle returned', r, '(1 = a waiter was settled)');
+      } catch (inner) {
+        D('  SETTLE THREW', inner);
+        console.error('[vxs gpu] settle threw:', inner);
+      }
+    }, function(e) { D('  rejected', e); fail("requestAdapter rejected: " + e); });
   } catch (e) { fail("requestAdapter threw: " + e); }
 });
 
 EM_JS(void, js_request_device, (int token, int adapterId), {
+  var D = function() {
+    if (globalThis.vxsDebugGpu) console.log.apply(console, ['[vxs gpu]'].concat([].slice.call(arguments)));
+  };
   var fail = function(msg) {
     Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
   };
   var adapter = globalThis.vxsHandles ? globalThis.vxsHandles.get(adapterId) : null;
+  D('request-device: token', token, 'adapter', adapterId, adapter ? 'live' : 'MISSING');
   if (!adapter) { fail("request-device: adapter handle is not live"); return; }
   try {
     adapter.requestDevice().then(function(d) {
-      var id = globalThis.vxsHandles.put(d);
-      Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
-                   [token, id, 'gpu-device']);
+      try {
+        var id = globalThis.vxsHandles.put(d);
+        var r = Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
+                             [token, id, 'gpu-device']);
+        D('  device handle', id, 'settle returned', r);
+      } catch (inner) {
+        console.error('[vxs gpu] device settle threw:', inner);
+      }
     }, function(e) { fail("requestDevice rejected: " + e); });
   } catch (e) { fail("requestDevice threw: " + e); }
 });
@@ -669,6 +696,13 @@ int vxs_step_fibers(int instructions_per_fiber) {
   }
   ++g_step_calls;
   g_preempt_total += preempted;
+  // A fiber that died this frame would otherwise vanish without a word —
+  // the scheduler reaps an errored fiber exactly like a finished one. Say
+  // so, loudly, on the same channel as the frame-budget warning.
+  for (const std::string &msg : g_vm->fiber_errors) {
+    fprintf(stderr, "[vxs] fiber died: %s\n", msg.c_str());
+  }
+  g_vm->fiber_errors.clear();
   // Only meaningful on the default (deadline) path: there, a preemption
   // means a fiber ran past the frame budget without yielding, which is a
   // bug in that fiber and worth hearing about. Under an explicit
