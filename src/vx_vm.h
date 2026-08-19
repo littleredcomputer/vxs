@@ -29,7 +29,6 @@ enum Opcode : uint8_t {
   OP_UNSPECIFIED,
   
   OP_POP,
-  OP_DUP,
 
   OP_DEF_GLOBAL,
   OP_GET_GLOBAL,
@@ -43,22 +42,17 @@ enum Opcode : uint8_t {
 
   OP_JUMP,
   OP_JUMP_IF_FALSE,
-  OP_JUMP_IF_TRUE,
 
-  OP_ADD,
-  OP_SUB,
-  OP_MUL,
-  OP_DIV,
-  OP_REM,
-
-  OP_EQ,
-  OP_NUM_EQ,
-  OP_LT,
-  OP_LE,
-  OP_GT,
-  OP_GE,
-  OP_NOT,
-
+  // NOTE: there are deliberately no arithmetic or comparison opcodes.
+  // +, -, <, eq? and friends are ordinary subrs, reached through OP_CALL
+  // like any other procedure. Measured, a subr call costs about what a
+  // Scheme closure call costs (~18ns against a ~60ns loop iteration), so
+  // an opcode would buy a little speed in exchange for making these
+  // names keywords — unshadowable, unpassable to map, unredefinable in a
+  // test. This VM's bet is a small dispatch loop and a smarter compiler;
+  // inlining `let` bought 22% across the whole suite by making the
+  // compiler do more, not the loop. A set of such opcodes did once exist
+  // here, fully implemented and never emitted by anything.
   OP_CALL,
   OP_TAIL_CALL,
   OP_RETURN,
