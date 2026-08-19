@@ -1,4 +1,8 @@
 //----------------------------------------------------------------------
+// Browser host semantics: where output goes, and how a submission is
+// sequenced. Both are things the Scheme suite cannot see, because both are
+// about the boundary between the VM and the page.
+//
 // Browser output ports.
 //
 // The wasm build used to OVERRIDE display/newline to shove text at the JS
@@ -71,8 +75,53 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
   r = ev('(list (output-port? console-port) (output-port? terminal-port))');
   check("sink ports are output ports", r.trim() === '(#t #t)', `got ${r}`);
 
+  // --- top-level form sequencing -------------------------------------
+  // A submission is compiled and run ONE FORM AT A TIME, like `load` does
+  // natively. It used to be read_all_forms()'d and compiled whole, which
+  // breaks anything whose effect must land before the NEXT form compiles.
+  // Macros are exactly that, and it made define-kernel unbound in the
+  // browser while working natively.
+
+  {
+    const r = ev([
+      '(load "lib/gpu.scm")',
+      '(define-kernel k (vec3 (swizzle uv x) 0 0))',
+      '(string? k)'
+    ].join('\n'));
+    check("a macro from a loaded lib is usable in the same submission",
+          r.trim() === '#t', `got ${r}`);
+  }
+
+  {
+    const r = ev([
+      '(defmacro (twice x) `(* 2 ,x))',
+      '(twice 21)'
+    ].join('\n'));
+    check("a macro defined and used in one submission",
+          r.trim() === '42', `got ${r}`);
+  }
+
+  {
+    const r = ev([
+      '(define seq-a 1)',
+      '(define seq-b (+ seq-a 1))',
+      'seq-b'
+    ].join('\n'));
+    check("an earlier form's definition is visible to a later one",
+          r.trim() === '2', `got ${r}`);
+  }
+
+  {
+    // A failing form stops the submission rather than running on into
+    // forms that assumed it succeeded.
+    lines.length = 0;
+    ev('(car (quote ()))\n(display "must not run")');
+    check("a failing form halts the rest of the submission",
+          !lines.join('').includes('must not run'), JSON.stringify(lines));
+  }
+
   console.log("\n────────────────────────────────────────────────────────────────");
-  console.log(`Browser ports: ${total} | Passed: ${total - bad} | Failed: ${bad}`);
-  console.log(bad ? "❌ BROWSER PORT TESTS FAILED" : "✨ BROWSER PORT TESTS PASSED ✨");
+  console.log(`Browser host: ${total} | Passed: ${total - bad} | Failed: ${bad}`);
+  console.log(bad ? "❌ BROWSER HOST TESTS FAILED" : "✨ BROWSER HOST TESTS PASSED ✨");
   process.exit(bad ? 1 : 0);
 })();

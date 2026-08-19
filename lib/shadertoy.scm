@@ -84,3 +84,22 @@
      (wgsl-body body shadertoy-env "  ") "\n"
      "}\n"
      shadertoy-epilogue)))
+
+;; (define-kernel name body) — bind `name` to the WGSL compiled from `body`.
+;;
+;; The macro exists to delete a quote, which sounds cosmetic and is not:
+;; '(let ((c (- uv 0.5))) ...) reads as "here is some data", when what is
+;; actually meant is "here is code in another language". The quote was load
+;; bearing — without it Scheme would evaluate uv, time and sin as Scheme
+;; variables — so the job cannot be done by a procedure. A macro receives
+;; the form unevaluated and puts the language boundary in the syntax:
+;; inside define-kernel you are writing kernel code, not Scheme.
+;;
+;; Compilation happens when the define RUNS, not when it expands. That
+;; keeps `shadertoy` an ordinary procedure (layer 16 calls it directly),
+;; avoids a load-order dependency between this macro and its uses, and
+;; leaves kernels constructible programmatically. It costs one sub-
+;; millisecond compile per run; parameterizing a shader belongs in a
+;; uniform, not in recompiling it.
+(defmacro (define-kernel name body)
+  `(define ,name (shadertoy ',body)))

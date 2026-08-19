@@ -797,6 +797,54 @@ static std::string escape_json(const std::string &s) {
   return out;
 }
 
+// Compile and run top-level forms ONE AT A TIME, in order — the way
+// `load` already does natively, and the way Scheme top level is supposed
+// to work.
+//
+// The browser used to read_all_forms() and compile the whole submission
+// before running any of it. That breaks anything whose EFFECT must land
+// before the next form is COMPILED, and macros are exactly that:
+//
+//   (load "lib/gpu.scm")        ; defines the define-kernel macro
+//   (define-kernel plasma ...)  ; needs it registered to compile
+//
+// The load ran at runtime, long after define-kernel had been compiled as
+// an unknown operator, so this failed in the browser while working
+// natively. Two paths that should agree and didn't.
+//
+// The deadline is shared across all forms rather than restarted per form,
+// so a submission cannot buy extra time by being split up.
+struct SeqOutcome {
+  VM::StepResult res = VM::StepResult::Completed;
+  Value result = Value::unspecified();
+  std::string error;
+};
+
+static SeqOutcome eval_forms_sequentially(
+    const char *code, std::chrono::steady_clock::time_point deadline) {
+  SeqOutcome out;
+  Reader reader(*g_vm, code);
+  while (true) {
+    Value form = reader.read_form();
+    if (form.is_eof()) break;
+    Compiler compiler(*g_vm);
+    ObjClosure *closure = compiler.compile_top_level(form);
+
+    Fiber fiber;
+    fiber.push(Value::from_ptr(closure));
+    fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
+    fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
+
+    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
+    res = pump_until_settled(fiber, res, deadline);
+    out.res = res;
+    out.result = fiber.result;
+    out.error = fiber.error_message;
+    if (res == VM::StepResult::Error || res == VM::StepResult::Preempted) break;
+  }
+  return out;
+}
+
 EMSCRIPTEN_KEEPALIVE
 const char *vxs_eval_json(const char *code) {
   if (!g_vm) vxs_init();
@@ -809,16 +857,6 @@ const char *vxs_eval_json(const char *code) {
   auto t_start = std::chrono::high_resolution_clock::now();
 
   try {
-    Reader reader(*g_vm, code);
-    Value form = reader.read_all_forms();
-    Compiler compiler(*g_vm);
-    ObjClosure *closure = compiler.compile_top_level(form);
-
-    Fiber fiber;
-    fiber.push(Value::from_ptr(closure));
-    fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
-    fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
-
     // Unbounded instructions, but a wall-clock deadline: this is a
     // synchronous call on the browser's main thread, so a runaway
     // evaluation would freeze the tab. 750ms is editor-scale — generous
@@ -826,32 +864,35 @@ const char *vxs_eval_json(const char *code) {
     // is reported as a timeout, never dressed up as a result — that
     // would be the Yielded/Preempted conflation rebuilt one layer up.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
-    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
-    res = pump_until_settled(fiber, res, deadline);
+    SeqOutcome outcome = eval_forms_sequentially(code, deadline);
+    VM::StepResult res = outcome.res;
+    g_vm->push_temp_root(&outcome.result);
     auto t_end = std::chrono::high_resolution_clock::now();
     double time_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
 
     if (res == VM::StepResult::Preempted) {
       g_eval_result_buffer = "{\"ok\":false,\"error\":\"evaluation exceeded 750ms and was stopped\",\"error_type\":\"timeout\",\"time_us\":" + std::to_string(time_us) + "}";
     } else if (res == VM::StepResult::Error) {
-      g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(fiber.error_message) + "\",\"error_type\":\"runtime\",\"time_us\":" + std::to_string(time_us) + "}";
+      g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(outcome.error) + "\",\"error_type\":\"runtime\",\"time_us\":" + std::to_string(time_us) + "}";
     } else {
-      std::string formatted = g_vm->format_value(fiber.result);
-      std::string type_name = fiber.result.is_int() ? "integer" :
-                              fiber.result.is_double() ? "real" :
-                              fiber.result.is_symbol() ? "symbol" :
-                              fiber.result.is_bool() ? "boolean" :
-                              fiber.result.is_nil() ? "nil" :
-                              Heap::is_cons(fiber.result) ? "pair" :
-                              Heap::is_closure(fiber.result) ? "procedure" :
-                              Heap::is_subr(fiber.result) ? "primitive" :
-                              Heap::is_future(fiber.result) ? "future" : "object";
+      Value rv = outcome.result;
+      std::string formatted = g_vm->format_value(rv);
+      std::string type_name = rv.is_int() ? "integer" :
+                              rv.is_double() ? "real" :
+                              rv.is_symbol() ? "symbol" :
+                              rv.is_bool() ? "boolean" :
+                              rv.is_nil() ? "nil" :
+                              Heap::is_cons(rv) ? "pair" :
+                              Heap::is_closure(rv) ? "procedure" :
+                              Heap::is_subr(rv) ? "primitive" :
+                              Heap::is_future(rv) ? "future" : "object";
 
       g_eval_result_buffer = "{\"ok\":true,\"result\":\"" + escape_json(formatted) +
                              "\",\"type\":\"" + type_name +
                              "\",\"time_us\":" + std::to_string(time_us) +
                              ",\"active_fibers\":" + std::to_string(g_vm->active_fibers.size()) + "}";
     }
+    g_vm->pop_temp_root();
   } catch (const RaiseEscape &e) {
     // An uncaught (raise ...)/(error ...) — a Scheme-level condition,
     // not a VM-internal fault, hence "runtime" (matching the ordinary
@@ -876,26 +917,17 @@ const char *vxs_eval(const char *code) {
   }
 
   try {
-    Reader reader(*g_vm, code);
-    Value form = reader.read_all_forms();
-    Compiler compiler(*g_vm);
-    ObjClosure *closure = compiler.compile_top_level(form);
-
-    Fiber fiber;
-    fiber.push(Value::from_ptr(closure));
-    fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
-    fiber.frames.push_back({closure, closure->chunk->code.data(), 0});
-
     // Same deadline treatment as vxs_eval_json above.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
-    VM::StepResult res = g_vm->step_fiber(fiber, VM::UNBOUNDED, deadline);
-    res = pump_until_settled(fiber, res, deadline);
-    if (res == VM::StepResult::Preempted) {
+    SeqOutcome outcome = eval_forms_sequentially(code, deadline);
+    if (outcome.res == VM::StepResult::Preempted) {
       g_eval_result_buffer = "[Timeout] evaluation exceeded 750ms and was stopped";
-    } else if (res == VM::StepResult::Error) {
-      g_eval_result_buffer = fiber.error_message;
+    } else if (outcome.res == VM::StepResult::Error) {
+      g_eval_result_buffer = outcome.error;
     } else {
-      g_eval_result_buffer = g_vm->format_value(fiber.result);
+      g_vm->push_temp_root(&outcome.result);
+      g_eval_result_buffer = g_vm->format_value(outcome.result);
+      g_vm->pop_temp_root();
     }
   } catch (const RaiseEscape &e) {
     // Already fully formatted — see the matching catch in vxs_eval_json.

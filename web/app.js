@@ -240,87 +240,60 @@
     plasma: `;;; ==========================================================
 ;;; GPU Plasma Field — WGSL compiled from Scheme, in the browser
 ;;; ==========================================================
-;;; Nothing here writes WGSL. The expression below is compiled to a
-;;; shader by lib/wgsl.scm, which type-checks it first: mixing a vec2
-;;; with a vec3, or swizzling past the end of a vector, is a Scheme
-;;; error here rather than a shader compilation log in the console.
+;;; Nothing here writes WGSL. The kernel below is compiled to a shader by
+;;; lib/wgsl.scm, which type-checks it first: mixing a vec2 with a vec3,
+;;; or swizzling past the end of a vector, is a Scheme error here rather
+;;; than a shader compilation log in the browser console.
 ;;;
-;;; lib/*.scm is embedded in the wasm binary, so \`load\` works in the
-;;; browser even though there is no filesystem.
-
-(load "lib/shadertoy.scm")
-
-(define kernel
-  '(let ((c (- uv 0.5))
-         (r (length c))
-         (a (* 6.2831 (+ (* r 3.0) (* time 0.15)))))
-     (vec3 (+ 0.5 (* 0.5 (sin (- (* r 24.0) (* time 3.0)))))
-           (+ 0.5 (* 0.5 (cos (+ a (* time 0.7)))))
-           (+ 0.6 (* 0.4 (sin (* time 1.3)))))))
-
-(define wgsl (shadertoy kernel))
-
-;;; The device arrives as an ordinary future; touch suspends the fiber
-;;; until the browser settles it. One frame per (yield), pumped by the
-;;; same requestAnimationFrame driver the CPU demos use.
+;;; There is no quote on the kernel body. define-kernel is a macro, so it
+;;; receives the form unevaluated — the language boundary is the syntax
+;;; rather than a punctuation mark. Inside it you are writing kernel code,
+;;; where uv, time and res are the inputs and the result is a vec3 colour.
 ;;;
-;;; guard wraps only the draw, never the yield: guard cannot suspend, so
-;;; yielding inside it would kill the fiber.
-(future
-  (let* ((adapter (touch (request-adapter)))
-         (device  (touch (request-device adapter))))
-    (display "GPU device acquired; animating.") (newline)
-    (let loop ()
-      (if (guard (e (#t (display "kernel failed: ")
-                        (display (if (error-object? e) (error-object-message e) e))
-                        (newline)
-                        #f))
-            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) "vxs-gpu-canvas")
-            #t)
-          (begin (yield) (loop))
-          (begin (display "stopped.") (newline))))))
+;;; lib/*.scm is embedded in the wasm binary, so load works here even
+;;; though the browser has no filesystem.
+
+(load "lib/gpu.scm")
+
+(define-kernel plasma
+  (let ((c (- uv 0.5))
+        (r (length c))
+        (a (* 6.2831 (+ (* r 3.0) (* time 0.15)))))
+    (vec3 (+ 0.5 (* 0.5 (sin (- (* r 24.0) (* time 3.0)))))
+          (+ 0.5 (* 0.5 (cos (+ a (* time 0.7)))))
+          (+ 0.6 (* 0.4 (sin (* time 1.3)))))))
+
+;;; The device arrives as an ordinary future; the loop runs one frame per
+;;; yield, pumped by the same driver the CPU demos use. All of that lives
+;;; in run-kernel-loop, including the rule that guard must wrap only the
+;;; draw and never the yield — guard cannot suspend a fiber.
+(run-kernel-loop plasma "vxs-gpu-canvas")
 `,
 
     rings: `;;; ==========================================================
 ;;; GPU Polar Rings — conditionals in the kernel language
 ;;; ==========================================================
-;;; (if c a b) compiles to WGSL select(b, a, c), which is BRANCHLESS:
-;;; both arms are evaluated and neither short-circuits. That is the
-;;; right default on a GPU, where a real branch diverges the warp — but
-;;; it means an arm can never guard the other from a bad value.
+;;; (if c a b) compiles to WGSL select(b, a, c), which is BRANCHLESS: both
+;;; arms are evaluated and neither short-circuits. That is the right
+;;; default on a GPU, where a real branch diverges the warp — but it means
+;;; an arm can never guard the other from a bad value.
 ;;;
-;;; Hard edges are what conditionals buy: without them every kernel this
+;;; Hard edges are what conditionals buy. Without them every kernel this
 ;;; language can express is a smooth gradient.
 
-(load "lib/shadertoy.scm")
+(load "lib/gpu.scm")
 
-(define kernel
-  '(let ((c (- uv 0.5))
-         (r (length c))
-         (band (fract (- (* r 12.0) (* time 0.8))))
-         (edge (if (< band 0.5) 1.0 0.0))
-         (glow (+ 0.35 (* 0.35 (sin (+ (* r 18.0) time))))))
-     (vec3 (* edge glow)
-           (* edge (+ 0.25 (* 0.5 (fract (+ r (* time 0.2))))))
-           (+ 0.35 (* 0.45 (- 1.0 edge))))))
+(define-kernel rings
+  (let ((c (- uv 0.5))
+        (r (length c))
+        (band (fract (- (* r 12.0) (* time 0.8))))
+        (edge (if (< band 0.5) 1.0 0.0))
+        (glow (+ 0.35 (* 0.35 (sin (+ (* r 18.0) time))))))
+    (vec3 (* edge glow)
+          (* edge (+ 0.25 (* 0.5 (fract (+ r (* time 0.2))))))
+          (+ 0.35 (* 0.45 (- 1.0 edge))))))
 
-(define wgsl (shadertoy kernel))
-
-(display "compiled kernel:") (newline)
-(display wgsl) (newline)
-
-(future
-  (let* ((adapter (touch (request-adapter)))
-         (device  (touch (request-device adapter))))
-    (let loop ()
-      (if (guard (e (#t (display "kernel failed: ")
-                        (display (if (error-object? e) (error-object-message e) e))
-                        (newline)
-                        #f))
-            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) "vxs-gpu-canvas")
-            #t)
-          (begin (yield) (loop))
-          (begin (display "stopped.") (newline))))))
+(run-kernel-loop rings "vxs-gpu-canvas")
 `,
 
     particles: `;;; ==========================================================
