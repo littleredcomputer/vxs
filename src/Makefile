@@ -90,7 +90,7 @@ test-wasm:
 # Scheme suite — the whole question is which host callback receives the
 # text.
 test-ports:
-	@echo "=== RUNNING BROWSER OUTPUT PORT TESTS ==="
+	@echo "=== RUNNING BROWSER HOST TESTS (output ports, form sequencing) ==="
 	$(Q)$(NODE) ../testcases/test_browser_ports.js
 
 # Externally-settled futures. Necessarily lives here rather than in the
