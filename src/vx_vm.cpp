@@ -3439,24 +3439,45 @@ void VM::init_primitives() {
   def_global("number->string", heap.make_subr("number->string", [](VM &vm, uint32_t argc, Value *args) -> Value {
     int radix = 10;
     if (argc > 1 && args[1].is_int()) radix = args[1].as_int();
-    if (args[0].is_int() && radix != 10 && radix >= 2 && radix <= 36) {
-      int32_t iv = args[0].as_int();
-      bool neg = iv < 0;
-      uint32_t uv = neg ? static_cast<uint32_t>(-static_cast<int64_t>(iv))
-                        : static_cast<uint32_t>(iv);
-      static const char DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-      std::string digits;
-      if (uv == 0) {
-        digits = "0";
-      } else {
-        while (uv > 0) {
-          digits.push_back(DIGITS[uv % static_cast<uint32_t>(radix)]);
-          uv /= static_cast<uint32_t>(radix);
+    if (radix != 10 && radix >= 2 && radix <= 36) {
+      // Both exact fixnums and INTEGRAL flonums format here. Every u32
+      // value above 2^31 is a flonum in this system, and this path used
+      // to accept only fixnums — so (number->string x 16) on one of them
+      // fell through and silently returned DECIMAL text, ignoring the
+      // radix it was handed. Formatting it is the useful answer; note
+      // that R7RS leaves inexact + non-decimal radix undefined, and
+      // exactness does not round-trip through it below 2^31.
+      bool integral = false;
+      int64_t iv = 0;
+      if (args[0].is_int()) {
+        iv = args[0].as_int();
+        integral = true;
+      } else if (args[0].is_double()) {
+        double d = args[0].as_double();
+        // 2^53 is where consecutive integers stop being representable.
+        if (d == std::floor(d) && std::fabs(d) <= 9007199254740992.0) {
+          iv = static_cast<int64_t>(d);
+          integral = true;
         }
-        std::reverse(digits.begin(), digits.end());
       }
-      if (neg) digits.insert(digits.begin(), '-');
-      return vm.heap.make_string(digits);
+      if (integral) {
+        bool neg = iv < 0;
+        uint64_t uv = neg ? static_cast<uint64_t>(-iv)
+                          : static_cast<uint64_t>(iv);
+        static const char DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+        std::string digits;
+        if (uv == 0) {
+          digits = "0";
+        } else {
+          while (uv > 0) {
+            digits.push_back(DIGITS[uv % static_cast<uint64_t>(radix)]);
+            uv /= static_cast<uint64_t>(radix);
+          }
+          std::reverse(digits.begin(), digits.end());
+        }
+        if (neg) digits.insert(digits.begin(), '-');
+        return vm.heap.make_string(digits);
+      }
     }
     if (args[0].is_int()) {
       return vm.heap.make_string(std::to_string(args[0].as_int()));
@@ -3493,18 +3514,24 @@ void VM::init_primitives() {
     }
 
     if (radix != 10) {
-      // R4RS only requires exact (integer) parsing outside radix 10 — no
-      // double fallback, so a magnitude that doesn't fit our 32-bit exact
-      // integers is just a parse failure here (unlike the radix-10 case
-      // below, which can fall back to inexact).
+      // Magnitudes past our 32-bit exact integers promote to flonum here,
+      // exactly as the radix-10 path and the READER already do. This used
+      // to return #f on the theory that R4RS only requires exact parsing
+      // outside radix 10 — true, but it made (string->number "ffffffff" 16)
+      // fail while the equivalent decimal succeeded, and every u32 value
+      // above 2^31 is precisely such a magnitude. The u32 layer represents
+      // those as flonums throughout; refusing to read them back was the
+      // one place that disagreed.
       char *end = nullptr;
       errno = 0;
       long long iv = std::strtoll(sv.data(), &end, radix);
-      if (end != sv.data() + sv.size() || errno == ERANGE ||
-          iv < INT32_MIN || iv > INT32_MAX) {
+      if (end != sv.data() + sv.size() || errno == ERANGE) {
         return Value::boolean_false();
       }
-      return Value::from_int(static_cast<int32_t>(iv));
+      if (iv >= INT32_MIN && iv <= INT32_MAX) {
+        return Value::from_int(static_cast<int32_t>(iv));
+      }
+      return Value::from_double(static_cast<double>(iv));
     }
 
     char *end = nullptr;
