@@ -18,6 +18,7 @@
 (load "testcases/suite/08_allocation.scm")
 (load "testcases/suite/09_fibers.scm")
 (load "testcases/suite/10_string_ports.scm")
+(load "testcases/suite/11_bytes_views.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")

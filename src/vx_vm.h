@@ -611,6 +611,32 @@ public:
     f->backing_future = Value::nil();
   }
 
+  // Misuse of these primitives RAISES rather than setting Fiber::State::Error.
+  // The older list primitives (car, cdr, ...) set the fiber state, which
+  // `guard` cannot catch — a known gap. New code moves toward catchable, so
+  // a workbench can report a bad buffer index and carry on rather than
+  // losing the fiber. Same choice already made for a failed future.
+  [[noreturn]] inline void raise_contract(const std::string &msg) {
+    Value m = heap.make_string(msg);
+    push_temp_root(&m);
+    Value err = heap.make_error_object(m, {});
+    pop_temp_root();
+    in_flight_raises.push_back(err);
+    throw RaiseEscape(msg);
+  }
+
+  inline ObjBytes *require_bytes(Value v, const char *who) {
+    if (Heap::is_bytes(v)) return v.as_ptr<ObjBytes>();
+    raise_contract(std::string(who) +
+        ": contract violation, expected a byte buffer, got " + format_value(v));
+  }
+
+  inline ObjView *require_view(Value v, const char *who) {
+    if (Heap::is_view(v)) return v.as_ptr<ObjView>();
+    raise_contract(std::string(who) +
+        ": contract violation, expected a view, got " + format_value(v));
+  }
+
   // How to drop the host-side object a handle names. Installed by the
   // embedder — the wasm layer wires this to its JS table; a native CLI
   // has no host objects, so the default no-op is correct there rather
