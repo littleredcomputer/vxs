@@ -12,6 +12,7 @@
   var srcEl = document.getElementById('src');
   var btnRun = document.getElementById('btn-run');
   var btnClear = document.getElementById('btn-clear');
+  var btnKernel = document.getElementById('btn-kernel');
 
   function log(msg, cls) {
     var line = document.createElement('div');
@@ -117,6 +118,65 @@
     if (res && /error/i.test(res)) log(res, 'err');
   }
 
+  // The animated kernel demo. Everything interesting here is that the
+  // WGSL is not written out: it is COMPILED, in Scheme, in the browser,
+  // from the expression in `kernel`. lib/shadertoy.scm and lib/wgsl.scm
+  // reach this page because every lib/*.scm is embedded in the binary and
+  // `load` falls back to that table — there is no filesystem here.
+  //
+  // The loop runs one frame per (yield), pumped by the same
+  // requestAnimationFrame driver as everything else. `time` reaches the
+  // shader as a uniform, so a frame costs a 16-byte buffer write, not a
+  // shader recompile.
+  //
+  // guard wraps ONLY the draw, never the yield: guard cannot suspend, so a
+  // yield inside it would kill the fiber. On failure the loop stops rather
+  // than reporting the same error sixty times a second.
+  var KERNEL_SCHEME = [
+    '(load "lib/shadertoy.scm")',
+    '',
+    '(define kernel',
+    "  '(let ((c (- uv 0.5))",
+    '         (r (length c))',
+    '         (a (* 6.2831 (+ (* r 3.0) (* time 0.15)))))',
+    '     (vec3 (+ 0.5 (* 0.5 (sin (- (* r 24.0) (* time 3.0)))))',
+    '           (+ 0.5 (* 0.5 (cos (+ a (* time 0.7)))))',
+    '           (+ 0.6 (* 0.4 (sin (* time 1.3)))))))',
+    '',
+    '(define wgsl (shadertoy kernel))',
+    '',
+    '(display "compiled kernel to WGSL:") (newline)',
+    '(display wgsl) (newline)',
+    '',
+    '(future',
+    '  (let* ((adapter (touch (request-adapter)))',
+    '         (device (touch (request-device adapter))))',
+    '    (display "device acquired; animating.") (newline)',
+    '    (let loop ()',
+    '      (if (guard (e (#t (display "kernel failed: ")',
+    '                        (display (if (error-object? e) (error-object-message e) e))',
+    '                        (newline)',
+    '                        #f))',
+    '            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0))',
+    '            #t)',
+    '          (begin (yield) (loop))',
+    '          (begin (display "stopped.") (newline))))))'
+  ].join('\n');
+
+  function runKernel() {
+    if (!VXS) { log('wasm not ready yet', 'err'); return; }
+    clear();
+    if (!navigator.gpu) {
+      log('navigator.gpu is undefined - this browser has no WebGPU.', 'err');
+    }
+    // Drop any fiber still animating from a previous press, or each run
+    // would stack another draw loop onto the same canvas.
+    if (VXS.ccall) VXS.ccall('vxs_clear_fibers', null, [], []);
+    var res = ev(KERNEL_SCHEME);
+    if (res && /error/i.test(res)) log(res, 'err');
+  }
+
+  btnKernel.addEventListener('click', runKernel);
   btnRun.addEventListener('click', run);
   btnClear.addEventListener('click', clear);
 

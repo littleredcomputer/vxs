@@ -30,24 +30,23 @@ else
 Q =
 endif
 
-# The prelude is Scheme source (lib/prelude.scm) embedded into the binary
-# as a string, rather than a file loaded at runtime: the wasm build has no
-# filesystem to `load` from, and the prelude has to reach the browser —
-# that is the whole reason it exists as a separate tier from lib/*.scm.
-# Kept as real Scheme on disk so it can be edited, diffed and loaded
-# directly for testing, instead of living as an escaped C++ string.
-vx_prelude.h: ../lib/prelude.scm
-	@echo "=== EMBEDDING lib/prelude.scm ==="
-	$(Q)printf '// Generated from lib/prelude.scm by the Makefile — DO NOT EDIT.\n' > $@
-	$(Q)printf '#pragma once\nnamespace vxs {\ninline constexpr const char *VX_PRELUDE_SOURCE = R"VXSCM(\n' >> $@
-	$(Q)cat $< >> $@
-	$(Q)printf ')VXSCM";\n} // namespace vxs\n' >> $@
+# Every lib/*.scm is compiled into the binary as data (see embed_libs.sh).
+# The wasm build has no filesystem, so `load` cannot reach lib/ there, and
+# the browser is exactly where a livecoding library is wanted. Nothing in
+# the table is evaluated until something loads it — only prelude.scm runs
+# at startup — so a library costs nothing until it is used. Kept as real
+# Scheme on disk so it can be edited and diffed, not as escaped C++.
+SCHEME_LIBS := $(wildcard ../lib/*.scm)
 
-vx-scheme: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_prelude.h
+vx_embedded_libs.h: $(SCHEME_LIBS) embed_libs.sh
+	@echo "=== EMBEDDING lib/*.scm ==="
+	$(Q)./embed_libs.sh ../lib > $@
+
+vx-scheme: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_embedded_libs.h
 	@echo "=== BUILDING NATIVE vx-scheme ==="
 	$(Q)$(CXX) $(CXXFLAGS) vx_vm.cpp main.cpp -o vx-scheme
 
-wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_prelude.h
+wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_embedded_libs.h
 	@echo "=== BUILDING WASM (web/vxs.js, web/vxs.wasm) ==="
 	$(Q)mkdir -p ../web
 	$(Q)$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
@@ -132,7 +131,7 @@ test-aot: vx-scheme
 # allocation, the free and the read. That is the difference between "the
 # scheduler deletes fibers and touch holds a raw pointer" as a hypothesis
 # and as a fact.
-asan: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_prelude.h
+asan: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_embedded_libs.h
 	@echo "=== BUILDING + RUNNING SUITE UNDER ADDRESSSANITIZER ==="
 	$(Q)$(CXX) -std=c++20 -O0 -g -fsanitize=address -fno-omit-frame-pointer \
 	    -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER) \
@@ -156,5 +155,5 @@ bench: vx-scheme
 	./vx-scheme ../testcases/series.scm
 
 clean:
-	rm -f *.o vx_prelude.h vx-scheme vx-scheme-asan vxs-* test_fibers ack_bin ack_aot.out a.out
+	rm -f *.o vx_embedded_libs.h vx-scheme vx-scheme-asan vxs-* test_fibers ack_bin ack_aot.out a.out
 	rm -rf *.dSYM
