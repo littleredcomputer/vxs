@@ -15,3 +15,7 @@ testcases/tmp2
 testcases/tmp3
 
 
+
+# Debug symbol bundles and the sanitizer build (see `make asan`)
+*.dSYM/
+vx-scheme-asan
