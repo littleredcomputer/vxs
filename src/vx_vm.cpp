@@ -1147,6 +1147,27 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
   return preempted_count;
 }
 
+// --- unsigned 32-bit helpers ---------------------------------------
+// Coerce any number to a u32 bit pattern: a negative fixnum is read as
+// two's complement, a flonum is wrapped into [0, 2^32).
+static inline uint32_t to_u32(Value v) {
+  if (v.is_int()) return static_cast<uint32_t>(v.as_int());
+  double d = v.as_real();
+  double m = std::fmod(d, 4294967296.0);
+  if (m < 0.0) m += 4294967296.0;
+  return static_cast<uint32_t>(m);
+}
+
+// Return a u32 EXACTLY: fixnum where it fits, flonum above 2^31. Every
+// u32 is exactly representable in a double, so nothing is lost and
+// composing these operations round-trips.
+static inline Value from_u32(uint32_t x) {
+  if (x <= static_cast<uint32_t>(INT32_MAX)) {
+    return Value::from_int(static_cast<int32_t>(x));
+  }
+  return Value::from_double(static_cast<double>(x));
+}
+
 // Case-insensitive three-way compare, shared by the string-ci*? family.
 // A free function rather than a local lambda: NativeSubrFn is a plain
 // function pointer, so the subr lambdas below must stay capture-less —
@@ -2744,6 +2765,82 @@ void VM::init_primitives() {
   };
   def_global("lognot", heap.make_subr("lognot", subr_lognot, 1, 1));
   def_global("bitwise-not", heap.make_subr("bitwise-not", subr_lognot, 1, 1));
+  // The family reads and/xor/not/ior; `or` is the name everyone reaches
+  // for first. Alias, not a new operation.
+  def_global("bitwise-or", heap.make_subr("bitwise-or", subr_logior, 0, UINT32_MAX));
+
+  // --- unsigned 32-bit arithmetic ------------------------------------
+  // The bitwise-* family above works on vxs fixnums, which are SIGNED
+  // 32-bit — so (bitwise-xor 2147483648 1) comes back as -2147483647 and
+  // (arithmetic-shift 1 31) wraps negative. That is defensible for
+  // two's-complement integers and useless for anything that must match a
+  // published bit-exact specification: a counter-based RNG, a hash, a
+  // checksum.
+  //
+  // These take any number (negative fixnums are read as two's
+  // complement, flonums are wrapped into range) and return an EXACT
+  // unsigned result — a fixnum below 2^31, a flonum above it, since
+  // every u32 is exactly representable in a double's 53-bit mantissa.
+  // Composing them therefore round-trips, which the signed family does
+  // not.
+  def_global("u32", heap.make_subr("u32", [](VM &, uint32_t, Value *args) -> Value {
+    return from_u32(to_u32(args[0]));
+  }, 1, 1));
+
+  def_global("u32+", heap.make_subr("u32+", [](VM &, uint32_t argc, Value *args) -> Value {
+    uint32_t r = 0;
+    for (uint32_t i = 0; i < argc; ++i) r += to_u32(args[i]);   // wraps, as intended
+    return from_u32(r);
+  }, 0, UINT32_MAX));
+
+  def_global("u32*", heap.make_subr("u32*", [](VM &, uint32_t argc, Value *args) -> Value {
+    uint32_t r = 1;
+    for (uint32_t i = 0; i < argc; ++i) r *= to_u32(args[i]);
+    return from_u32(r);
+  }, 0, UINT32_MAX));
+
+  def_global("u32-xor", heap.make_subr("u32-xor", [](VM &, uint32_t argc, Value *args) -> Value {
+    uint32_t r = 0;
+    for (uint32_t i = 0; i < argc; ++i) r ^= to_u32(args[i]);
+    return from_u32(r);
+  }, 0, UINT32_MAX));
+
+  def_global("u32-and", heap.make_subr("u32-and", [](VM &, uint32_t argc, Value *args) -> Value {
+    uint32_t r = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < argc; ++i) r &= to_u32(args[i]);
+    return from_u32(r);
+  }, 0, UINT32_MAX));
+
+  def_global("u32-or", heap.make_subr("u32-or", [](VM &, uint32_t argc, Value *args) -> Value {
+    uint32_t r = 0;
+    for (uint32_t i = 0; i < argc; ++i) r |= to_u32(args[i]);
+    return from_u32(r);
+  }, 0, UINT32_MAX));
+
+  def_global("u32-not", heap.make_subr("u32-not", [](VM &, uint32_t, Value *args) -> Value {
+    return from_u32(~to_u32(args[0]));
+  }, 1, 1));
+
+  // Shifts are LOGICAL: no sign to extend, and a shift of 32 or more is
+  // zero rather than undefined (C++ would leave that up to the hardware).
+  def_global("u32-shl", heap.make_subr("u32-shl", [](VM &, uint32_t, Value *args) -> Value {
+    uint32_t n = to_u32(args[1]);
+    return from_u32(n >= 32 ? 0u : (to_u32(args[0]) << n));
+  }, 2, 2));
+
+  def_global("u32-shr", heap.make_subr("u32-shr", [](VM &, uint32_t, Value *args) -> Value {
+    uint32_t n = to_u32(args[1]);
+    return from_u32(n >= 32 ? 0u : (to_u32(args[0]) >> n));
+  }, 2, 2));
+
+  // Rotate left. The one operation Threefry is built out of, and the one
+  // C++ makes easy to write wrongly: x << 32 is undefined behaviour, so
+  // the n % 32 == 0 case must be handled rather than assumed.
+  def_global("u32-rotl", heap.make_subr("u32-rotl", [](VM &, uint32_t, Value *args) -> Value {
+    uint32_t x = to_u32(args[0]);
+    uint32_t n = to_u32(args[1]) & 31u;
+    return from_u32(n == 0 ? x : ((x << n) | (x >> (32 - n))));
+  }, 2, 2));
 
   auto subr_ash = [](VM &, uint32_t, Value *args) -> Value {
     int64_t n = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
