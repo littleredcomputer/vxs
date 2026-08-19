@@ -15,6 +15,7 @@
 ;;----------------------------------------------------------------------
 
 (load "lib/shadertoy.scm")
+(load "lib/points.scm")
 
 ;; (run-kernel-loop wgsl [canvas-id]) -> future
 ;;
@@ -46,3 +47,32 @@
                 #t)
               (begin (yield) (loop))
               (begin (display "kernel loop stopped.") (newline))))))))
+
+;; (run-points-loop bytes count update! [canvas-id]) -> future
+;;
+;; The instanced-points counterpart of run-kernel-loop. `update!` is called
+;; with the time in seconds before each draw and is expected to write the
+;; point buffer; passing a procedure that does nothing gives a static
+;; cloud.
+;;
+;; update! runs INSIDE the guard, so a mistake in it is reported like a
+;; failed draw rather than silently killing the fiber — which means it must
+;; not yield, for the same reason the draw must not: guard cannot suspend.
+(define (run-points-loop bytes count update! . opts)
+  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
+    (future
+      (let* ((adapter (touch (request-adapter)))
+             (device  (touch (request-device adapter))))
+        (let loop ()
+          (let ((t (/ (current-time) 1000.0)))
+            (if (guard (e (#t (display "points failed: ")
+                              (display (if (error-object? e)
+                                           (error-object-message e)
+                                           e))
+                              (newline)
+                              #f))
+                  (update! t)
+                  (gpu-draw-instances! device points-wgsl bytes count t canvas)
+                  #t)
+                (begin (yield) (loop))
+                (begin (display "point loop stopped.") (newline)))))))))
