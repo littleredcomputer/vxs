@@ -396,7 +396,15 @@ struct VM {
              s_call_with_values;
   } sym;
 
-  VM() : current_fiber(nullptr) {
+  // lib/prelude.scm is evaluated at the end of init_primitives unless this
+  // is false. --no-prelude sets it, which yields the bare kernel: compiler
+  // special forms and C++ primitives only. Useful for measuring what the
+  // prelude costs at startup, and for catching a kernel that has quietly
+  // grown a dependency on something defined in Scheme above it.
+  bool prelude_enabled = true;
+
+  explicit VM(bool with_prelude = true) : current_fiber(nullptr) {
+    prelude_enabled = with_prelude;
     heap.set_vm(this);
     sym = WellKnown{
         intern("if"),      intern("let"),    intern("letrec"),

@@ -394,27 +394,40 @@ static bool compile_standalone(const std::string &input_path, const std::string 
 }
 
 int main(int argc, char **argv) {
-  VM vm;
-
+  // Global flags are stripped here so the rest of argument dispatch below
+  // doesn't need to know about them. `filtered` must outlive this function
+  // (argv is repointed at its buffer), so it's declared at main()'s scope
+  // rather than in a nested block.
+  //
   // --gc-threshold <bytes>: override the initial auto-collection trigger
   // (default 512KB) — mainly useful for shaking out GC-rooting bugs by
   // forcing collections to fire far more (or less) often than they would
-  // organically. Can appear anywhere in argv; consumed here so the rest
-  // of argument dispatch below doesn't need to know about it. `filtered`
-  // must outlive this function (argv is repointed at its buffer), so it's
-  // declared at main()'s scope rather than in a nested block.
+  // organically.
+  //
+  // --no-prelude: skip lib/prelude.scm and run on the bare kernel. Both
+  // are parsed BEFORE the VM is constructed, because the prelude is
+  // evaluated during construction — there is no later point at which
+  // "don't run it" is still an option.
   static std::vector<char *> filtered;
   filtered.push_back(argv[0]);
+  bool with_prelude = true;
+  unsigned long long gc_threshold = 0;  // 0 = leave the default alone
   for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "--gc-threshold" && i + 1 < argc) {
-      vm.heap.set_gc_threshold(std::strtoull(argv[i + 1], nullptr, 10));
+    std::string flag = argv[i];
+    if (flag == "--gc-threshold" && i + 1 < argc) {
+      gc_threshold = std::strtoull(argv[i + 1], nullptr, 10);
       ++i;
+    } else if (flag == "--no-prelude") {
+      with_prelude = false;
     } else {
       filtered.push_back(argv[i]);
     }
   }
   argc = static_cast<int>(filtered.size());
   argv = filtered.data();
+
+  VM vm(with_prelude);
+  if (gc_threshold) vm.heap.set_gc_threshold(gc_threshold);
 
   if (argc > 1) {
     std::string arg1 = argv[1];

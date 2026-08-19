@@ -1,6 +1,7 @@
 #include "vx_vm.h"
 #include "vx_reader.h"
 #include "vx_compiler.h"
+#include "vx_prelude.h"
 #include <algorithm>
 #include <iomanip>
 #include <fstream>
@@ -2614,55 +2615,12 @@ void VM::init_primitives() {
     return vm.heap.make_input_string_port(std::string(args[0].as_ptr<ObjString>()->view()));
   }, 1, 1));
 
-  // with-output-to-file / call-with-input-file / call-with-output-file:
-  // bootstrapped in Scheme (same pattern as force/assert above) rather
-  // than as C++ subrs — unwind-protect now provides exactly the
-  // restore-on-every-exit guarantee these needed, so the C++-RAII
-  // version of that guarantee (ScopedOutPortRebind/ScopedPortCloser) is
-  // gone; the language has the feature natively. open-*-file returning
-  // #f on failure is unchanged, but the friendly with-*/call-with-*
-  // wrappers now signal a clear error instead of silently returning
-  // unspecified/#f — matching this session's running "no silent
-  // failures" policy (see the for-each fix).
-  {
-    Reader r(*this,
-      "(define (with-output-to-file filename thunk)"
-      "  (let ((port (open-output-file filename)))"
-      "    (if (not port) (error 'with-output-to-file \"could not open file:\" filename)"
-      "        (let ((prev (current-output-port)))"
-      "          (%set-current-output-port! port)"
-      "          (unwind-protect (thunk)"
-      "            (%set-current-output-port! prev)"
-      "            (close-output-port port))))))"
-      // Same shape as with-output-to-file: rebind, run, restore under
-      // unwind-protect so an escape or a raise still restores the port.
-      // No close needed — a string port owns no OS resource.
-      "(define (with-output-to-string thunk)"
-      "  (let ((port (open-output-string))"
-      "        (prev (current-output-port)))"
-      "    (%set-current-output-port! port)"
-      "    (unwind-protect (begin (thunk) (get-output-string port))"
-      "      (%set-current-output-port! prev))))"
-      "(define (call-with-output-string proc)"
-      "  (let ((port (open-output-string)))"
-      "    (proc port)"
-      "    (get-output-string port)))"
-      "(define (call-with-input-file filename proc)"
-      "  (let ((port (open-input-file filename)))"
-      "    (if (not port) (error 'call-with-input-file \"could not open file:\" filename)"
-      "        (unwind-protect (proc port) (close-input-port port)))))"
-      "(define (call-with-output-file filename proc)"
-      "  (let ((port (open-output-file filename)))"
-      "    (if (not port) (error 'call-with-output-file \"could not open file:\" filename)"
-      "        (unwind-protect (proc port) (close-output-port port)))))");
-    while (true) {
-      Value form = r.read_form();
-      if (form.is_eof()) break;
-      Compiler comp(*this);
-      ObjClosure *cl = comp.compile_top_level(form);
-      call_closure(cl, {});
-    }
-  }
+  // with-output-to-file, with-output-to-string, call-with-input-file,
+  // call-with-output-file and call-with-output-string are defined in
+  // lib/prelude.scm, which runs at the END of this function. They were
+  // Scheme snippets embedded here; the prelude is the same idea with one
+  // home, and running last means they can rely on every primitive rather
+  // than only the ones defined above their old position.
 
   def_global("read-char", heap.make_subr("read-char", [](VM &vm, uint32_t argc, Value *args) -> Value {
     std::istream *is = resolve_in(vm, argc, args, 0);
@@ -2680,6 +2638,13 @@ void VM::init_primitives() {
 
   def_global("eof-object?", heap.make_subr("eof-object?", [](VM &, uint32_t, Value *args) -> Value {
     return Value::from_bool(args[0].is_eof());
+  }, 1, 1));
+
+  // R7RS: true for any port, in either direction. The two directional
+  // predicates below existed without it, so asking "is this a port at all"
+  // meant writing (or (input-port? x) (output-port? x)).
+  def_global("port?", heap.make_subr("port?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_port(args[0]));
   }, 1, 1));
 
   def_global("input-port?", heap.make_subr("input-port?", [](VM &, uint32_t, Value *args) -> Value {
@@ -2716,6 +2681,16 @@ void VM::init_primitives() {
     }
     return Value::unspecified();
   }, 1, 1));
+
+  // Push buffered output through without closing. Matters for ports whose
+  // backing stream batches — the browser's sink ports buffer a line at a
+  // time — where a `display` with no trailing newline would otherwise sit
+  // unseen. A no-op on ports that don't buffer, so it is always safe.
+  def_global("flush-output-port", heap.make_subr("flush-output-port", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    std::ostream *os = resolve_out(vm, argc, args, 0);
+    if (os) os->flush();
+    return Value::unspecified();
+  }, 0, 1));
 
   // Property list table: (put sym prop val)
   def_global("put", heap.make_subr("put", [](VM &vm, uint32_t, Value *args) -> Value {
@@ -3789,34 +3764,6 @@ void VM::init_primitives() {
     return list;
   }, 0, 0));
 
-  auto subr_procedure_p = [](VM &, uint32_t, Value *args) -> Value {
-    Value v = args[0];
-    return Value::from_bool(Heap::is_closure(v) || Heap::is_subr(v));
-  };
-  def_global("procedure?", heap.make_subr("procedure?", subr_procedure_p, 1, 1));
-
-  // Initialize force as a pure Scheme procedure to avoid C++ recursion during deep lazy streams
-  {
-    Reader r(*this, "(define (force p) (if (procedure? p) (p) p))");
-    Value form = r.read_form();
-    Compiler comp(*this);
-    ObjClosure *cl = comp.compile_top_level(form);
-    call_closure(cl, {});
-  }
-
-  // assert as a defmacro (not a subr) so the failing *expression* — not
-  // just its runtime-false value — shows up in the error, the way most
-  // Lisps' assert does. Not an R7RS procedure (R7RS doesn't standardize
-  // one at all), but a common enough extension across Schemes that it's
-  // worth having in the "things people reflexively reach for" sense.
-  {
-    Reader r(*this, "(defmacro (assert expr) `(if (not ,expr) (error 'assert \"assertion failed:\" ',expr)))");
-    Value form = r.read_form();
-    Compiler comp(*this);
-    ObjClosure *cl = comp.compile_top_level(form);
-    call_closure(cl, {});
-  }
-
   def_global("time", heap.make_subr("time", [](VM &vm, uint32_t, Value *args) -> Value {
     Value thunk = args[0];
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -3940,10 +3887,27 @@ void VM::init_primitives() {
     return Value::from_bool(vm.globals.find(sym) != vm.globals.end());
   }, 1, 1));
 
+  // Deliberately BROAD: it answers "can this be applied?", and vectors,
+  // maps and keywords are all applicable in vxs. A second, narrower
+  // definition (closures and subrs only) used to sit ~130 lines above this
+  // one, dead — this override always won. Removed rather than reconciled,
+  // because breadth is the answer callers want.
+  //
+  // The one place that must NOT use it is `force`, which needs "is this a
+  // delayed computation?" — a different question, and the reason force
+  // tests is_closure directly. See the comment there.
   def_global("procedure?", heap.make_subr("procedure?", [](VM &, uint32_t, Value *args) -> Value {
     return Value::from_bool(Heap::is_closure(args[0]) || Heap::is_subr(args[0]) || args[0].is_keyword() || Heap::is_map(args[0]) || Heap::is_vector(args[0]));
   }, 1, 1));
 
+  // THE definition of force — do not add a Scheme one to the prelude. One
+  // used to exist as a bootstrap snippet earlier in this function, reading
+  // (if (procedure? p) (p) p), and this def_global silently overrode it.
+  // Keeping it that way is correct rather than merely conservative:
+  // `procedure?` here is broad enough to include vectors, maps and
+  // keywords, so the Scheme form calls anything callable instead of
+  // returning it — (force (vector 1 2 3)) gives () rather than the vector.
+  // is_closure is the right question. Locked down by layer 14.
   def_global("force", heap.make_subr("force", [](VM &vm, uint32_t, Value *args) -> Value {
     if (Heap::is_closure(args[0])) {
       return vm.call_closure(args[0].as_ptr<ObjClosure>(), {});
@@ -4074,6 +4038,20 @@ void VM::init_primitives() {
     }
   };
   def_global("%guard", heap.make_subr("%guard", subr_guard, 2, 2));
+
+  // The prelude runs LAST, so it sees every primitive defined above.
+  // Skipped entirely under --no-prelude, which leaves the bare kernel:
+  // compiler special forms and C++ primitives, nothing else.
+  if (prelude_enabled) {
+    Reader r(*this, VX_PRELUDE_SOURCE);
+    while (true) {
+      Value form = r.read_form();
+      if (form.is_eof()) break;
+      Compiler comp(*this);
+      ObjClosure *cl = comp.compile_top_level(form);
+      call_closure(cl, {});
+    }
+  }
 
   // Sweep any temporary artifacts from bootstrap evaluation
   collect_garbage();

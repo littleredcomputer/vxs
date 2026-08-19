@@ -19,3 +19,6 @@ testcases/tmp3
 # Debug symbol bundles and the sanitizer build (see `make asan`)
 *.dSYM/
 vx-scheme-asan
+
+# Generated from lib/prelude.scm at build time (see src/Makefile)
+src/vx_prelude.h
