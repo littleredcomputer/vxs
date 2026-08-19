@@ -20,6 +20,7 @@
 (load "testcases/suite/10_string_ports.scm")
 (load "testcases/suite/11_bytes_views.scm")
 (load "testcases/suite/12_u32.scm")
+(load "testcases/suite/13_threefry.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")
