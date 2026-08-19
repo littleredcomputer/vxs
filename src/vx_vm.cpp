@@ -1052,17 +1052,38 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         break;
       }
 
-      case OP_TOUCH: {
+      case OP_TOUCH:
+      case OP_TOUCH_VALUE: {
+        // Identical except on failure: OP_TOUCH raises, OP_TOUCH_VALUE
+        // hands the error object back as an ordinary value. Sharing the
+        // path matters — the suspension logic below is the delicate part
+        // and must not be duplicated.
+        const bool as_value = (op == OP_TOUCH_VALUE);
         Value fut_val = f.pop();
         if (!Heap::is_future(fut_val)) {
           f.state = Fiber::State::Error;
-          f.error_message = "[VM Error] touch: expected a future";
+          f.error_message = as_value
+              ? "[VM Error] touch/or-error: expected a future"
+              : "[VM Error] touch: expected a future";
           return StepResult::Error;
         }
         ObjFuture *fut = fut_val.as_ptr<ObjFuture>();
         if (fut->is_completed) {
           f.awaited = Value::nil();   // no longer waiting on anything
-          if (fut->is_error) raise_failed_future(fut);
+          if (fut->is_error) {
+            if (!as_value) raise_failed_future(fut);
+            // As a value: hand back a real error object, so the caller can
+            // ask error-object? / error-object-message exactly as a guard
+            // clause would have.
+            Value msg = Heap::is_string(fut->result)
+                ? fut->result
+                : heap.make_string("awaited computation failed");
+            push_temp_root(&msg);
+            Value err = heap.make_error_object(msg, {});
+            pop_temp_root();
+            f.push(err);
+            break;
+          }
           f.push(fut->result);
           break;
         }
@@ -1122,7 +1143,17 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
               return StepResult::Error;
             }
           }
-          if (fut->is_error) raise_failed_future(fut);
+          if (fut->is_error) {
+            if (!as_value) raise_failed_future(fut);
+            Value msg = Heap::is_string(fut->result)
+                ? fut->result
+                : heap.make_string("awaited computation failed");
+            push_temp_root(&msg);
+            Value err = heap.make_error_object(msg, {});
+            pop_temp_root();
+            f.push(err);
+            break;
+          }
           f.push(fut->result);
           break;
         }
