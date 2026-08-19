@@ -54,4 +54,37 @@
               4106028280
               (u32+ (u32-rotl (u32-xor 3735928559 2863311530) 13) 305419896))
 
+;;--- u32 values through text -------------------------------------------
+;; Bit-exact specifications are published in hex, so reading and writing
+;; u32 values as hex has to work across the whole range — including above
+;; 2^31, where the value is a flonum here. Both directions were broken in
+;; ways that only showed up past that boundary:
+;;
+;;   (string->number "ffffffff" 16)   => #f      (decimal promoted; hex did not)
+;;   (number->string 4294967295 16)   => "4294967295.0"  (radix IGNORED)
+;;
+;; The second is the nastier one: it answered in decimal without
+;; complaint, so hex output looked plausible until compared with a
+;; published vector.
+
+(assert-equal "hex parses below 2^31 as exact" 2147483647
+              (string->number "7fffffff" 16))
+(assert-equal "hex parses at 2^31" 2147483648 (string->number "80000000" 16))
+(assert-equal "hex parses 0xFFFFFFFF" 4294967295 (string->number "ffffffff" 16))
+(assert-equal "hex rejects non-digits for its radix" #f
+              (string->number "zzz" 16))
+(assert-equal "binary radix parses" 255 (string->number "11111111" 2))
+
+(assert-equal "formats above 2^31 in the radix asked for" "ffffffff"
+              (number->string 4294967295 16))
+(assert-equal "formats a large flonum result" "aaaaaaaa"
+              (number->string (u32-xor 4294967295 1431655765) 16))
+(assert-equal "formats below 2^31 too" "ff" (number->string 255 16))
+(assert-equal "formats zero" "0" (number->string 0 16))
+(assert-equal "formats negatives" "-ff" (number->string -255 16))
+(assert-equal "binary radix formats" "11111111" (number->string 255 2))
+
+(assert-equal "hex round-trips across the boundary" 4294967295
+              (string->number (number->string 4294967295 16) 16))
+
 (suite-summary)
