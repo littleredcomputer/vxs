@@ -179,7 +179,17 @@ public:
     } else {
       while (Heap::is_cons(p)) {
         Value sym_val = Heap::car(p);
-        assert(sym_val.is_symbol());
+        // NOT an assert. Parameter lists reach here from source text —
+        // directly from a lambda, and indirectly from every form that
+        // desugars into one — so a malformed program could abort the
+        // process, which in the browser takes the whole wasm module down
+        // and needs a page reload. A syntax mistake is the user's error to
+        // be told about, not an invariant of ours to die on.
+        if (!sym_val.is_symbol()) {
+          vm.raise_contract(
+              "malformed parameter list: expected a symbol, got " +
+              vm.format_value(sym_val));
+        }
         std::string name = vm.get_symbol_name(sym_val.as_symbol_id());
         fn_compiler.add_local(name);
         ++arity;
@@ -1066,6 +1076,23 @@ private:
             Value vc = var_clauses;
             while (Heap::is_cons(vc)) {
               Value item = Heap::car(vc);
+              // (do ((i 0 (+ i 1))) ...) — a LIST of specs. Writing
+              // (do (i 0 (+ i 1)) ...) omits one layer of parentheses, and
+              // each of i, 0 and (+ i 1) is then read as a spec of its own.
+              // Caught here because otherwise a non-symbol name travels
+              // into compile_function and fails a long way from the cause.
+              if (!Heap::is_cons(item) || !Heap::car(item).is_symbol()) {
+                vm.raise_contract(
+                    "do: each binding must be (name init [step]), got " +
+                    vm.format_value(item) +
+                    " — note the bindings are a LIST of such forms: "
+                    "(do ((i 0 (+ i 1))) (test result) body ...)");
+              }
+              if (!Heap::is_cons(Heap::cdr(item))) {
+                vm.raise_contract(
+                    "do: binding for " + vm.format_value(Heap::car(item)) +
+                    " has no init expression; expected (name init [step])");
+              }
               Value v_name = Heap::car(item);
               Value v_init = Heap::car(Heap::cdr(item));
               Value v_step = Heap::is_cons(Heap::cdr(Heap::cdr(item)))
