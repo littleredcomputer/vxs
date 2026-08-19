@@ -120,6 +120,35 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
           !lines.join('').includes('must not run'), JSON.stringify(lines));
   }
 
+  // --- malformed syntax must not abort the module ---------------------
+  // compile_function used to assert(sym_val.is_symbol()) on parameter
+  // lists built from SOURCE TEXT. Reachable from a program, an assert is
+  // not a check but a crash: it aborted the whole wasm module, which in a
+  // browser means a page reload. (do (i 0 (+ i 1)) ...) — one missing
+  // layer of parentheses — was enough to trigger it.
+  //
+  // The load-bearing assertion here is the last one: the module is still
+  // answering afterwards.
+  {
+    const r = ev("(do (i 0 (+ i 1)) ((= i 3) 'ok))");
+    check("a malformed do reports rather than aborts",
+          /each binding must be/.test(r), `got ${r}`);
+    check("and says the bindings are a list of forms",
+          /LIST of such forms/.test(r), `got ${r}`);
+  }
+
+  {
+    const r = ev('((lambda (1) 2) 3)');
+    check("a non-symbol parameter reports rather than aborts",
+          /malformed parameter list/.test(r), `got ${r}`);
+  }
+
+  {
+    const r = ev('(+ 20 22)');
+    check("the module still evaluates after a syntax error",
+          r.trim() === '42', `got ${r}`);
+  }
+
   console.log("\n────────────────────────────────────────────────────────────────");
   console.log(`Browser host: ${total} | Passed: ${total - bad} | Failed: ${bad}`);
   console.log(bad ? "❌ BROWSER HOST TESTS FAILED" : "✨ BROWSER HOST TESTS PASSED ✨");
