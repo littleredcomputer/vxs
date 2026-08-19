@@ -368,6 +368,85 @@ EM_JS(int, js_gpu_draw, (int deviceId, const char *wgslPtr, const char *canvasId
   }
 });
 
+// Draw one frame of a kernel shader. Unlike js_gpu_draw above, which
+// rebuilds everything per call because it draws a static triangle once,
+// this caches the pipeline, uniform buffer and bind group keyed by
+// (canvas, source): a per-frame shader recompile would dominate the frame
+// budget completely. Change the source and you get a new entry, which is
+// what makes livecoding a shader a matter of handing over a new string.
+//
+// Explicit bind group layout, never layout:"auto" - with auto, layouts are
+// derived per pipeline, so bind groups become pipeline-specific and every
+// recompile invalidates them, foreclosing exactly the hot-swap this is for.
+EM_JS(int, js_gpu_run_kernel, (int deviceId, const char *wgslPtr, const char *canvasIdPtr, double time), {
+  var wgsl = UTF8ToString(wgslPtr);
+  var canvasId = UTF8ToString(canvasIdPtr);
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) { globalThis.vxsGpuError = "no canvas with id " + canvasId; return -2; }
+    var ctx = canvas.getContext('webgpu');
+    if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -3; }
+
+    globalThis.vxsKernelCache = globalThis.vxsKernelCache || {};
+    var key = canvasId + " " + wgsl;
+    var entry = globalThis.vxsKernelCache[key];
+    if (!entry || entry.device !== device) {
+      var format = navigator.gpu.getPreferredCanvasFormat();
+      ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
+      var module = device.createShaderModule({ code: wgsl });
+      var bgl = device.createBindGroupLayout({
+        entries: [{
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' }
+        }]
+      });
+      var pipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex:   { module: module, entryPoint: 'vs' },
+        fragment: { module: module, entryPoint: 'fs', targets: [{ format: format }] },
+        primitive: { topology: 'triangle-list' }
+      });
+      var ubuf = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      var bind = device.createBindGroup({
+        layout: bgl,
+        entries: [{ binding: 0, resource: { buffer: ubuf } }]
+      });
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind };
+      globalThis.vxsKernelCache[key] = entry;
+    }
+
+    // Matches struct U in lib/shadertoy.scm: time, width, height, pad.
+    device.queue.writeBuffer(entry.ubuf, 0,
+      new Float32Array([time, canvas.width, canvas.height, 0.0]));
+
+    var encoder = device.createCommandEncoder();
+    var pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+        loadOp: 'clear',
+        storeOp: 'store'
+      }]
+    });
+    pass.setPipeline(entry.pipeline);
+    pass.setBindGroup(0, entry.bind);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -4;
+  }
+});
+
 EM_JS(char *, js_gpu_last_error, (), {
   var s = globalThis.vxsGpuError || "";
   var n = lengthBytesUTF8(s) + 1;
@@ -380,6 +459,7 @@ static int js_gpu_available() { return 0; }
 static void js_request_adapter(int) {}
 static void js_request_device(int, int) {}
 static int js_gpu_draw(int, const char *, const char *) { return -1; }
+static int js_gpu_run_kernel(int, const char *, const char *, double) { return -1; }
 static char *js_gpu_last_error() { return nullptr; }
 #endif
 
@@ -434,6 +514,40 @@ static void register_wasm_primitives(VM &vm) {
     }
     return Value::boolean_true();
   }, 2, 3));
+
+  // (gpu-run-kernel! device wgsl time [canvas-id]) - draw one frame of a
+  // fullscreen kernel shader. `time` reaches the shader as a uniform, so
+  // animating costs a 16-byte buffer write per frame rather than a shader
+  // recompile. See lib/shadertoy.scm for the source this expects.
+  vm.def_global("gpu-run-kernel!", vm.heap.make_subr("gpu-run-kernel!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) {
+      vm.raise_contract("gpu-run-kernel!: expected a device handle, got " +
+                        vm.format_value(args[0]));
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-run-kernel!: device handle was released");
+    if (!Heap::is_string(args[1])) {
+      vm.raise_contract("gpu-run-kernel!: expected WGSL source as a string");
+    }
+    if (!args[2].is_int() && !args[2].is_double()) {
+      vm.raise_contract("gpu-run-kernel!: expected a number for time, got " +
+                        vm.format_value(args[2]));
+    }
+    std::string wgsl(args[1].as_ptr<ObjString>()->view());
+    double t = args[2].is_int() ? static_cast<double>(args[2].as_int())
+                                : args[2].as_double();
+    std::string canvas_id = (argc > 3 && Heap::is_string(args[3]))
+        ? std::string(args[3].as_ptr<ObjString>()->view())
+        : std::string("gpu-canvas");
+    int rc = js_gpu_run_kernel(static_cast<int>(d->id), wgsl.c_str(), canvas_id.c_str(), t);
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-run-kernel!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 3, 4));
 
   // (sleep ms) -> future. The first consumer of the external-future path,
   // and useful in its own right: a fiber can wait without blocking the

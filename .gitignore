@@ -21,4 +21,4 @@ testcases/tmp3
 vx-scheme-asan
 
 # Generated from lib/prelude.scm at build time (see src/Makefile)
-src/vx_prelude.h
+src/vx_embedded_libs.h

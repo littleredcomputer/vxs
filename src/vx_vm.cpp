@@ -1,7 +1,7 @@
 #include "vx_vm.h"
 #include "vx_reader.h"
 #include "vx_compiler.h"
-#include "vx_prelude.h"
+#include "vx_embedded_libs.h"
 #include <algorithm>
 #include <iomanip>
 #include <fstream>
@@ -1238,6 +1238,18 @@ static std::unique_ptr<std::ifstream> open_input_with_fallback(const std::string
 }
 
 // Builtin primitive registration
+// lib/*.scm compiled into the binary. Looked up by BASENAME so that
+// (load "lib/wgsl.scm"), (load "wgsl.scm") and a bare name all resolve to
+// the same entry — the browser has no directories to be relative to.
+static const char *embedded_lib_source(const std::string &path) {
+  size_t slash = path.find_last_of('/');
+  std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+  for (int i = 0; i < VX_EMBEDDED_LIB_COUNT; ++i) {
+    if (base == VX_EMBEDDED_LIBS[i].name) return VX_EMBEDDED_LIBS[i].source;
+  }
+  return nullptr;
+}
+
 void VM::init_primitives() {
   // 1. Math & Arithmetic
   auto subr_add = [](VM &, uint32_t argc, Value *args) -> Value {
@@ -3788,16 +3800,28 @@ void VM::init_primitives() {
     if (!file.is_open()) file.open("testcases/" + filename);
     if (!file.is_open()) file.open("../testcases/" + filename);
     if (!file.is_open()) file.open("../" + filename);
-    if (!file.is_open()) {
-      if (vm.current_fiber) {
-        vm.current_fiber->state = Fiber::State::Error;
-        vm.current_fiber->error_message = "[VM Error] load: cannot open file " + filename;
+
+    std::string code;
+    if (file.is_open()) {
+      std::stringstream buf;
+      buf << file.rdbuf();
+      code = buf.str();
+    } else {
+      // Fall back to the copy compiled into the binary. This is what makes
+      // (load "lib/wgsl.scm") mean the same thing in the browser, which has
+      // no filesystem at all, as it does natively. On-disk wins when it
+      // exists, so editing a lib and re-running natively picks up the edit
+      // without a rebuild.
+      const char *embedded = embedded_lib_source(filename);
+      if (!embedded) {
+        if (vm.current_fiber) {
+          vm.current_fiber->state = Fiber::State::Error;
+          vm.current_fiber->error_message = "[VM Error] load: cannot open file " + filename;
+        }
+        return Value::unspecified();
       }
-      return Value::unspecified();
+      code = embedded;
     }
-    std::stringstream buf;
-    buf << file.rdbuf();
-    std::string code = buf.str();
     Reader reader(vm, code);
     Value last_res = Value::unspecified();
     while (true) {
@@ -4043,7 +4067,7 @@ void VM::init_primitives() {
   // Skipped entirely under --no-prelude, which leaves the bare kernel:
   // compiler special forms and C++ primitives, nothing else.
   if (prelude_enabled) {
-    Reader r(*this, VX_PRELUDE_SOURCE);
+    Reader r(*this, embedded_lib_source("prelude.scm"));
     while (true) {
       Value form = r.read_form();
       if (form.is_eof()) break;
