@@ -186,6 +186,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await pump(600);
   chk('the same await in the fiber body succeeds', '20.0', ev('ok'));
 
+  // ---- touch/or-error: awaiting failure without a handler -----------
+  // The interim answer to the guard limitation above. A raise needs a
+  // handler; guard cannot suspend; and the failures that matter —
+  // pipeline compilation, mapAsync, device-lost — are precisely the
+  // asynchronous ones. Carrying failure as a VALUE needs no handler, so
+  // it works across a suspension point.
+  console.log('\n=== TOUCH/OR-ERROR ===');
+
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define ok2 'no) (future (set! ok2 (touch/or-error (sleep 20))))`);
+  await pump(600);
+  chk('on success it is just the value', '20.0', ev('ok2'));
+
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define bad 'no) (define lost (sleep 100000))
+      (future (set! bad (touch/or-error lost)))`);
+  step(0);
+  let settledErr = 0;
+  for (let t = 1; t < 500 && !settledErr; t++) {
+    settledErr = VXS.ccall('vxs_settle_error', 'number', ['number', 'string'],
+                           [t, 'device lost']);
+  }
+  await pump(600);
+  chk('an async failure comes back as an error object', '#t',
+      ev('(error-object? bad)'));
+  chk('carrying its message', '"device lost"', ev('(error-object-message bad)'));
+  chk('and the fiber survived to see it', 0, VXS._vxs_active_fibers_count());
+
+  // The point: this is the case guard cannot express.
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define via 'no)
+      (future (let ((r (touch/or-error (sleep 20))))
+                (set! via (if (error-object? r) 'failed 'succeeded))))`);
+  await pump(600);
+  chk('branching on the outcome needs no handler at all', 'succeeded', ev('via'));
+
   // ---- WebGPU, on a host that has none ------------------------------
   // Node has no navigator.gpu, so this exercises exactly the half of the
   // GPU path that is verifiable headless: a real primitive, a real

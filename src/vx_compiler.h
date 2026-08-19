@@ -466,6 +466,16 @@ private:
           return;
         }
 
+        // (touch/or-error future) — the value, or the error object if the
+        // future failed. Never raises, so it needs no handler, so it works
+        // where `guard` cannot: awaiting anything host-settled. Compiled
+        // inline like touch (it must be able to suspend), never a subr.
+        if (op_name == "touch/or-error") {
+          compile_expr(Heap::car(rest), chunk, false);
+          chunk.code.push_back(OP_TOUCH_VALUE);
+          return;
+        }
+
         // (yield)
         if (op_name == "yield") {
           chunk.code.push_back(OP_YIELD);

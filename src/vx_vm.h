@@ -83,7 +83,14 @@ enum Opcode : uint8_t {
   // Appended at the end of the enum on purpose: AOT output (main.cpp)
   // emits raw opcode bytes, so renumbering existing ops would invalidate
   // any previously generated binary.
-  OP_INIT_LOCAL
+  OP_INIT_LOCAL,
+
+  // touch, but a failed future yields its error object as a VALUE instead
+  // of raising. Exists because a raise needs a handler, `guard` cannot
+  // suspend, and the failures that matter — pipeline compilation, mapAsync,
+  // device-lost — are exactly the asynchronous ones. Appended at the end of
+  // the enum: AOT emits raw opcode bytes, so renumbering breaks binaries.
+  OP_TOUCH_VALUE
 };
 
 //=============================================================================
