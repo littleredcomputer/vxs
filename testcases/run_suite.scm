@@ -22,6 +22,7 @@
 (load "testcases/suite/12_u32.scm")
 (load "testcases/suite/13_threefry.scm")
 (load "testcases/suite/14_prelude.scm")
+(load "testcases/suite/15_wgsl.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")
