@@ -31,10 +31,11 @@
 ;; rather than on a test.
 ;;----------------------------------------------------------------------
 
-(define wgsl-types '(f32 vec2f vec3f vec4f))
+(define wgsl-types '(f32 bool vec2f vec3f vec4f))
 
 (define (wgsl-type-name t)
   (cond ((eq? t 'f32)   "f32")
+        ((eq? t 'bool)  "bool")
         ((eq? t 'vec2f) "vec2<f32>")
         ((eq? t 'vec3f) "vec3<f32>")
         ((eq? t 'vec4f) "vec4<f32>")
@@ -107,6 +108,9 @@
 ;; The broadcast rule: identical types combine to themselves, and a scalar
 ;; combines with any vector to give that vector.
 (define (wgsl-arith-type op ta tb)
+  (if (or (eq? ta 'bool) (eq? tb 'bool))
+      (error 'wgsl (string-append "(" (symbol->string op)
+                                  ") does not apply to bool")))
   (cond ((eq? ta tb) ta)
         ((eq? ta 'f32) tb)
         ((eq? tb 'f32) ta)
@@ -245,6 +249,59 @@
                     (wgsl-append-stmts (list a b))
                     (string-append (cdr (assq op wgsl-binary-same)) "("
                                    (wgsl-code-of a) ", " (wgsl-code-of b) ")"))))
+
+    ;; Comparisons produce bool, which exists only to feed `if` and the
+    ;; boolean connectives — there is no other way to make one and nothing
+    ;; else consumes one.
+    ((memq op '(< > <= >= =))
+     (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
+       (if (not (and (eq? (wgsl-type-of a) 'f32) (eq? (wgsl-type-of b) 'f32)))
+           (error 'wgsl
+                  (string-append "(" (symbol->string op)
+                                 ") compares scalars, got: "
+                                 (wgsl-type-name (wgsl-type-of a)) " and "
+                                 (wgsl-type-name (wgsl-type-of b)))))
+       (wgsl-result 'bool (wgsl-append-stmts (list a b))
+                    (string-append "(" (wgsl-code-of a) " "
+                                   (if (eq? op '=) "==" (symbol->string op))
+                                   " " (wgsl-code-of b) ")"))))
+
+    ((memq op '(and or))
+     (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
+       (if (not (and (eq? (wgsl-type-of a) 'bool) (eq? (wgsl-type-of b) 'bool)))
+           (error 'wgsl (string-append "(" (symbol->string op)
+                                       ") needs bool operands")))
+       (wgsl-result 'bool (wgsl-append-stmts (list a b))
+                    (string-append "(" (wgsl-code-of a)
+                                   (if (eq? op 'and) " && " " || ")
+                                   (wgsl-code-of b) ")"))))
+
+    ((eq? op 'not)
+     (let ((a (wgsl (car args) env)))
+       (if (not (eq? (wgsl-type-of a) 'bool))
+           (error 'wgsl "(not) needs a bool operand"))
+       (wgsl-result 'bool (wgsl-stmts-of a)
+                    (string-append "!(" (wgsl-code-of a) ")"))))
+
+    ;; (if c a b) compiles to WGSL select(b, a, c) — note the reversed
+    ;; argument order, which is select's own signature, not a mistake.
+    ;;
+    ;; This is NOT Scheme's `if`: select is branchless, so BOTH arms are
+    ;; evaluated and neither is short-circuited. That is the right default
+    ;; on a GPU, where a real branch diverges the warp, but it means an arm
+    ;; must never be the thing guarding the other from a bad value — the
+    ;; usual (if (> x 0) (/ 1 x) 0) idiom does not protect anything here.
+    ((eq? op 'if)
+     (let ((c (wgsl (car args) env))
+           (a (wgsl (cadr args) env))
+           (b (wgsl (caddr args) env)))
+       (if (not (eq? (wgsl-type-of c) 'bool))
+           (error 'wgsl (string-append "(if) needs a bool condition, got: "
+                                       (wgsl-type-name (wgsl-type-of c)))))
+       (wgsl-check-same 'if (wgsl-type-of a) (wgsl-type-of b))
+       (wgsl-result (wgsl-type-of a) (wgsl-append-stmts (list c a b))
+                    (string-append "select(" (wgsl-code-of b) ", "
+                                   (wgsl-code-of a) ", " (wgsl-code-of c) ")"))))
 
     ;; Arithmetic, folded left so (+ a b c) is ((a + b) + c).
     ((wgsl-arith? op)

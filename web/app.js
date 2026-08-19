@@ -6,6 +6,10 @@
   // DOM Elements
   const canvas = document.getElementById('vxs-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
+  // The WebGPU surface is a SEPARATE element; see the comment in
+  // index.html. Never call getContext on it here — gpu-run-kernel! does
+  // that, and doing it twice with different types is what breaks.
+  const gpuCanvas = document.getElementById('vxs-gpu-canvas');
   const editor = document.getElementById('code-editor');
   const btnRun = document.getElementById('btn-run');
   const btnRunTests = document.getElementById('btn-run-tests');
@@ -233,6 +237,92 @@
 
   // Showcase Demo Presets
   const PRESETS = {
+    plasma: `;;; ==========================================================
+;;; GPU Plasma Field — WGSL compiled from Scheme, in the browser
+;;; ==========================================================
+;;; Nothing here writes WGSL. The expression below is compiled to a
+;;; shader by lib/wgsl.scm, which type-checks it first: mixing a vec2
+;;; with a vec3, or swizzling past the end of a vector, is a Scheme
+;;; error here rather than a shader compilation log in the console.
+;;;
+;;; lib/*.scm is embedded in the wasm binary, so \`load\` works in the
+;;; browser even though there is no filesystem.
+
+(load "lib/shadertoy.scm")
+
+(define kernel
+  '(let ((c (- uv 0.5))
+         (r (length c))
+         (a (* 6.2831 (+ (* r 3.0) (* time 0.15)))))
+     (vec3 (+ 0.5 (* 0.5 (sin (- (* r 24.0) (* time 3.0)))))
+           (+ 0.5 (* 0.5 (cos (+ a (* time 0.7)))))
+           (+ 0.6 (* 0.4 (sin (* time 1.3)))))))
+
+(define wgsl (shadertoy kernel))
+
+;;; The device arrives as an ordinary future; touch suspends the fiber
+;;; until the browser settles it. One frame per (yield), pumped by the
+;;; same requestAnimationFrame driver the CPU demos use.
+;;;
+;;; guard wraps only the draw, never the yield: guard cannot suspend, so
+;;; yielding inside it would kill the fiber.
+(future
+  (let* ((adapter (touch (request-adapter)))
+         (device  (touch (request-device adapter))))
+    (display "GPU device acquired; animating.") (newline)
+    (let loop ()
+      (if (guard (e (#t (display "kernel failed: ")
+                        (display (if (error-object? e) (error-object-message e) e))
+                        (newline)
+                        #f))
+            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) "vxs-gpu-canvas")
+            #t)
+          (begin (yield) (loop))
+          (begin (display "stopped.") (newline))))))
+`,
+
+    rings: `;;; ==========================================================
+;;; GPU Polar Rings — conditionals in the kernel language
+;;; ==========================================================
+;;; (if c a b) compiles to WGSL select(b, a, c), which is BRANCHLESS:
+;;; both arms are evaluated and neither short-circuits. That is the
+;;; right default on a GPU, where a real branch diverges the warp — but
+;;; it means an arm can never guard the other from a bad value.
+;;;
+;;; Hard edges are what conditionals buy: without them every kernel this
+;;; language can express is a smooth gradient.
+
+(load "lib/shadertoy.scm")
+
+(define kernel
+  '(let ((c (- uv 0.5))
+         (r (length c))
+         (band (fract (- (* r 12.0) (* time 0.8))))
+         (edge (if (< band 0.5) 1.0 0.0))
+         (glow (+ 0.35 (* 0.35 (sin (+ (* r 18.0) time))))))
+     (vec3 (* edge glow)
+           (* edge (+ 0.25 (* 0.5 (fract (+ r (* time 0.2))))))
+           (+ 0.35 (* 0.45 (- 1.0 edge))))))
+
+(define wgsl (shadertoy kernel))
+
+(display "compiled kernel:") (newline)
+(display wgsl) (newline)
+
+(future
+  (let* ((adapter (touch (request-adapter)))
+         (device  (touch (request-device adapter))))
+    (let loop ()
+      (if (guard (e (#t (display "kernel failed: ")
+                        (display (if (error-object? e) (error-object-message e) e))
+                        (newline)
+                        #f))
+            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) "vxs-gpu-canvas")
+            #t)
+          (begin (yield) (loop))
+          (begin (display "stopped.") (newline))))))
+`,
+
     particles: `;;; ==========================================================
 ;;; Concurrent Particle Fibers Demo
 ;;; ==========================================================
@@ -646,11 +736,21 @@
 `
   };
 
+  // Which presets draw through WebGPU rather than the 2D context.
+  const GPU_PRESETS = { plasma: true, rings: true };
+
+  function showSurface(preset) {
+    const wantsGpu = !!GPU_PRESETS[preset];
+    canvas.style.display = wantsGpu ? 'none' : '';
+    gpuCanvas.style.display = wantsGpu ? '' : 'none';
+  }
+
   // Preset Selection Event
   selectPreset.addEventListener('change', () => {
     const val = selectPreset.value;
     if (PRESETS[val]) {
       if (vxsClearFibers) vxsClearFibers();
+      showSurface(val);
       ctx.fillStyle = '#05070a';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       editor.value = PRESETS[val];

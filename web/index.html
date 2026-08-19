@@ -25,6 +25,8 @@
 
     <div class="controls-group">
       <select id="select-preset" class="select-preset" title="Choose a Scheme demonstration preset">
+        <option value="plasma">🔮 GPU Plasma Field (compiled WGSL)</option>
+        <option value="rings">◎ GPU Polar Rings (compiled WGSL)</option>
         <option value="particles">⚡ Concurrent Particle Fibers</option>
         <option value="wrangle">✨ Point Cube Wrangle</option>
         <option value="attractor">🌀 Chaos Game / Barnsley Fern</option>
@@ -93,7 +95,13 @@
           </div>
         </div>
         <div class="canvas-wrapper">
+          <!-- Two surfaces, not one. A canvas element is bound to its first
+               context type FOREVER: once getContext('2d') has been called,
+               getContext('webgpu') on the same element returns null. So the
+               CPU and GPU demos cannot share a canvas, and switching preset
+               swaps which element is visible. -->
           <canvas id="vxs-canvas" width="800" height="600"></canvas>
+          <canvas id="vxs-gpu-canvas" width="800" height="600" style="display:none"></canvas>
         </div>
       </section>
 

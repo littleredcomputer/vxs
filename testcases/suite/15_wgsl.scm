@@ -157,6 +157,42 @@
               (wgsl-body '(let ((d 1)) d) E "")
               (wgsl-body '(let ((d 1)) d) E ""))
 
+;;--- conditionals -------------------------------------------------------
+;; Without these, every kernel this language can express is a smooth
+;; gradient — there is no way to make an edge. `bool` exists only to feed
+;; `if` and the connectives; nothing else produces or consumes one.
+;;
+;; (if c a b) becomes select(b, a, c) — note the reversed order, which is
+;; select's own signature. select is BRANCHLESS: both arms are evaluated,
+;; nothing short-circuits. Right on a GPU, where a real branch diverges the
+;; warp, but it means an arm can never guard the other from a bad value.
+
+(assert-equal "a comparison produces bool" 'bool (wgsl-type '(> time 1) E))
+(assert-equal "comparison emission" "(time > 1.0)" (wgsl-code '(> time 1) E))
+(assert-equal "equality spells itself ==" "(time == 1.0)" (wgsl-code '(= time 1) E))
+(assert-equal "if compiles to select with the arms swapped"
+              "select(0.0, 1.0, (time > 1.0))"
+              (wgsl-code '(if (> time 1) 1.0 0.0) E))
+(assert-equal "if takes the type of its arms" 'vec3f
+              (wgsl-type '(if (> time 1) col col) E))
+(assert-equal "and emission"
+              "((time > 1.0) && (time < 2.0))"
+              (wgsl-code '(and (> time 1) (< time 2)) E))
+(assert-equal "or emission"
+              "((time > 1.0) || (time < 0.0))"
+              (wgsl-code '(or (> time 1) (< time 0)) E))
+(assert-equal "not emission" "!((time > 1.0))" (wgsl-code '(not (> time 1)) E))
+
+;; bool is not a number, and a non-bool is not a condition.
+(assert-equal "arithmetic on bool is rejected" 'rejected
+              (wgsl-error '(+ (> time 1) 1)))
+(assert-equal "a scalar condition is rejected" 'rejected (wgsl-error '(if time 1 2)))
+(assert-equal "comparing vectors is rejected" 'rejected (wgsl-error '(> uv uv)))
+(assert-equal "mismatched if arms are rejected" 'rejected
+              (wgsl-error '(if (> time 1) col uv)))
+(assert-equal "non-bool operands to and are rejected" 'rejected
+              (wgsl-error '(and time time)))
+
 ;;--- a whole kernel body ------------------------------------------------
 
 (assert-equal "a plasma-ish kernel compiles end to end"
