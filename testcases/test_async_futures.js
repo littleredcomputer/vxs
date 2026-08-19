@@ -144,7 +144,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await pump();
 
   chk('Scheme received a handle',    '#t',         ev('(handle? dev)'));
-  chk('the handle carries its kind', 'gpu-device', ev('(handle-kind dev)'));
+  // handle-kind is a keyword, like every other tag we define — so
+  // (eq? (handle-kind d) :gpu-device) holds without quoting.
+  chk('the handle carries its kind', ':gpu-device', ev('(handle-kind dev)'));
+  chk('the kind is eq? to the keyword literal', '#t',
+      ev('(eq? (handle-kind dev) :gpu-device)'));
   chk('a fresh handle is not released', '#f',      ev('(handle-released? dev)'));
 
   // Releasing marks the OBJECT: every alias sees it, which is why a

@@ -2440,7 +2440,7 @@ void VM::init_primitives() {
   def_global("bytes-residency", heap.make_subr("bytes-residency", [](VM &vm, uint32_t, Value *args) -> Value {
     ObjBytes *b = vm.require_bytes(args[0], "bytes-residency");
     if (!b) return Value::unspecified();
-    return Value::from_symbol_id(vm.intern(
+    return Value::from_keyword_id(vm.intern(
         b->residency == ObjBytes::Residency::Building ? "building" : "sealed"));
   }, 1, 1));
 
@@ -2491,11 +2491,17 @@ void VM::init_primitives() {
   def_global("bytes-view", heap.make_subr("bytes-view", [](VM &vm, uint32_t argc, Value *args) -> Value {
     ObjBytes *b = vm.require_bytes(args[0], "bytes-view");
     if (!b) return Value::unspecified();
-    if (!args[1].is_symbol()) {
-      vm.raise_contract("bytes-view: expected an element type symbol "
-                        "(u8, i32, u32, f32, f64), got " + vm.format_value(args[1]));
+    // Element types are KEYWORDS (:f32, :u32, ...) rather than quoted
+    // symbols: they are tags from a closed set, never names you would
+    // bind, so the quote in 'f32 would exist only to defend against a
+    // variable capture that cannot happen. Self-evaluating reads better
+    // in a DSL you type constantly, and matches how keywords already work
+    // here as map keys and accessors.
+    if (!args[1].is_keyword()) {
+      vm.raise_contract("bytes-view: expected an element type keyword "
+                        "(:u8, :i32, :u32, :f32, :f64), got " + vm.format_value(args[1]));
     }
-    std::string t = vm.get_symbol_name(args[1].as_symbol_id());
+    std::string t = vm.get_symbol_name(args[1].as_keyword_id());
     ElemType elem;
     if (t == "u8") elem = ElemType::U8;
     else if (t == "i32") elem = ElemType::I32;
@@ -2503,8 +2509,8 @@ void VM::init_primitives() {
     else if (t == "f32") elem = ElemType::F32;
     else if (t == "f64") elem = ElemType::F64;
     else {
-      vm.raise_contract("bytes-view: unknown element type '" + t +
-                        "' (expected u8, i32, u32, f32 or f64)");
+      vm.raise_contract("bytes-view: unknown element type :" + t +
+                        " (expected :u8, :i32, :u32, :f32 or :f64)");
     }
     uint32_t esz = elem_size(elem);
     uint32_t offset = (argc > 2 && args[2].is_int()) ? static_cast<uint32_t>(args[2].as_int()) : 0;
@@ -2542,7 +2548,7 @@ void VM::init_primitives() {
       case ElemType::F32: n = "f32"; break;
       case ElemType::F64: n = "f64"; break;
     }
-    return Value::from_symbol_id(vm.intern(n));
+    return Value::from_keyword_id(vm.intern(n));
   }, 1, 1));
 
   def_global("view-bytes", heap.make_subr("view-bytes", [](VM &vm, uint32_t, Value *args) -> Value {
@@ -2613,7 +2619,7 @@ void VM::init_primitives() {
 
   def_global("handle-kind", heap.make_subr("handle-kind", [](VM &, uint32_t, Value *args) -> Value {
     if (!Heap::is_handle(args[0])) return Value::boolean_false();
-    return Value::from_symbol_id(args[0].as_ptr<ObjHandle>()->kind);
+    return Value::from_keyword_id(args[0].as_ptr<ObjHandle>()->kind);
   }, 1, 1));
 
   def_global("handle-released?", heap.make_subr("handle-released?", [](VM &, uint32_t, Value *args) -> Value {
