@@ -31,7 +31,9 @@ enum class ObjType : uint8_t {
   Map,
   Upvalue,
   Port,
-  Handle
+  Handle,
+  Bytes,
+  View
 };
 
 // Base object header for all heap-allocated objects
@@ -332,6 +334,79 @@ struct ObjHandle : Obj {
       : Obj(ObjType::Handle), id(handle_id), kind(kind_sym), released(false) {}
 };
 
+//-----------------------------------------------------------------------------
+// 12. Bytes — untyped storage, and typed views over it
+//-----------------------------------------------------------------------------
+// Storage is PLAIN BYTES, deliberately, not a family of typed-array types.
+// That matches both JS (ArrayBuffer owns memory; Float32Array and friends
+// are views with no storage of their own) and WebGPU (getMappedRange hands
+// back an ArrayBuffer; writeBuffer takes bytes).
+//
+// The deeper reason is that GPU data is not uniformly typed. A particle is
+// vec3<f32> position + f32 weight + u32 id — one buffer, mixed types, with
+// padding. Typed-arrays-as-storage forces one element type per buffer, so
+// structured data becomes several parallel buffers that must stay
+// index-aligned. That is the normal case, not an edge case.
+//
+// Hence: the element type lives on the VIEW, never on the buffer. Ask what
+// the element type of a particle buffer is and there is no honest answer.
+struct ObjBytes : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Bytes;
+
+  // Residency is a state machine. Only the two host-side states exist so
+  // far; Device (GPU-resident, not host-readable) and Mapped (temporarily
+  // readable, valid only until unmap) arrive with the WebGPU binding.
+  enum class Residency : uint8_t {
+    Building,   // growable, appendable — an emitter's sink
+    Sealed      // fixed size, indexable — a buffer you can bind
+  };
+
+  std::vector<uint8_t> data;
+  Residency residency;
+
+  inline explicit ObjBytes(Residency r)
+      : Obj(ObjType::Bytes), residency(r) {}
+};
+
+// How a view interprets the bytes it points at. These are the types WGSL
+// actually has (f32/i32/u32), plus u8 for raw access and f64 for host-side
+// arithmetic that never reaches a shader.
+enum class ElemType : uint8_t { U8, I32, U32, F32, F64 };
+
+inline uint32_t elem_size(ElemType t) {
+  switch (t) {
+    case ElemType::U8:  return 1;
+    case ElemType::I32: return 4;
+    case ElemType::U32: return 4;
+    case ElemType::F32: return 4;
+    case ElemType::F64: return 8;
+  }
+  return 1;
+}
+
+// A view is (buffer, byteOffset, stride, element type, count) and owns no
+// storage — exactly JS's model. Two views of different types may overlay
+// the same bytes, which is what makes a struct-of-arrays or an
+// array-of-structs layout expressible without copying: @P at offset 0
+// stride 32, @w at offset 12 stride 32, over one buffer.
+//
+// NOTE for the kernel compiler: at the Scheme level a view is a value, but
+// inside a compiled wrangle it MUST be erased — the layout is known
+// statically, so (v3x @P) has to become a raw load at base + i*stride, with
+// no view object materializing. A view allocated per point per frame would
+// simply be the boxed vec3 problem again under a new name.
+struct ObjView : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::View;
+  Value bytes;         // the ObjBytes this looks into
+  uint32_t offset;     // first element's byte offset
+  uint32_t stride;     // bytes between consecutive elements
+  uint32_t count;      // number of elements
+  ElemType elem;
+
+  inline ObjView(Value b, uint32_t off, uint32_t str, uint32_t n, ElemType e)
+      : Obj(ObjType::View), bytes(b), offset(off), stride(str), count(n), elem(e) {}
+};
+
 //=============================================================================
 // Heap & Slab Allocator with Mark-and-Sweep Garbage Collector
 //=============================================================================
@@ -494,6 +569,23 @@ public:
     return Value::from_ptr(fut);
   }
 
+  // A sealed buffer of n zeroed bytes — fixed size, ready to be viewed.
+  inline Value make_bytes(size_t n) {
+    ObjBytes *b = allocate<ObjBytes>(ObjBytes::Residency::Sealed);
+    b->data.assign(n, 0);
+    return Value::from_ptr(b);
+  }
+
+  // A growable sink — the emitter's end of things. Seal it to view it.
+  inline Value make_byte_sink() {
+    return Value::from_ptr(allocate<ObjBytes>(ObjBytes::Residency::Building));
+  }
+
+  inline Value make_view(Value bytes, uint32_t offset, uint32_t stride,
+                         uint32_t count, ElemType elem) {
+    return Value::from_ptr(allocate<ObjView>(bytes, offset, stride, count, elem));
+  }
+
   inline Value make_handle(uint32_t id, uint32_t kind_sym) {
     return Value::from_ptr(allocate<ObjHandle>(id, kind_sym));
   }
@@ -552,6 +644,14 @@ public:
 
   static inline bool is_handle(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Handle;
+  }
+
+  static inline bool is_bytes(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Bytes;
+  }
+
+  static inline bool is_view(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::View;
   }
 
   static inline Value car(Value v) {
@@ -614,6 +714,8 @@ public:
       case ObjType::Upvalue: return sizeof(ObjUpvalue);
       case ObjType::Port:    return sizeof(ObjPort);
       case ObjType::Handle:  return sizeof(ObjHandle);
+      case ObjType::Bytes:   return sizeof(ObjBytes) + static_cast<ObjBytes*>(obj)->data.capacity();
+      case ObjType::View:    return sizeof(ObjView);
     }
     return sizeof(Obj);
   }
@@ -669,6 +771,8 @@ private:
       case ObjType::Upvalue: static_cast<ObjUpvalue*>(obj)->~ObjUpvalue(); break;
       case ObjType::Port:    static_cast<ObjPort*>(obj)->~ObjPort(); break;
       case ObjType::Handle:  break;  // trivially destructible
+      case ObjType::Bytes:   static_cast<ObjBytes*>(obj)->~ObjBytes(); break;
+      case ObjType::View:    break;  // trivially destructible
     }
     std::free(obj);
   }

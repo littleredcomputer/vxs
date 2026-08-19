@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <climits>
 #include <chrono>
 #include <cerrno>
 #include <charconv>
@@ -164,6 +165,23 @@ std::string VM::format_value(Value v) const {
         return std::string("#<") + get_symbol_name(h->kind) + " " +
                std::to_string(h->id) + (h->released ? " (released)" : "") + ">";
       }
+      case ObjType::Bytes: {
+        ObjBytes *b = obj->as<ObjBytes>();
+        return "#<bytes " + std::to_string(b->data.size()) + " " +
+               (b->residency == ObjBytes::Residency::Building ? "building" : "sealed") + ">";
+      }
+      case ObjType::View: {
+        ObjView *vw = obj->as<ObjView>();
+        const char *n = "u8";
+        switch (vw->elem) {
+          case ElemType::U8:  n = "u8";  break;
+          case ElemType::I32: n = "i32"; break;
+          case ElemType::U32: n = "u32"; break;
+          case ElemType::F32: n = "f32"; break;
+          case ElemType::F64: n = "f64"; break;
+        }
+        return std::string("#<view ") + n + " x" + std::to_string(vw->count) + ">";
+      }
     }
   }
   return "#<unknown>";
@@ -255,12 +273,19 @@ void Heap::blacken_obj(Obj *obj) {
       mark_value(uv->value);
       break;
     }
+    case ObjType::View: {
+      // A view holds its buffer alive. Nothing else may: `(bytes-view b ...)`
+      // is routinely the only surviving reference once b goes out of scope.
+      mark_value(obj->as<ObjView>()->bytes);
+      break;
+    }
     case ObjType::String:
     case ObjType::Symbol:
     case ObjType::Subr:
     case ObjType::Fiber:
     case ObjType::Port:
     case ObjType::Handle:
+    case ObjType::Bytes:
       // Leaf objects - no child references
       break;
   }
@@ -2386,6 +2411,195 @@ void VM::init_primitives() {
     if (!ofs->is_open()) return Value::boolean_false();
     return vm.heap.make_output_file_port(std::move(ofs));
   }, 1, 1));
+
+  // --- Bytes and views -----------------------------------------------
+  // Untyped storage plus typed views. See the ObjBytes/ObjView comments for
+  // why the element type lives on the view rather than the buffer.
+  def_global("make-bytes", heap.make_subr("make-bytes", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_int() || args[0].as_int() < 0) {
+      vm.raise_contract("make-bytes: expected a non-negative length, got " +
+                        vm.format_value(args[0]));
+    }
+    return vm.heap.make_bytes(static_cast<size_t>(args[0].as_int()));
+  }, 1, 1));
+
+  def_global("open-byte-sink", heap.make_subr("open-byte-sink", [](VM &vm, uint32_t, Value *) -> Value {
+    return vm.heap.make_byte_sink();
+  }, 0, 0));
+
+  def_global("bytes?", heap.make_subr("bytes?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_bytes(args[0]));
+  }, 1, 1));
+
+  def_global("bytes-length", heap.make_subr("bytes-length", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes-length");
+    if (!b) return Value::unspecified();
+    return Value::from_int(static_cast<int64_t>(b->data.size()));
+  }, 1, 1));
+
+  def_global("bytes-residency", heap.make_subr("bytes-residency", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes-residency");
+    if (!b) return Value::unspecified();
+    return Value::from_symbol_id(vm.intern(
+        b->residency == ObjBytes::Residency::Building ? "building" : "sealed"));
+  }, 1, 1));
+
+  // Appending is legal ONLY while building. Once sealed, a buffer's address
+  // is something a view — and eventually a GPU bind group — depends on, and
+  // growing would reallocate underneath them. Making that an error turns a
+  // silent-corruption bug into a message.
+  def_global("bytes-append!", heap.make_subr("bytes-append!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes-append!");
+    if (!b) return Value::unspecified();
+    if (b->residency != ObjBytes::Residency::Building) {
+      vm.raise_contract("bytes-append!: buffer is sealed — appending would "
+                        "reallocate it out from under every view bound to it");
+    }
+    for (uint32_t i = 1; i < argc; ++i) {
+      if (Heap::is_string(args[i])) {
+        std::string_view sv = args[i].as_ptr<ObjString>()->view();
+        b->data.insert(b->data.end(), sv.begin(), sv.end());
+      } else if (args[i].is_int()) {
+        b->data.push_back(static_cast<uint8_t>(args[i].as_int() & 0xFF));
+      } else if (Heap::is_bytes(args[i])) {
+        const auto &src = args[i].as_ptr<ObjBytes>()->data;
+        b->data.insert(b->data.end(), src.begin(), src.end());
+      }
+    }
+    return Value::from_int(static_cast<int64_t>(b->data.size()));
+  }, 1, UINT32_MAX));
+
+  def_global("bytes-seal!", heap.make_subr("bytes-seal!", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes-seal!");
+    if (!b) return Value::unspecified();
+    b->residency = ObjBytes::Residency::Sealed;
+    return args[0];
+  }, 1, 1));
+
+  def_global("bytes->string", heap.make_subr("bytes->string", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes->string");
+    if (!b) return Value::unspecified();
+    return vm.heap.make_string(
+        std::string(reinterpret_cast<const char *>(b->data.data()), b->data.size()));
+  }, 1, 1));
+
+  // (bytes-view buffer type [offset stride]) — how to read these bytes.
+  // Two views of different types may overlay the same buffer, which is what
+  // makes an array-of-structs layout expressible without copying:
+  //   (bytes-view b 'f32 0  32)   ; @P.x, every 32 bytes
+  //   (bytes-view b 'f32 12 32)   ; @w,   same buffer, different offset
+  def_global("bytes-view", heap.make_subr("bytes-view", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    ObjBytes *b = vm.require_bytes(args[0], "bytes-view");
+    if (!b) return Value::unspecified();
+    if (!args[1].is_symbol()) {
+      vm.raise_contract("bytes-view: expected an element type symbol "
+                        "(u8, i32, u32, f32, f64), got " + vm.format_value(args[1]));
+    }
+    std::string t = vm.get_symbol_name(args[1].as_symbol_id());
+    ElemType elem;
+    if (t == "u8") elem = ElemType::U8;
+    else if (t == "i32") elem = ElemType::I32;
+    else if (t == "u32") elem = ElemType::U32;
+    else if (t == "f32") elem = ElemType::F32;
+    else if (t == "f64") elem = ElemType::F64;
+    else {
+      vm.raise_contract("bytes-view: unknown element type '" + t +
+                        "' (expected u8, i32, u32, f32 or f64)");
+    }
+    uint32_t esz = elem_size(elem);
+    uint32_t offset = (argc > 2 && args[2].is_int()) ? static_cast<uint32_t>(args[2].as_int()) : 0;
+    uint32_t stride = (argc > 3 && args[3].is_int()) ? static_cast<uint32_t>(args[3].as_int()) : esz;
+    if (stride < esz) stride = esz;
+    size_t total = b->data.size();
+    // How many whole elements fit, given where we start and how far apart
+    // they are. Computed once here so ref/set! need only compare an index.
+    uint32_t count = 0;
+    if (total > offset) {
+      size_t span = total - offset;
+      if (span >= esz) count = static_cast<uint32_t>((span - esz) / stride + 1);
+    }
+    return vm.heap.make_view(args[0], offset, stride, count, elem);
+  }, 2, 4));
+
+  def_global("view?", heap.make_subr("view?", [](VM &, uint32_t, Value *args) -> Value {
+    return Value::from_bool(Heap::is_view(args[0]));
+  }, 1, 1));
+
+  def_global("view-length", heap.make_subr("view-length", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjView *v = vm.require_view(args[0], "view-length");
+    if (!v) return Value::unspecified();
+    return Value::from_int(static_cast<int64_t>(v->count));
+  }, 1, 1));
+
+  def_global("view-type", heap.make_subr("view-type", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjView *v = vm.require_view(args[0], "view-type");
+    if (!v) return Value::unspecified();
+    const char *n = "u8";
+    switch (v->elem) {
+      case ElemType::U8:  n = "u8";  break;
+      case ElemType::I32: n = "i32"; break;
+      case ElemType::U32: n = "u32"; break;
+      case ElemType::F32: n = "f32"; break;
+      case ElemType::F64: n = "f64"; break;
+    }
+    return Value::from_symbol_id(vm.intern(n));
+  }, 1, 1));
+
+  def_global("view-bytes", heap.make_subr("view-bytes", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjView *v = vm.require_view(args[0], "view-bytes");
+    if (!v) return Value::unspecified();
+    return v->bytes;
+  }, 1, 1));
+
+  def_global("view-ref", heap.make_subr("view-ref", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjView *v = vm.require_view(args[0], "view-ref");
+    if (!v) return Value::unspecified();
+    if (!args[1].is_int() || args[1].as_int() < 0 ||
+        static_cast<uint32_t>(args[1].as_int()) >= v->count) {
+      vm.raise_contract(std::string("view-ref: index out of range (view holds ") +
+                        std::to_string(v->count) + " elements), got " +
+                        vm.format_value(args[1]));
+    }
+    const uint8_t *p = v->bytes.as_ptr<ObjBytes>()->data.data() +
+                       v->offset + static_cast<size_t>(args[1].as_int()) * v->stride;
+    switch (v->elem) {
+      case ElemType::U8:  return Value::from_int(*p);
+      case ElemType::I32: { int32_t x;  std::memcpy(&x, p, 4); return Value::from_int(x); }
+      // A u32 above INT32_MAX has no fixnum to land in (fixnums are 32-bit
+      // and signed), so it promotes to a flonum — the same rule the reader
+      // and arithmetic use, rather than wrapping negative.
+      case ElemType::U32: {
+        uint32_t x; std::memcpy(&x, p, 4);
+        if (x > static_cast<uint32_t>(INT32_MAX)) return Value::from_double(x);
+        return Value::from_int(static_cast<int32_t>(x));
+      }
+      case ElemType::F32: { float x;    std::memcpy(&x, p, 4); return Value::from_double(x); }
+      case ElemType::F64: { double x;   std::memcpy(&x, p, 8); return Value::from_double(x); }
+    }
+    return Value::unspecified();
+  }, 2, 2));
+
+  def_global("view-set!", heap.make_subr("view-set!", [](VM &vm, uint32_t, Value *args) -> Value {
+    ObjView *v = vm.require_view(args[0], "view-set!");
+    if (!v) return Value::unspecified();
+    if (!args[1].is_int() || args[1].as_int() < 0 ||
+        static_cast<uint32_t>(args[1].as_int()) >= v->count) {
+      vm.raise_contract(std::string("view-set!: index out of range (view holds ") +
+                        std::to_string(v->count) + " elements), got " +
+                        vm.format_value(args[1]));
+    }
+    double d = args[2].is_int() ? static_cast<double>(args[2].as_int()) : args[2].as_real();
+    uint8_t *p = v->bytes.as_ptr<ObjBytes>()->data.data() +
+                 v->offset + static_cast<size_t>(args[1].as_int()) * v->stride;
+    switch (v->elem) {
+      case ElemType::U8:  *p = static_cast<uint8_t>(static_cast<int64_t>(d) & 0xFF); break;
+      case ElemType::I32: { int32_t x  = static_cast<int32_t>(d);  std::memcpy(p, &x, 4); break; }
+      case ElemType::U32: { uint32_t x = static_cast<uint32_t>(d); std::memcpy(p, &x, 4); break; }
+      case ElemType::F32: { float x    = static_cast<float>(d);    std::memcpy(p, &x, 4); break; }
+      case ElemType::F64: { double x   = d;                        std::memcpy(p, &x, 8); break; }
+    }
+    return Value::unspecified();
+  }, 3, 3));
 
   // --- Handles to host-side objects ---------------------------------
   // A handle names something the VM cannot hold: a GPUDevice, a buffer, a

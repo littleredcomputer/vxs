@@ -4,6 +4,8 @@
 #include "vx_value.h"
 #include "vx_vm.h"
 #include <cctype>
+#include <cerrno>
+#include <climits>
 #include <sstream>
 #include <string_view>
 
@@ -359,10 +361,24 @@ private:
     char *endptr = nullptr;
     const char *begin = token.data();
 
-    // Check if it looks like an integer
+    // Check if it looks like an integer. Fixnums are 32-bit (see
+    // Value::from_int), and anything wider becomes a flonum — the same
+    // promotion arithmetic already performs on overflow. Truncating to
+    // int32_t here instead, as this used to, silently read 4294967295 as
+    // -1 and 2147483648 as -2147483648: a literal quietly becoming a
+    // different number, which is about the worst failure a reader has.
+    errno = 0;
     long long int_val = std::strtoll(begin, &endptr, 10);
     if (endptr == begin + token.size()) {
-      return Value::from_int(static_cast<int32_t>(int_val));
+      if (errno != ERANGE &&
+          int_val >= INT32_MIN && int_val <= INT32_MAX) {
+        return Value::from_int(static_cast<int32_t>(int_val));
+      }
+      // Too wide for a fixnum — reparse as a double so magnitudes beyond
+      // long long (1e30, say) land correctly rather than clamping.
+      double wide = std::strtod(begin, &endptr);
+      if (endptr == begin + token.size()) return Value::from_double(wide);
+      return Value::from_double(static_cast<double>(int_val));
     }
 
     // Check if it's a float
