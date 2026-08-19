@@ -149,6 +149,16 @@
     const code = editor.value.trim();
     if (!code) return;
 
+    // Stop whatever is already running FIRST. Without this, Run is not
+    // idempotent: each press left the previous animation fiber alive and
+    // started another, so two presses meant two loops rewriting their own
+    // point buffers and each issuing a full-canvas draw. They share one
+    // ~8ms wall-clock backstop per frame inside the VM, so the second loop
+    // does not run alongside the first so much as starve it — which
+    // presents as stutter that looks like it scales with the point count,
+    // when what it really scales with is how many times Run was pressed.
+    if (vxsClearFibers) vxsClearFibers();
+
     logToTerm(`=> ${code}`, 'in');
     const t0 = performance.now();
     try {
@@ -527,7 +537,7 @@
       Module._vxs_init();
       vxsEval = Module.cwrap('vxs_eval', 'string', ['string']);
       vxsEvalJson = Module.cwrap('vxs_eval_json', 'string', ['string']);
-      vxsStepFibers = Module.cwrap('vxs_step_fibers', 'number', []);
+      vxsStepFibers = Module.cwrap('vxs_step_fibers', 'number', ['number']);
       vxsActiveFibersCount = Module.cwrap('vxs_active_fibers_count', 'number', []);
       vxsClearFibers = Module.cwrap('vxs_clear_fibers', null, []);
       vxsStatsJson = Module.cwrap('vxs_stats_json', 'string', []);
