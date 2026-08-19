@@ -432,52 +432,30 @@ private:
               vm.intern("$tmp__" + std::to_string(vm.next_gensym_id++)));
           Value expr = Heap::car(rest);
 
-          Value done_pair = vm.heap.cons(
-              done_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
-          Value res_pair = vm.heap.cons(
-              res_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
-          Value tmp_pair = vm.heap.cons(
-              tmp_sym, vm.heap.cons(Value::boolean_false(), Value::nil()));
-          Value bindings = vm.heap.cons(
-              done_pair,
-              vm.heap.cons(res_pair, vm.heap.cons(tmp_pair, Value::nil())));
+          // (let ((done #f) (res #f) (tmp #f))
+          //   (lambda ()
+          //     (if (not done)
+          //         (begin (set! tmp expr)
+          //                (if (not done)                 ; re-check
+          //                    (begin (set! res tmp) (set! done #t)))))
+          //     res))
+          Value F = Value::boolean_false();
+          Value bindings = list(list(done_sym, F), list(res_sym, F),
+                                list(tmp_sym, F));
 
-          Value not_done = vm.heap.cons(Value::from_symbol_id(vm.intern("not")),
-                                        vm.heap.cons(done_sym, Value::nil()));
-          Value set_tmp = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("set!")),
-              vm.heap.cons(tmp_sym, vm.heap.cons(expr, Value::nil())));
-          Value set_res = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("set!")),
-              vm.heap.cons(res_sym, vm.heap.cons(tmp_sym, Value::nil())));
-          Value set_done = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("set!")),
-              vm.heap.cons(done_sym,
-                           vm.heap.cons(Value::boolean_true(), Value::nil())));
-          Value commit_begin = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("begin")),
-              vm.heap.cons(set_res, vm.heap.cons(set_done, Value::nil())));
-          // Re-check: only commit tmp into res/done if nothing else did
-          // so while this call was evaluating expr.
-          Value recheck_if = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("if")),
-              vm.heap.cons(not_done, vm.heap.cons(commit_begin, Value::nil())));
-          Value outer_begin = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("begin")),
-              vm.heap.cons(set_tmp, vm.heap.cons(recheck_if, Value::nil())));
-          Value if_form = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("if")),
-              vm.heap.cons(not_done, vm.heap.cons(outer_begin, Value::nil())));
+          Value not_done = list(sym(vm.sym.s_not), done_sym);
+          Value set_tmp  = list(sym(vm.sym.s_set), tmp_sym, expr);
+          Value set_res  = list(sym(vm.sym.s_set), res_sym, tmp_sym);
+          Value set_done = list(sym(vm.sym.s_set), done_sym, Value::boolean_true());
 
-          Value lambda_body =
-              vm.heap.cons(if_form, vm.heap.cons(res_sym, Value::nil()));
-          Value lambda_form =
-              vm.heap.cons(Value::from_symbol_id(vm.intern("lambda")),
-                           vm.heap.cons(Value::nil(), lambda_body));
+          Value commit     = list(sym(vm.sym.s_begin), set_res, set_done);
+          Value recheck_if = list(sym(vm.sym.s_if), not_done, commit);
+          Value body       = list(sym(vm.sym.s_begin), set_tmp, recheck_if);
+          Value if_form    = list(sym(vm.sym.s_if), not_done, body);
 
-          Value let_form = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("let")),
-              vm.heap.cons(bindings, vm.heap.cons(lambda_form, Value::nil())));
+          Value lambda_form = list(sym(vm.sym.s_lambda), Value::nil(),
+                                   if_form, res_sym);
+          Value let_form    = list(sym(vm.sym.s_let), bindings, lambda_form);
 
           compile_expr(let_form, chunk, is_tail);
           return;
@@ -814,33 +792,20 @@ private:
 
         // (when test body...)
         if (op_name == "when") {
-          Value test_expr = Heap::car(rest);
-          Value body_forms = Heap::cdr(rest);
-          Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value desugared = vm.heap.cons(
-              if_sym,
-              vm.heap.cons(test_expr,
-                           vm.heap.cons(vm.heap.cons(begin_sym, body_forms),
-                                        vm.heap.cons(Value::unspecified(),
-                                                     Value::nil()))));
+          // (when test body...) => (if test (begin body...) #<unspecified>)
+          Value desugared = list(sym(vm.sym.s_if), Heap::car(rest),
+                                 call_form(sym(vm.sym.s_begin), Heap::cdr(rest)),
+                                 Value::unspecified());
           compile_expr(desugared, chunk, is_tail);
           return;
         }
 
         // (unless test body...)
         if (op_name == "unless") {
-          Value test_expr = Heap::car(rest);
-          Value body_forms = Heap::cdr(rest);
-          Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value desugared = vm.heap.cons(
-              if_sym,
-              vm.heap.cons(
-                  test_expr,
-                  vm.heap.cons(Value::unspecified(),
-                               vm.heap.cons(vm.heap.cons(begin_sym, body_forms),
-                                            Value::nil()))));
+          // (unless test body...) => (if test #<unspecified> (begin body...))
+          Value desugared = list(sym(vm.sym.s_if), Heap::car(rest),
+                                 Value::unspecified(),
+                                 call_form(sym(vm.sym.s_begin), Heap::cdr(rest)));
           compile_expr(desugared, chunk, is_tail);
           return;
         }
@@ -858,62 +823,44 @@ private:
             clauses = Heap::cdr(clauses);
           }
 
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value let_sym = Value::from_symbol_id(vm.intern("let"));
-          Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
-          Value else_sym = Value::from_symbol_id(vm.intern("else"));
-          Value recipient_sym = Value::from_symbol_id(vm.intern("=>"));
-
+          // Built back to front, each clause wrapping the rest:
+          //   (test body...)   => (if test (begin body...) <rest>)
+          //   (test => recip)  => (let ((t test)) (if t (recip t) <rest>))
+          //   (else body...)   => (begin body...)          [terminates]
           Value current = Value::unspecified();
 
           for (auto it = clause_vec.rbegin(); it != clause_vec.rend(); ++it) {
             Value clause = *it;
             Value test = Heap::car(clause);
             Value body = Heap::cdr(clause);
+
+            // (test => recipient) — exactly one form after the arrow.
             Value recipient = Value::nil();
             if (!body.is_nil() && Heap::car(body).is_symbol() &&
-                Heap::car(body).as_symbol_id() ==
-                    recipient_sym.as_symbol_id() &&
+                Heap::car(body).as_symbol_id() == vm.sym.s_arrow &&
                 Heap::is_cons(Heap::cdr(body)) &&
                 Heap::cdr(Heap::cdr(body)) == Value::nil()) {
               recipient = Heap::car(Heap::cdr(body));
               body = Heap::cdr(Heap::cdr(body));
             }
+
             if (!recipient.is_nil()) {
-              Value test_sym = Value::from_symbol_id(
-                  vm.intern("$test__" + std::to_string(vm.next_gensym_id++)));
-
-              current = vm.heap.cons(
-                  let_sym,
-                  vm.heap.cons(
-                      vm.heap.cons(
-                          vm.heap.cons(test_sym,
-                                       vm.heap.cons(test, Value::nil())),
-                          Value::nil()),
-                      vm.heap.cons(
-                          vm.heap.cons(
-                              if_sym,
-                              vm.heap.cons(
-                                  test_sym,
-                                  vm.heap.cons(
-                                      vm.heap.cons(
-                                          recipient,
-                                          vm.heap.cons(test_sym, Value::nil())),
-                                      vm.heap.cons(current, Value::nil())))),
-                          Value::nil())));
+              // The test's value is needed twice, so bind it once — and
+              // gensym the name, since the recipient may close over
+              // anything the user has in scope.
+              Value t = sym(vm.intern("$test__" +
+                                      std::to_string(vm.next_gensym_id++)));
+              current = list(sym(vm.sym.s_let),
+                             list(list(t, test)),
+                             list(sym(vm.sym.s_if), t,
+                                  list(recipient, t),
+                                  current));
             } else {
-              Value body_seq = vm.heap.cons(begin_sym, body);
-
-              if (test.is_symbol() &&
-                  test.as_symbol_id() == else_sym.as_symbol_id()) {
+              Value body_seq = call_form(sym(vm.sym.s_begin), body);
+              if (test.is_symbol() && test.as_symbol_id() == vm.sym.s_else) {
                 current = body_seq;
               } else {
-                current = vm.heap.cons(
-                    if_sym,
-                    vm.heap.cons(
-                        test,
-                        vm.heap.cons(body_seq,
-                                     vm.heap.cons(current, Value::nil()))));
+                current = list(sym(vm.sym.s_if), test, body_seq, current);
               }
             }
           }
@@ -927,49 +874,42 @@ private:
           Value key_expr = Heap::car(rest);
           Value clauses = Heap::cdr(rest);
 
-          Value let_sym = Value::from_symbol_id(vm.intern("let"));
-          Value cond_sym = Value::from_symbol_id(vm.intern("cond"));
-          Value memv_sym = Value::from_symbol_id(vm.intern("memv"));
-          Value quote_sym = Value::from_symbol_id(vm.intern("quote"));
-          Value else_sym = Value::from_symbol_id(vm.intern("else"));
-          Value tmp_sym = Value::from_symbol_id(vm.intern("$case_key"));
+          // (case key ((d...) body...) ... (else body...))
+          //   =>
+          // (let ((k key))
+          //   (cond ((memv k '(d...)) body...) ... (else body...)))
+          //
+          // k is GENSYMED. It used to be a fixed `$case_key`, which meant
+          // a user variable of that name was shadowed by the expansion —
+          //   (let (($case_key 99)) (case 1 ((1) $case_key)))  => 1, not 99
+          // The `=>` branch of cond directly above always gensymed; case
+          // simply did not.
+          Value k = sym(vm.intern("$case_key__" +
+                                  std::to_string(vm.next_gensym_id++)));
 
           std::vector<Value> cond_clauses;
-          Value cur = clauses;
-          while (Heap::is_cons(cur)) {
+          for (Value cur = clauses; Heap::is_cons(cur); cur = Heap::cdr(cur)) {
             Value clause = Heap::car(cur);
-            if (Heap::is_cons(clause)) {
-              Value datums = Heap::car(clause);
-              Value body = Heap::cdr(clause);
-              if (datums.is_symbol() &&
-                  datums.as_symbol_id() == else_sym.as_symbol_id()) {
-                cond_clauses.push_back(clause);
-              } else {
-                Value quoted_datums =
-                    vm.heap.cons(quote_sym, vm.heap.cons(datums, Value::nil()));
-                Value test = vm.heap.cons(
-                    memv_sym,
-                    vm.heap.cons(tmp_sym,
-                                 vm.heap.cons(quoted_datums, Value::nil())));
-                cond_clauses.push_back(vm.heap.cons(test, body));
-              }
+            if (!Heap::is_cons(clause)) continue;
+            Value datums = Heap::car(clause);
+            Value body = Heap::cdr(clause);
+            if (datums.is_symbol() && datums.as_symbol_id() == vm.sym.s_else) {
+              cond_clauses.push_back(clause);
+            } else {
+              Value test = list(sym(vm.sym.s_memv), k,
+                                list(sym(vm.sym.s_quote), datums));
+              cond_clauses.push_back(call_form(test, body));
             }
-            cur = Heap::cdr(cur);
           }
 
           Value cond_clause_list = Value::nil();
-          for (auto it = cond_clauses.rbegin(); it != cond_clauses.rend();
-               ++it) {
-            cond_clause_list = vm.heap.cons(*it, cond_clause_list);
+          for (auto it = cond_clauses.rbegin(); it != cond_clauses.rend(); ++it) {
+            cond_clause_list = cons(*it, cond_clause_list);
           }
 
-          Value cond_form = vm.heap.cons(cond_sym, cond_clause_list);
-          Value binding = vm.heap.cons(
-              vm.heap.cons(tmp_sym, vm.heap.cons(key_expr, Value::nil())),
-              Value::nil());
-          Value desugared = vm.heap.cons(
-              let_sym,
-              vm.heap.cons(binding, vm.heap.cons(cond_form, Value::nil())));
+          Value desugared = list(sym(vm.sym.s_let),
+                                 list(list(k, key_expr)),
+                                 call_form(sym(vm.sym.s_cond), cond_clause_list));
           compile_expr(desugared, chunk, is_tail);
           return;
         }
@@ -1182,18 +1122,13 @@ private:
             cur = Heap::cdr(cur);
           }
 
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
+          // (and a b c) => (if a (if b c #f) #f). No temporary needed:
+          // and discards each test's value, so nothing must be re-read.
           Value current = exprs.back();
-
           for (int i = static_cast<int>(exprs.size()) - 2; i >= 0; --i) {
-            current = vm.heap.cons(
-                if_sym,
-                vm.heap.cons(
-                    exprs[i],
-                    vm.heap.cons(current, vm.heap.cons(Value::boolean_false(),
-                                                       Value::nil()))));
+            current = list(sym(vm.sym.s_if), exprs[i], current,
+                           Value::boolean_false());
           }
-
           compile_expr(current, chunk, is_tail);
           return;
         }
@@ -1211,26 +1146,22 @@ private:
             cur = Heap::cdr(cur);
           }
 
-          Value let_sym = Value::from_symbol_id(vm.intern("let"));
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
+          // (or a b) => (let ((t a)) (if t t b)) — a temporary IS needed
+          // here, because or returns the test's own value and must not
+          // evaluate it twice.
+          //
+          // t is GENSYMED. It used to be "$or_" + the loop index, so the
+          // name repeated across every `or` in the program and shadowed
+          // any user variable that happened to match:
+          //   (let (($or_0 42)) (or #f $or_0))   => #f, not 42
           Value current = exprs.back();
-
           for (int i = static_cast<int>(exprs.size()) - 2; i >= 0; --i) {
-            Value tmp_sym =
-                Value::from_symbol_id(vm.intern("$or_" + std::to_string(i)));
-            Value binding = vm.heap.cons(
-                vm.heap.cons(tmp_sym, vm.heap.cons(exprs[i], Value::nil())),
-                Value::nil());
-            Value if_expr = vm.heap.cons(
-                if_sym, vm.heap.cons(
-                            tmp_sym,
-                            vm.heap.cons(tmp_sym,
-                                         vm.heap.cons(current, Value::nil()))));
-            current = vm.heap.cons(
-                let_sym,
-                vm.heap.cons(binding, vm.heap.cons(if_expr, Value::nil())));
+            Value t = sym(vm.intern("$or__" +
+                                    std::to_string(vm.next_gensym_id++)));
+            current = list(sym(vm.sym.s_let),
+                           list(list(t, exprs[i])),
+                           list(sym(vm.sym.s_if), t, t, current));
           }
-
           compile_expr(current, chunk, is_tail);
           return;
         }
