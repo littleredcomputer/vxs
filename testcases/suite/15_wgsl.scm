@@ -193,6 +193,36 @@
 (assert-equal "non-bool operands to and are rejected" 'rejected
               (wgsl-error '(and time time)))
 
+;;--- let is orthodox, and says so when it isn't --------------------------
+;; vxs's own `let` also accepts the flat vector form (let [a 1 b 2] ...).
+;; A kernel does not, deliberately — but it used to fall through to
+;; (car (car bindings)) and report
+;;
+;;   car: contract violation, expected pair, got [c (- uv 0.5) r ...]
+;;
+;; naming neither the form at fault, nor the language it was in, nor what
+;; that language wanted. This compiler exists to turn GPU-time failures
+;; into legible compile-time ones, so leaking an internal contract
+;; violation is a defect in its own terms.
+
+(assert-equal "the flat vector binding form is rejected" 'rejected
+              (wgsl-error '(let [c (- uv 0.5)] c)))
+(assert-equal "a non-list binding form is rejected" 'rejected
+              (wgsl-error '(let 5 1)))
+(assert-equal "a binding that is not a pair is rejected" 'rejected
+              (wgsl-error '(let ((a 1) b) a)))
+(assert-equal "a three-element binding is rejected" 'rejected
+              (wgsl-error '(let ((a 1 2)) a)))
+(assert-equal "a non-symbol binding name is rejected" 'rejected
+              (wgsl-error '(let ((5 1)) 5)))
+
+;; A kernel has no sequencing, so a second body form would be silently
+;; discarded rather than evaluated — worth an error, not a shrug.
+(assert-equal "extra body forms are rejected" 'rejected
+              (wgsl-error '(let ((a 1)) a a)))
+(assert-equal "a single body form is still fine" 'f32
+              (wgsl-type '(let ((a 1)) (+ a 1)) E))
+
 ;;--- a whole kernel body ------------------------------------------------
 
 (assert-equal "a plasma-ish kernel compiles end to end"
