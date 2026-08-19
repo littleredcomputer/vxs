@@ -296,6 +296,15 @@ struct ObjPort : Obj {
   // generating a page of shader source.
   std::unique_ptr<std::ostringstream> oss;
   std::unique_ptr<std::istringstream> iss;
+  // Owned storage for a port over an ARBITRARY streambuf — the browser's
+  // sink ports, which forward to a JS callback. Declared after oss/iss but
+  // before `out` so destruction order tears the ostream down before the
+  // buffer it points at. This is what lets the wasm build make stdout a
+  // real port instead of overriding `display`: with a stream behind it,
+  // every existing port mechanism (explicit port arguments,
+  // current-output-port rebinding, with-output-to-string) works unchanged.
+  std::unique_ptr<std::streambuf> owned_buf;
+  std::unique_ptr<std::ostream> owned_out;
   std::istream *in = nullptr;  // the stream to actually read from
   std::ostream *out = nullptr; // the stream to actually write to
 
@@ -305,6 +314,9 @@ struct ObjPort : Obj {
     if (closed) return;
     if (ifs) ifs->close();
     if (ofs) ofs->close();
+    // A sink port holds no OS resource, but it may hold a partial line —
+    // flush so closing can't silently swallow it.
+    if (owned_out) owned_out->flush();
     closed = true;
   }
 };
@@ -539,6 +551,17 @@ public:
     ObjPort *p = allocate<ObjPort>(false);
     p->oss = std::make_unique<std::ostringstream>();
     p->out = p->oss.get();
+    return Value::from_ptr(p);
+  }
+
+  // An output port over a caller-supplied streambuf. The host provides the
+  // buffer (the wasm build's line-buffered JS sink); the port owns it from
+  // here on, and behaves like any other output port to every caller.
+  inline Value make_custom_output_port(std::unique_ptr<std::streambuf> buf) {
+    ObjPort *p = allocate<ObjPort>(false);
+    p->owned_buf = std::move(buf);
+    p->owned_out = std::make_unique<std::ostream>(p->owned_buf.get());
+    p->out = p->owned_out.get();
     return Value::from_ptr(p);
   }
 

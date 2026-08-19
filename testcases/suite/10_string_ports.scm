@@ -116,4 +116,29 @@
                 (lambda (port)
                   (emit-fn port 'drift '("let a = 1;" "let b = 2;" "return a + b;")))))
 
+;; --- port predicates ----------------------------------------------------
+;; port? is the direction-agnostic one. Only input-port? and output-port?
+;; existed for a long time, so "is this a port at all" had to be spelled
+;; (or (input-port? x) (output-port? x)).
+
+(define op (open-output-string))
+(assert-equal "port? accepts an output port" #t (port? op))
+(assert-equal "port? accepts an input port"  #t (port? (open-input-string "x")))
+(assert-equal "port? rejects a non-port"     #f (port? 42))
+(assert-equal "port? rejects a string"       #f (port? "not a port"))
+(assert-equal "port? accepts the current output port" #t (port? (current-output-port)))
+
+(assert-equal "output-port? is direction-sensitive" #f
+              (output-port? (open-input-string "x")))
+(assert-equal "input-port? is direction-sensitive" #f (input-port? op))
+
+;; flush-output-port is a no-op on a port that does not buffer, and must
+;; not disturb what has already been written.
+(define fp (open-output-string))
+(display "before" fp)
+(flush-output-port fp)
+(display "/after" fp)
+(assert-equal "flush-output-port leaves buffered content alone"
+              "before/after" (get-output-string fp))
+
 (suite-summary)
