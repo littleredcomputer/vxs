@@ -161,6 +161,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   chk('the JS object itself survives (we only dropped our hold)',
       'fake-device', fakeDevice.name);
 
+  // ---- awaiting from inside a native call ---------------------------
+  // guard/map/apply/for-each/load run their body through call_closure, so
+  // the fiber's continuation includes C++ frames and it cannot suspend.
+  // A host-settled future can therefore never be awaited there — the event
+  // loop would have to run, and we cannot return to it.
+  //
+  // The earlier "guard catches a failed future" test passes only because it
+  // settles BEFORE pumping, so touch takes the already-completed path. This
+  // is the case it misses, and the one that broke the first GPU page.
+  console.log('\n=== AWAIT INSIDE A NATIVE CALL ===');
+
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define g 'pending)
+      (future (set! g (guard (e (#t 'caught)) (touch (sleep 20)))))`);
+  await pump(600);
+  chk('a pending host-settled future cannot be awaited inside guard',
+      'pending', ev('g'));
+  chk('and the fiber does not survive it', 0, VXS._vxs_active_fibers_count());
+
+  // The same await, moved out of the guard into the fiber body, works.
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define ok 'no) (future (set! ok (touch (sleep 20))))`);
+  await pump(600);
+  chk('the same await in the fiber body succeeds', '20.0', ev('ok'));
+
   // ---- WebGPU, on a host that has none ------------------------------
   // Node has no navigator.gpu, so this exercises exactly the half of the
   // GPU path that is verifiable headless: a real primitive, a real
