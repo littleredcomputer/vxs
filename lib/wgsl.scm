@@ -138,6 +138,40 @@
   (cond ((char=? c #\x) 0) ((char=? c #\y) 1)
         ((char=? c #\z) 2) (else 3)))
 
+;; The kernel language deliberately accepts only orthodox ((name expr) ...)
+;; bindings, a strict subset of what Scheme's own `let` here takes — vxs
+;; also allows the flat vector form (let [a 1 b 2] ...), which is NOT
+;; supported in a kernel and is not going to be.
+;;
+;; That restriction is fine; the diagnostic for it was not. Falling through
+;; to (car (car bindings)) produced
+;;
+;;   car: contract violation, expected pair, got [c (- uv 0.5) r ...]
+;;
+;; which names none of: the form at fault, the language it is in, or what
+;; the language wanted instead. A compiler whose entire justification is
+;; turning GPU-time failures into legible compile-time errors does not get
+;; to emit that.
+(define (wgsl-check-bindings bs)
+  (cond
+    ((vector? bs)
+     (error 'wgsl
+            (string-append
+             "let bindings must be a list of (name expr) pairs. "
+             "The flat vector form [name expr ...] works in Scheme here, "
+             "but a kernel takes only the orthodox spelling.")))
+    ((not (list? bs))
+     (error 'wgsl "let bindings must be a list of (name expr) pairs, got:" bs))
+    (else
+     (for-each
+      (lambda (b)
+        (if (or (not (pair? b))
+                (not (symbol? (car b)))
+                (not (pair? (cdr b)))
+                (not (null? (cddr b))))
+            (error 'wgsl "each let binding must be (name expr), got:" b)))
+      bs))))
+
 ;;--- the compiler -------------------------------------------------------
 
 (define (wgsl expr env)
@@ -174,6 +208,14 @@
     ;; (let ((n e) ...) body) — hoisted into WGSL `let` statements, which
     ;; are immutable bindings, so the correspondence is exact.
     ((eq? op 'let)
+     (if (not (= (length args) 2))
+         (error 'wgsl
+                (string-append
+                 "let takes a binding list and exactly ONE body expression; "
+                 "a kernel has no sequencing, so extra body forms would be "
+                 "silently discarded. Forms given:")
+                (length args)))
+     (wgsl-check-bindings (car args))
      (let ((bindings (car args)) (body (cadr args)))
        (let loop ((bs bindings) (env env) (stmts '()))
          (if (null? bs)
