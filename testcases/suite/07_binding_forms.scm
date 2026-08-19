@@ -148,4 +148,36 @@
 (assert-equal "when/unless" '(yes no)
               (list (if #t 'yes 'no) (if #f 'yes 'no)))
 
+;; --- desugaring hygiene -------------------------------------------------
+;; Several forms expand into a `let` holding a temporary. If that temporary
+;; has a fixed name, it shadows any user variable that happens to match —
+;; the expansion silently captures. `cond`'s => branch always gensymed;
+;; `case` and `or` did not, and both were caught while rewriting the
+;; desugars in terms of list()/sym().
+
+(assert-equal "case does not capture its key temporary"
+              99
+              (let (($case_key 99)) (case 1 ((1) $case_key) (else 'other))))
+
+(assert-equal "or does not capture its test temporary"
+              42
+              (let (($or_0 42)) (or #f $or_0)))
+
+(assert-equal "cond => does not capture its test temporary"
+              '(104 99)
+              (let ((t 99)) (list (cond (5 => (lambda (x) (+ x t)))) t)))
+
+;; Nesting the same form must not collide with itself either.
+(assert-equal "nested case" 'inner (case 1 ((1) (case 2 ((2) 'inner)))))
+(assert-equal "nested or"   5      (or #f (or #f 5)))
+
+;; or returns the test's own value and must evaluate it exactly once.
+(define or-calls 0)
+(define (bump!) (set! or-calls (+ or-calls 1)) 7)
+(assert-equal "or yields the test value" 7 (or #f (bump!)))
+(assert-equal "or evaluated it once"     1 or-calls)
+
+;; and short-circuits before touching what would fail.
+(assert-equal "and short-circuits" #f (and #f (car '())))
+
 (suite-summary)
