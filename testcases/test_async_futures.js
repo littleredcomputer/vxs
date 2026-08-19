@@ -161,6 +161,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   chk('the JS object itself survives (we only dropped our hold)',
       'fake-device', fakeDevice.name);
 
+  // ---- WebGPU, on a host that has none ------------------------------
+  // Node has no navigator.gpu, so this exercises exactly the half of the
+  // GPU path that is verifiable headless: a real primitive, a real
+  // external future, a real rejection, and the fiber resuming into a
+  // catchable condition rather than hanging forever. The success half
+  // needs a browser and lives on the page.
+  console.log('\n=== WEBGPU (absent host) ===');
+
+  chk('gpu-available? is #f without navigator.gpu', '#f', ev('(gpu-available?)'));
+
+  ev(`(define outcome 'pending)
+      (future (set! outcome
+                (guard (e (#t (list 'caught (error-object-message e))))
+                  (touch (request-adapter)))))`);
+  await pump();
+  chk('a rejected adapter request is caught, not hung',
+      '(caught "WebGPU unavailable: navigator.gpu is undefined")', ev('outcome'));
+  chk('no fiber is left blocked', 0, VXS._vxs_active_fibers_count());
+  chk('the failed request released its pending entry', 0, pendingExternals());
+
+  // Contract checks on the GPU primitives are ordinary raises.
+  chk('request-device rejects a non-handle', 'caught',
+      ev(`(guard (e (#t 'caught)) (request-device 42))`));
+  chk('gpu-draw-triangle! rejects a non-handle', 'caught',
+      ev(`(guard (e (#t 'caught)) (gpu-draw-triangle! 42 "wgsl"))`));
+
   console.log('\n────────────────────────────────────────────────────────────────');
   console.log(`External futures: ${passed + failed} | Passed: ${passed} | Failed: ${failed}`);
   if (failed === 0) {
