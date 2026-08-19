@@ -100,6 +100,52 @@ public:
   Compiler(VM &vm, Compiler *parent = nullptr)
       : vm(vm), parent(parent), scope_depth(0), max_locals(1) {}
 
+  // --- desugaring vocabulary -------------------------------------------
+  // Building source fragments out of raw vm.heap.cons/Value::from_symbol_id
+  // buries the shape of the code being generated under punctuation. These
+  // exist so a desugar reads roughly like the Scheme it produces.
+  //
+  // No rooting needed: compile_top_level holds a GCGuard for the whole
+  // compilation, so nothing built here can be collected mid-construction.
+  // (Do not lift these into runtime code, where that is not true.)
+
+  // A symbol Value from an id — pairs with VM::sym, e.g. sym(vm.sym.s_let).
+  static Value sym(uint32_t id) { return Value::from_symbol_id(id); }
+
+  Value cons(Value a, Value d) { return vm.heap.cons(a, d); }
+
+  // list(a, b, c) => (a b c). Variadic rather than an initializer_list so
+  // the elements keep their own types and nothing needs a cast at the call
+  // site. Plain C++11 — no C++20 required, pleasingly.
+  template <typename... Vs>
+  Value list(Vs... vs) {
+    Value items[] = {vs..., Value::nil()};   // trailing nil keeps [] non-empty
+    Value r = Value::nil();
+    for (size_t i = sizeof...(Vs); i-- > 0;) r = vm.heap.cons(items[i], r);
+    return r;
+  }
+
+  Value list() { return Value::nil(); }
+
+  // (f . rest) — a call form whose argument list is already built.
+  Value call_form(Value head, Value rest) { return vm.heap.cons(head, rest); }
+
+  // (a b c) + tail => (a b c tail). Rebuilding a list with one element
+  // appended is otherwise five lines of vector-and-reverse, three times
+  // over in this file.
+  Value append_last(Value lst, Value tail) {
+    std::vector<Value> items;
+    for (Value c = lst; Heap::is_cons(c); c = Heap::cdr(c)) {
+      items.push_back(Heap::car(c));
+    }
+    items.push_back(tail);
+    Value r = Value::nil();
+    for (auto it = items.rbegin(); it != items.rend(); ++it) {
+      r = vm.heap.cons(*it, r);
+    }
+    return r;
+  }
+
   ObjClosure *compile_top_level(Value form) {
     GCGuard guard(vm.heap);
     BytecodeChunk *chunk = new BytecodeChunk();
@@ -548,12 +594,8 @@ private:
 
           Value cond_clauses = clauses;
           if (!has_else) {
-            Value raise_call = vm.heap.cons(
-                Value::from_symbol_id(vm.intern("raise")),
-                vm.heap.cons(var, Value::nil()));
-            Value else_clause = vm.heap.cons(
-                Value::from_symbol_id(vm.intern("else")),
-                vm.heap.cons(raise_call, Value::nil()));
+            Value raise_call  = list(sym(vm.sym.s_raise), var);   // (raise var)
+            Value else_clause = list(sym(vm.sym.s_else), raise_call);
             std::vector<Value> cs;
             for (Value c = clauses; Heap::is_cons(c); c = Heap::cdr(c)) {
               cs.push_back(Heap::car(c));
@@ -566,19 +608,14 @@ private:
             cond_clauses = built;
           }
 
-          Value cond_form = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("cond")), cond_clauses);
-          Value handler_lambda = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("lambda")),
-              vm.heap.cons(vm.heap.cons(var, Value::nil()),
-                           vm.heap.cons(cond_form, Value::nil())));
-          Value thunk_lambda = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("lambda")),
-              vm.heap.cons(Value::nil(), body));
-          Value guard_call = vm.heap.cons(
-              Value::from_symbol_id(vm.intern("%guard")),
-              vm.heap.cons(handler_lambda,
-                           vm.heap.cons(thunk_lambda, Value::nil())));
+          // (%guard (lambda (var) (cond clause...))
+          //         (lambda ()    body...))
+          Value cond_form      = call_form(sym(vm.sym.s_cond), cond_clauses);
+          Value handler_lambda = list(sym(vm.sym.s_lambda), list(var), cond_form);
+          Value thunk_lambda   = call_form(sym(vm.sym.s_lambda),
+                                           cons(Value::nil(), body));
+          Value guard_call     = list(sym(vm.sym.s_guard_impl),
+                                      handler_lambda, thunk_lambda);
           compile_expr(guard_call, chunk, is_tail);
           return;
         }
@@ -1112,43 +1149,21 @@ private:
             step_list = vm.heap.cons(*it, step_list);
           }
 
-          Value loop_sym = Value::from_symbol_id(vm.intern("loop"));
-          Value let_sym = Value::from_symbol_id(vm.intern("let"));
-          Value if_sym = Value::from_symbol_id(vm.intern("if"));
-          Value begin_sym = Value::from_symbol_id(vm.intern("begin"));
+          // (do ((v init step)...) (test result...) command...)
+          //   =>
+          // (let loop ((v init)...)
+          //   (if test (begin result...)
+          //            (begin command... (loop step...))))
+          Value loop_sym = sym(vm.sym.s_loop);
 
-          Value loop_call = vm.heap.cons(loop_sym, step_list);
-
-          Value else_branch =
-              vm.heap.cons(begin_sym, vm.heap.cons(loop_call, Value::nil()));
-          if (Heap::is_cons(commands)) {
-            std::vector<Value> cmd_vec;
-            Value c = commands;
-            while (Heap::is_cons(c)) {
-              cmd_vec.push_back(Heap::car(c));
-              c = Heap::cdr(c);
-            }
-            cmd_vec.push_back(loop_call);
-            Value cmd_list = Value::nil();
-            for (auto it = cmd_vec.rbegin(); it != cmd_vec.rend(); ++it) {
-              cmd_list = vm.heap.cons(*it, cmd_list);
-            }
-            else_branch = vm.heap.cons(begin_sym, cmd_list);
-          }
-
-          Value then_branch = vm.heap.cons(begin_sym, result_exprs);
-
-          Value if_form = vm.heap.cons(
-              if_sym, vm.heap.cons(test_expr,
-                                   vm.heap.cons(then_branch,
-                                                vm.heap.cons(else_branch,
-                                                             Value::nil()))));
-
-          Value desugared = vm.heap.cons(
-              let_sym,
-              vm.heap.cons(loop_sym,
-                           vm.heap.cons(binding_list,
-                                        vm.heap.cons(if_form, Value::nil()))));
+          Value loop_call   = call_form(loop_sym, step_list);
+          Value else_branch = call_form(sym(vm.sym.s_begin),
+                                        append_last(commands, loop_call));
+          Value then_branch = call_form(sym(vm.sym.s_begin), result_exprs);
+          Value if_form     = list(sym(vm.sym.s_if), test_expr,
+                                   then_branch, else_branch);
+          Value desugared   = list(sym(vm.sym.s_let), loop_sym,
+                                   binding_list, if_form);
 
           compile_expr(desugared, chunk, is_tail);
           return;

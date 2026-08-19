@@ -375,8 +375,37 @@ struct VM {
   // Hook for error diagnostics
   std::string last_error;
 
+  // Symbol ids the COMPILER needs constantly while desugaring — `let`
+  // appears eight times in vx_compiler.h, `if` eight, `quote` six.
+  // Interning each on every use meant building a std::string and hashing
+  // it, per desugar, forever.
+  //
+  // They live on the VM rather than the Compiler for two reasons. The
+  // symbol table is the VM's, so this is where they belong; and a
+  // Compiler is constructed for EVERY nested lambda
+  // (`Compiler fn_compiler(vm, this)`), so caching there would re-intern
+  // twenty names per function compiled instead of once per VM.
+  //
+  // No post-init needed: symbol_table is a member, so it is already
+  // constructed when the constructor body runs — init_primitives() below
+  // interns hundreds of names from exactly here.
+  struct WellKnown {
+    uint32_t s_if, s_let, s_letrec, s_lambda, s_begin, s_quote, s_cond,
+             s_else, s_set, s_list, s_append, s_not, s_memv, s_loop,
+             s_raise, s_void, s_arrow, s_guard_impl, s_list_to_vector,
+             s_call_with_values;
+  } sym;
+
   VM() : current_fiber(nullptr) {
     heap.set_vm(this);
+    sym = WellKnown{
+        intern("if"),      intern("let"),    intern("letrec"),
+        intern("lambda"),  intern("begin"),  intern("quote"),
+        intern("cond"),    intern("else"),   intern("set!"),
+        intern("list"),    intern("append"), intern("not"),
+        intern("memv"),    intern("loop"),   intern("raise"),
+        intern("void"),    intern("=>"),     intern("%guard"),
+        intern("list->vector"), intern("call-with-values")};
     stdin_port = heap.make_std_port(true, &std::cin, nullptr);
     stdout_port = heap.make_std_port(false, nullptr, &std::cout);
     current_in_port = stdin_port;
