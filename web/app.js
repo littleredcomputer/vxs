@@ -112,9 +112,16 @@
   window.vxsMouseX = function() { return mouseX; };
   window.vxsMouseY = function() { return mouseY; };
   window.vxsMouseDown = function() { return isMouseDown ? 1 : 0; };
-  window.vxsPrint = function(text) {
-    if (text !== '') logToTerm(text, 'val');
-  };
+  // One call per COMPLETE LINE, buffered by the sink port in the VM — so
+  // one div per line is now correct. It used to be one div per `display`
+  // call, which split `(display "x = ") (display 42)` across two lines.
+  // An empty string means a bare (newline), i.e. a blank line.
+  window.vxsPrint = function(text) { logToTerm(text, 'val'); };
+
+  // Pages can route a named sink anywhere: (open-output-sink "name") in
+  // Scheme writes here. The two built-in names, "terminal" and "console",
+  // are handled by the VM's default fallback and need no entry.
+  window.vxsSinks = window.vxsSinks || {};
 
   // Terminal Logging
   function logToTerm(text, type = 'out') {
