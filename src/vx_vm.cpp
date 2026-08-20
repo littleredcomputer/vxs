@@ -3820,6 +3820,16 @@ void VM::init_primitives() {
       // no filesystem at all, as it does natively. On-disk wins when it
       // exists, so editing a lib and re-running natively picks up the edit
       // without a rebuild.
+      // A runtime override beats the baked-in copy, so an edited library
+      // takes effect without a rebuild. Still loses to a real file on
+      // disk, which keeps native behaviour unchanged.
+      size_t slash = filename.find_last_of('/');
+      std::string base = (slash == std::string::npos) ? filename
+                                                      : filename.substr(slash + 1);
+      auto ov = vm.lib_overrides.find(base);
+      if (ov != vm.lib_overrides.end()) {
+        code = ov->second;
+      } else {
       const char *embedded = embedded_lib_source(filename);
       if (!embedded) {
         if (vm.current_fiber) {
@@ -3829,6 +3839,7 @@ void VM::init_primitives() {
         return Value::unspecified();
       }
       code = embedded;
+      }
     }
     Reader reader(vm, code);
     Value last_res = Value::unspecified();

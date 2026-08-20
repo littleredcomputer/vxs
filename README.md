@@ -1,26 +1,39 @@
 # vxs
 
-A small, fast, NaN-boxed Scheme implementation with a single-pass
-bytecode compiler and a cooperative fiber scheduler — built to run
-natively or as a compact WebAssembly module in the browser.
+Once upon a time (2002) after reading SICP I decided to write a
+Scheme compiler in C++ based on the model in Chapter 5. After
+many late nights, I had it passing an R4RS test suite. It was
+stackless; everything about the execution was on the heeap, making
+`call-with-current-continuation` almost trivial. It knew how to
+call functions in the VxWorks shell (hence its name), could run
+well in less than 1Mb, and had a Knuth garbage collector. It could
+emit "standalone" executables, with nothing within but a table
+of bytecode and the VM loop. I was proud of it.
+
+24 years later, I decided to enlist Claude's aid to modernize it,
+updating to C++20. We replaced the abuse of pointer lower bits
+with NaN-boxing, and leveraged co-routines to give us a resumable
+virtual machine. This allowed us to implement `future` and `yield`,
+a sort of async/await for Scheme, that was portable via Emscripten
+to WASM. With that, we acquire the capability to interface with
+requestAnimationFrame and WebGPU.
 
 It's mostly R4RS: read the standard docs, write ordinary Scheme code,
 and it should work. A handful of deviations are deliberate, not bugs —
 see [Deviations from R4RS](#deviations-from-r4rs) below.
 
-## Why
+We also tossed in a few UX improvements from Clojure while we were
+at it, and have begun the process of building out an interface
+between Scheme and WGSL that has some of the flavor of Shadertoy.
 
-Scheme's roots are in SICP; this implementation's are too. The original
-version of this codebase was written in 2002 for an embedded real-time
-OS (VxWorks), under real memory constraints — a hand-tuned mark-and-sweep
-collector, a from-scratch compiler, and full re-entrant `call/cc`, all
-fitting in 256 KB. This 2026 rewrite keeps that lineage's taste for
-compactness while retargeting it: 64-bit NaN-boxed values instead of a
-heap-allocated variant type, a chunked/deque-backed VM stack instead of
-a reallocating one, and WebAssembly as a first-class target instead of
-an afterthought.
+Many of the design decisions made in 2002 have paid off today.
+The stackless design made the browser/JS async integration possible.
+The compiler allows hot loops to iterate without allocating much
+memory; tail calls and named lets are optimized for this. C++ turned
+out to allow easy generation of WASM with zero dependencies: there's
+no CMake or Meson here; just compile it and go.
 
-## Features
+## features
 
 - **NaN-boxed values** — every Scheme value (fixnums, flonums, pairs,
   vectors, closures, ports, ...) fits in a single 8-byte word.
@@ -39,7 +52,7 @@ an afterthought.
 - **Runs the same engine natively and in WASM** — the WebAssembly build
   is a few hundred KB, not megabytes.
 
-## Quick start
+## quick start
 
 ```sh
 make            # builds the native binary and the WASM module
@@ -54,13 +67,29 @@ make test       # runs the full test battery (ground-up suite, GC
 ./src/vx-scheme -c script.scm -o out   # compile to a standalone binary
 ```
 
-The in-browser workbench (Monaco editor, live canvas, six demo
-presets) is plain static files — no build step:
+The in-browser workbench is plain static files — no build step. Serve
+from the REPO ROOT rather than `web/`, so that `lib/` and `demos/` are
+reachable alongside the page:
 
 ```sh
-cd web && python3 -m http.server
-# then open http://localhost:8000
+python3 -m http.server
+# then open http://localhost:8000/web/index.html
 ```
+
+### Watch mode
+
+Editing Scheme in a `<textarea>` is no way to write real code, so the
+page can instead watch files you edit in your own editor. Tick **Watch**
+and give it a path (default `../demos/scratch.scm`): the page polls that
+file and every `lib/*.scm` over the same static server, and re-runs on
+save.
+
+The part that matters is that the libraries are re-registered on each
+pass. `lib/*.scm` is compiled into the wasm binary at build time, so a
+library edit is normally invisible in the browser until `make` — watch
+mode overrides the baked-in copies with the ones being served, and `load`
+prefers the override. Editing `lib/points.scm` or `lib/wgsl.scm` takes
+effect on save, with no rebuild.
 
 ## Embedding from JavaScript
 

@@ -403,6 +403,17 @@ struct VM {
   // grown a dependency on something defined in Scheme above it.
   bool prelude_enabled = true;
 
+  // Library sources supplied at RUNTIME, consulted by `load` ahead of the
+  // copies compiled into the binary. This exists for watch-mode editing in
+  // the browser: lib/*.scm is embedded at build time, so until now a change
+  // to a library was invisible there until a rebuild — which bit us once
+  // already, when `if` in the kernel language worked natively and did not
+  // exist in the page. With an override registered from the served file,
+  // saving in an editor is enough.
+  //
+  // Keyed by BASENAME, matching how embedded_lib_source resolves.
+  std::unordered_map<std::string, std::string> lib_overrides;
+
   explicit VM(bool with_prelude = true) : current_fiber(nullptr) {
     prelude_enabled = with_prelude;
     heap.set_vm(this);

@@ -14,6 +14,8 @@
   // below stay: they back real Scheme primitives that still work from the
   // REPL. Deleting the demos is not the same as deleting the capability.
   const gpuCanvas = document.getElementById('vxs-gpu-canvas');
+  const chkWatch = document.getElementById('chk-watch');
+  const watchPath = document.getElementById('watch-path');
   const editor = document.getElementById('code-editor');
   const btnRun = document.getElementById('btn-run');
   const btnRunTests = document.getElementById('btn-run-tests');
@@ -37,6 +39,8 @@
   let vxsEval = null;
   let vxsEvalJson = null;
   let vxsStepFibers = null;
+  let vxsLibNames = null;
+  let vxsRegisterLib = null;
   let vxsActiveFibersCount = null;
   let vxsClearFibers = null;
   let vxsStatsJson = null;
@@ -176,12 +180,7 @@
   // Heap/GC overlay. Rates are per *rendered frame*, differenced against
   // the previous sample rather than read as an absolute.
   function updateHeapTelemetry(time) {
-    let s;
-    try {
-      s = JSON.parse(vxsStatsJson());
-    } catch (e) {
-      return;
-    }
+    const s = JSON.parse(vxsStatsJson());
     if (!s.ready) return;
 
     if (lastStats) {
@@ -442,6 +441,88 @@
     gpuCanvas.style.display = wantsGpu ? '' : 'none';
   }
 
+  //--- watch mode --------------------------------------------------------
+  // Edit .scm files in a real editor and have the page re-run them on save.
+  //
+  // The browser has no filesystem, but it has fetch, and the static server
+  // is already serving the repo. So watch mode polls the demo file AND
+  // every lib/*.scm over HTTP, and on any change re-registers the
+  // libraries and re-evaluates the demo.
+  //
+  // Re-registering the libraries is the part that matters: lib/*.scm is
+  // compiled into the wasm binary at build time, so a library edit is
+  // normally invisible here until a rebuild — which bit us once already,
+  // when `if` in the kernel language worked natively and did not exist in
+  // the page. vxs_register_lib installs an override that `load` prefers.
+  //
+  // Requires serving from the REPO ROOT, not web/, so that /lib and /demos
+  // are reachable:  python3 -m http.server  then open /web/index.html
+  const WATCH_INTERVAL_MS = 1000;
+  let watchTimer = null;
+  let watchSeen = {};
+
+  async function fetchText(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.text();
+  }
+
+  async function watchPass(force) {
+    const demoUrl = watchPath.value.trim();
+    if (!demoUrl) return;
+
+    const names = (vxsLibNames ? vxsLibNames() : '').split(',').filter(Boolean);
+    const fresh = {};
+    let changed = !!force;
+
+    for (const name of names) {
+      const url = '../lib/' + name;
+      try {
+        const text = await fetchText(url);
+        fresh[url] = text;
+        if (watchSeen[url] !== text) changed = true;
+      } catch (e) {
+        // A lib not served is not fatal — the baked-in copy still works.
+      }
+    }
+
+    let demo;
+    try {
+      demo = await fetchText(demoUrl);
+    } catch (e) {
+      if (force) logToTerm(`watch: cannot fetch ${demoUrl} — ${e.message}`, 'err');
+      return;
+    }
+    if (watchSeen[demoUrl] !== demo) changed = true;
+    if (!changed) return;
+
+    for (const name of names) {
+      const url = '../lib/' + name;
+      if (fresh[url] !== undefined) vxsRegisterLib(name, fresh[url]);
+    }
+    watchSeen = fresh;
+    watchSeen[demoUrl] = demo;
+
+    editor.value = demo;
+    // Watch demos drive the GPU surface; that is what they are for.
+    canvas.style.display = 'none';
+    gpuCanvas.style.display = '';
+    logToTerm(`\n--- watch: ${demoUrl} changed, re-running ---`, 'meta');
+    executeSchemeCode();
+  }
+
+  function setWatching(on) {
+    if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
+    if (!on) { logToTerm('watch: off', 'meta'); return; }
+    watchSeen = {};
+    logToTerm(`watch: polling ${watchPath.value.trim()} and lib/*.scm every ${WATCH_INTERVAL_MS}ms`, 'meta');
+    watchPass(true);
+    watchTimer = setInterval(() => watchPass(false), WATCH_INTERVAL_MS);
+  }
+
+  chkWatch.addEventListener('change', () => setWatching(chkWatch.checked));
+  watchPath.addEventListener('change', () => { if (chkWatch.checked) setWatching(true); });
+
   // One path for loading a preset, used by both the dropdown and startup.
   // They used to be separate, and startup hardcoded PRESETS.particles while
   // the dropdown showed whatever option happened to be first — so the page
@@ -546,6 +627,8 @@
       vxsActiveFibersCount = Module.cwrap('vxs_active_fibers_count', 'number', []);
       vxsClearFibers = Module.cwrap('vxs_clear_fibers', null, []);
       vxsStatsJson = Module.cwrap('vxs_stats_json', 'string', []);
+      vxsLibNames = Module.cwrap('vxs_lib_names', 'string', []);
+      vxsRegisterLib = Module.cwrap('vxs_register_lib', null, ['string', 'string']);
 
       isWasmReady = true;
       statusBadge.classList.add('active');

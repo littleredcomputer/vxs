@@ -3,6 +3,7 @@
 #include "vx_vm.h"
 #include "vx_reader.h"
 #include "vx_compiler.h"
+#include "vx_embedded_libs.h"
 #include <string>
 #include <memory>
 #include <iostream>
@@ -920,6 +921,34 @@ static size_t g_step_calls = 0;
 static size_t g_preempt_total = 0;
 
 extern "C" {
+
+EMSCRIPTEN_KEEPALIVE int vxs_init();   // defined just below
+
+// Watch mode support.
+//
+// lib/*.scm is compiled into the binary, which is right for shipping and
+// wrong while editing: a change to a library is invisible in the browser
+// until a rebuild. These two let the page serve the libraries over HTTP
+// instead — vxs_lib_names says which ones exist, and vxs_register_lib
+// supplies fresher source for one. `load` prefers a registered override
+// over the baked-in copy, so saving in an editor is enough.
+EMSCRIPTEN_KEEPALIVE
+const char *vxs_lib_names() {
+  static std::string names;
+  names.clear();
+  for (int i = 0; i < VX_EMBEDDED_LIB_COUNT; ++i) {
+    if (i) names += ",";
+    names += VX_EMBEDDED_LIBS[i].name;
+  }
+  return names.c_str();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void vxs_register_lib(const char *name, const char *source) {
+  if (!g_vm) vxs_init();
+  if (!name || !source) return;
+  g_vm->lib_overrides[std::string(name)] = std::string(source);
+}
 
 EMSCRIPTEN_KEEPALIVE
 int vxs_init() {
