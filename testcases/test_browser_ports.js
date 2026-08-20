@@ -22,6 +22,11 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
   const lines = [];
   const consoleLines = [];
   const divLines = [];
+  let wheel = 0;
+  globalThis.vxsMouseWheel = () => wheel;
+  globalThis.vxsMouseX = () => 0;
+  globalThis.vxsMouseY = () => 0;
+  globalThis.vxsMouseDown = () => 0;
   globalThis.vxsPrint = (t) => lines.push(t);
   globalThis.vxsSinks = { console: (t) => consoleLines.push(t), mydiv: (t) => divLines.push(t) };
   const M = await createVxsModule();
@@ -197,6 +202,53 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
     const byPath = ev('(begin (load "wgsl.scm") (wgsl-code 1 (quote ())))');
     check("the override resolves by basename, not by path",
           byPath.trim() === '"FROM-OVERRIDE"', `got ${byPath}`);
+  }
+
+  // --- orbit camera: scroll to zoom -----------------------------------
+  // Only testable here: mouse-wheel is a wasm-build primitive, so the
+  // Scheme suite cannot reach it.
+  {
+    ev('(load "lib/gpu.scm")');
+    ev('(define cam (make-camera))');
+    const dist = () => parseFloat(ev('(camera-distance cam)'));
+
+    const start = dist();
+    ev('(orbit-camera! cam)');
+    check("the first call only records, it does not zoom",
+          dist() === start, `${start} -> ${dist()}`);
+
+    wheel = 500;                       // scroll down = away
+    ev('(orbit-camera! cam)');
+    const out = dist();
+    check("scrolling out increases the distance", out > start, `${start} -> ${out}`);
+
+    wheel = 300;                       // less scroll than before = back toward
+    ev('(orbit-camera! cam)');
+    check("scrolling the other way decreases it", dist() < out, `${out} -> ${dist()}`);
+
+    // Multiplicative, so a notch covers the same PROPORTION at any
+    // distance. Additive zoom crawls when far and slams into the origin
+    // when near.
+    // Two cameras need two ORBITERS: the wheel state belongs to the
+    // orbiter, and a shared one would let the first call consume the
+    // delta and leave the second seeing nothing.
+    ev('(define cam2 (make-camera)) (define orb2 (make-orbiter))');
+    ev('(camera-distance-set! cam2 1.0)');
+    ev('(define cam3 (make-camera)) (define orb3 (make-orbiter))');
+    ev('(camera-distance-set! cam3 10.0)');
+    wheel = 300; ev('(orb2 cam2)'); ev('(orb3 cam3)');
+    wheel = 400; ev('(orb2 cam2)'); ev('(orb3 cam3)');
+    const r2 = parseFloat(ev('(camera-distance cam2)')) / 1.0;
+    const r3 = parseFloat(ev('(camera-distance cam3)')) / 10.0;
+    check("the same scroll scales near and far identically",
+          Math.abs(r2 - r3) < 1e-6, `${r2} vs ${r3}`);
+    check("and it actually moved", r2 > 1.0, `${r2}`);
+
+    wheel = -100000; ev('(orbit-camera! cam)');
+    check("clamped at the near limit", dist() >= 0.35 - 1e-9, `${dist()}`);
+    wheel = 100000; ev('(orbit-camera! cam)');
+    check("clamped at the far limit", dist() <= 24.0 + 1e-9, `${dist()}`);
+    wheel = 0;
   }
 
   console.log("\n────────────────────────────────────────────────────────────────");
