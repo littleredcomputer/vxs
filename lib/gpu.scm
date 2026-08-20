@@ -16,6 +16,7 @@
 
 (load "lib/shadertoy.scm")
 (load "lib/points.scm")
+(load "lib/wrangle.scm")
 
 ;; (run-kernel-loop wgsl [canvas-id]) -> future
 ;;
@@ -105,3 +106,35 @@
             (set! dragging #f))
         (set! last-x x)
         (set! last-y y)))))
+
+;; (run-wrangle-loop device-less: buf count wrangle-src update-camera! camera [canvas])
+;;
+;; The GPU-resident counterpart of run-points-loop. The point data lives in
+;; a GPU buffer, a compute dispatch rewrites it, and the draw reads it — the
+;; host touches none of it per frame. `seed-bytes` seeds the buffer once at
+;; the start, which is the only upload that happens.
+;;
+;; `frame!` is called with the time before each dispatch and exists for
+;; whatever the host still owns — orbiting the camera, mostly. It is not
+;; where point work belongs any more.
+(define (run-wrangle-loop seed-bytes count wrangle-src frame! camera . opts)
+  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
+    (future
+      (let* ((adapter (touch (request-adapter)))
+             (device  (touch (request-device adapter)))
+             (buf     (gpu-buffer device seed-bytes)))
+        (display "wrangle: buffer uploaded, dispatching.") (newline)
+        (let loop ()
+          (let ((t (/ (current-time) 1000.0)))
+            (if (guard (e (#t (display "wrangle failed: ")
+                              (display (if (error-object? e)
+                                           (error-object-message e)
+                                           e))
+                              (newline)
+                              #f))
+                  (frame! t)
+                  (gpu-wrangle! device buf wrangle-src count t 1)
+                  (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
+                  #t)
+                (begin (yield) (loop))
+                (begin (display "wrangle loop stopped.") (newline)))))))))

@@ -2694,6 +2694,29 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 1, 1));
 
+  // (embedded-source "name") -> string or #f
+  //
+  // The text of a file compiled into the binary by embed_libs.sh, looked up
+  // by basename. Exists for the .wgsl libraries: `load` evaluates Scheme
+  // and a shader is not Scheme, but it still wants to be a versioned file
+  // on disk rather than an escaped string literal inside one. Honours the
+  // same runtime overrides `load` does, so watch mode hot-reloads a shader
+  // library exactly as it does a Scheme one.
+  def_global("embedded-source", heap.make_subr("embedded-source", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_string(args[0])) {
+      vm.raise_contract("embedded-source: expected a name string, got " +
+                        vm.format_value(args[0]));
+    }
+    std::string path(args[0].as_ptr<ObjString>()->view());
+    size_t slash = path.find_last_of('/');
+    std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    auto ov = vm.lib_overrides.find(base);
+    if (ov != vm.lib_overrides.end()) return vm.heap.make_string(ov->second);
+    const char *src = embedded_lib_source(base);
+    if (!src) return Value::boolean_false();
+    return vm.heap.make_string(src);
+  }, 1, 1));
+
   // Push buffered output through without closing. Matters for ports whose
   // backing stream batches — the browser's sink ports buffer a line at a
   // time — where a `display` with no trailing newline would otherwise sit

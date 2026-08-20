@@ -16,6 +16,11 @@
 #
 # On-disk files win over embedded copies, so editing a lib and re-running
 # natively picks up the edit without a rebuild.
+#
+# .wgsl files ride along in the same table. They are not Scheme and `load`
+# will not evaluate them — (embedded-source "stat.wgsl") hands back the
+# text, so a shader library is versioned and hot-reloaded exactly like a
+# Scheme one rather than living as an escaped string literal.
 set -e
 
 LIBDIR="${1:-../lib}"
@@ -26,7 +31,7 @@ printf 'namespace vxs {\n\n'
 printf 'struct EmbeddedLib { const char *name; const char *source; };\n\n'
 printf 'inline constexpr EmbeddedLib VX_EMBEDDED_LIBS[] = {\n'
 
-for f in "$LIBDIR"/*.scm; do
+for f in "$LIBDIR"/*.scm "$LIBDIR"/*.wgsl; do
   [ -e "$f" ] || continue
   name=$(basename "$f")
   printf '  { "%s", R"VXSCM(\n' "$name"
