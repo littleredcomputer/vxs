@@ -20,6 +20,7 @@
 (load "testcases/test_framework.scm")
 (load "lib/points.scm")
 (load "lib/wrangle.scm")
+(load "lib/gpu.scm")
 
 (test-suite "18_wrangle: GPU compute over the point buffer")
 
@@ -131,5 +132,26 @@
 (assert-true "logpdf_normal"     (string-contains? src "fn logpdf_normal("))
 (assert-true "logpdf_uniform"    (string-contains? src "fn logpdf_uniform("))
 (assert-true "logpdf_flip"       (string-contains? src "fn logpdf_flip("))
+
+;;--- the driver surface exists ------------------------------------------
+;; Defining these needs no GPU — only CALLING them does — so a native test
+;; can check they are all still here. That is worth a test because one of
+;; them was silently deleted: an edit that replaced "from this comment to
+;; the end of the file" took run-wrangle-loop with it, and nothing noticed
+;; until a preset failed in the browser with an unbound variable. Every
+;; entry point a demo can name belongs on this list.
+
+(assert-true "run-kernel-loop"  (procedure? run-kernel-loop))
+(assert-true "run-points-loop"  (procedure? run-points-loop))
+(assert-true "run-wrangle-loop" (procedure? run-wrangle-loop))
+(assert-true "make-orbiter"     (procedure? make-orbiter))
+(assert-true "orbit-camera!"    (procedure? orbit-camera!))
+(assert-true "make-camera"      (procedure? make-camera))
+(assert-true "wrangle-wgsl"     (procedure? wrangle-wgsl))
+(assert-true "make-points"      (procedure? make-points))
+(assert-true "points-view"      (procedure? points-view))
+(assert-true "point-set!"       (procedure? point-set!))
+(assert-true "shadertoy"        (procedure? shadertoy))
+(assert-true "points-wgsl is a string" (string? points-wgsl))
 
 (suite-summary)
