@@ -97,9 +97,9 @@
 
 ;;--- what the kernel may refer to ---------------------------------------
 
-(assert-equal "uv is a vec2" 'vec2f (wgsl-type 'uv shadertoy-env))
-(assert-equal "time is a scalar" 'f32 (wgsl-type 'time shadertoy-env))
-(assert-equal "res is a vec2" 'vec2f (wgsl-type 'res shadertoy-env))
+(assert-equal "uv is a vec2" :vec2f (wgsl-type 'uv shadertoy-env))
+(assert-equal "time is a scalar" :f32 (wgsl-type 'time shadertoy-env))
+(assert-equal "res is a vec2" :vec2f (wgsl-type 'res shadertoy-env))
 (assert-true "an unknown name is rejected" (rejects? '(vec3 mouse 0 0)))
 
 (suite-summary)

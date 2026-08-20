@@ -48,25 +48,25 @@
 ;; grows a curated `for-i`, some of them could move across, and no caller
 ;; would change.
 
-(wgsl-declare! 'random-uniform     "random_uniform"     '(f32 f32)     'f32)
-(wgsl-declare! 'random-normal      "random_normal"      '(f32 f32)     'f32)
-(wgsl-declare! 'random-exponential "random_exponential" '(f32)         'f32)
-(wgsl-declare! 'random-gamma       "random_gamma"       '(f32 f32)     'f32)
-(wgsl-declare! 'logpdf-normal      "logpdf_normal"      '(f32 f32 f32) 'f32)
-(wgsl-declare! 'logpdf-uniform     "logpdf_uniform"     '(f32 f32 f32) 'f32)
-(wgsl-declare! 'erfc               "erfc"               '(f32)         'f32)
-(wgsl-declare! 'inv-erf            "inv_erf"            '(f32)         'f32)
-(wgsl-declare! 'heat-colour        "heat_colour"        '(f32)         'vec3f)
-(wgsl-declare! 'cool-colour        "cool_colour"        '(f32)         'vec3f)
+(wgsl-declare! 'random-uniform     "random_uniform"     '(:f32 :f32)     :f32)
+(wgsl-declare! 'random-normal      "random_normal"      '(:f32 :f32)     :f32)
+(wgsl-declare! 'random-exponential "random_exponential" '(:f32)         :f32)
+(wgsl-declare! 'random-gamma       "random_gamma"       '(:f32 :f32)     :f32)
+(wgsl-declare! 'logpdf-normal      "logpdf_normal"      '(:f32 :f32 :f32) :f32)
+(wgsl-declare! 'logpdf-uniform     "logpdf_uniform"     '(:f32 :f32 :f32) :f32)
+(wgsl-declare! 'erfc               "erfc"               '(:f32)         :f32)
+(wgsl-declare! 'inv-erf            "inv_erf"            '(:f32)         :f32)
+(wgsl-declare! 'heat-colour        "heat_colour"        '(:f32)         :vec3f)
+(wgsl-declare! 'cool-colour        "cool_colour"        '(:f32)         :vec3f)
 
 ;; What a wrangle kernel written in Scheme sees. `time` and `seed` are
 ;; struct fields on the uniform, which the environment handles directly:
 ;; a binding may carry the name to EMIT alongside the type, so the Scheme
 ;; name and the WGSL spelling need not match.
 (define wrangle-env
-  '((time . (f32 . "w.time"))
-    (seed . (f32 . "w.seed"))
-    (count . (f32 . "w.count"))))
+  '((time . (:f32 . "w.time"))
+    (seed . (:f32 . "w.seed"))
+    (count . (:f32 . "w.count"))))
 
 (define wrangle-stride 7)   ; must match points-stride in lib/points.scm
 

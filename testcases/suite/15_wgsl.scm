@@ -24,7 +24,7 @@
 
 (test-suite "15_wgsl: typed Scheme-to-WGSL kernel compiler")
 
-(define E '((uv . vec2f) (time . f32) (col . vec3f) (p . vec4f)))
+(define E '((uv . :vec2f) (time . :f32) (col . :vec3f) (p . :vec4f)))
 
 ;; Catch a wgsl compile error and hand back its message, so rejection can
 ;; be asserted as ordinary data.
@@ -43,7 +43,7 @@
 (assert-equal "a negative literal" "-2.0" (wgsl-code '-2 E))
 (assert-equal "a float literal is left alone" "2.5" (wgsl-code '2.5 E))
 (assert-equal "a variable emits its name" "uv" (wgsl-code 'uv E))
-(assert-equal "a variable carries its type" 'vec2f (wgsl-type 'uv E))
+(assert-equal "a variable carries its type" :vec2f (wgsl-type 'uv E))
 (assert-equal "an unbound variable is rejected" 'rejected (wgsl-error 'nope))
 
 ;;--- arithmetic and broadcast -------------------------------------------
@@ -55,10 +55,10 @@
 (assert-equal "unary minus" "-(time)" (wgsl-code '(- time) E))
 (assert-equal "division" "(time / 2.0)" (wgsl-code '(/ time 2) E))
 
-(assert-equal "scalar times vector is a vector" 'vec2f (wgsl-type '(* uv 2.0) E))
-(assert-equal "vector times scalar is a vector" 'vec2f (wgsl-type '(* 2.0 uv) E))
-(assert-equal "scalar plus scalar stays scalar" 'f32 (wgsl-type '(+ time 1) E))
-(assert-equal "matching vectors combine" 'vec3f (wgsl-type '(+ col col) E))
+(assert-equal "scalar times vector is a vector" :vec2f (wgsl-type '(* uv 2.0) E))
+(assert-equal "vector times scalar is a vector" :vec2f (wgsl-type '(* 2.0 uv) E))
+(assert-equal "scalar plus scalar stays scalar" :f32 (wgsl-type '(+ time 1) E))
+(assert-equal "matching vectors combine" :vec3f (wgsl-type '(+ col col) E))
 
 ;; The rejection that matters most: mixing widths. WGSL has no rule for
 ;; this and neither should we.
@@ -71,7 +71,7 @@
               "vec3<f32>(1.0, 2.0, 3.0)" (wgsl-code '(vec3 1 2 3) E))
 (assert-equal "vec2 constructor uses the long type name"
               "vec2<f32>(time, 0.0)" (wgsl-code '(vec2 time 0) E))
-(assert-equal "vec4 constructor" 'vec4f (wgsl-type '(vec4 1 2 3 4) E))
+(assert-equal "vec4 constructor" :vec4f (wgsl-type '(vec4 1 2 3 4) E))
 (assert-equal "constructors nest"
               "vec3<f32>(sin(time), 0.2, 0.8)"
               (wgsl-code '(vec3 (sin time) 0.2 0.8) E))
@@ -82,12 +82,12 @@
 
 ;;--- built-ins ----------------------------------------------------------
 
-(assert-equal "a unary function keeps its type" 'vec3f (wgsl-type '(sin col) E))
+(assert-equal "a unary function keeps its type" :vec3f (wgsl-type '(sin col) E))
 (assert-equal "unary emission" "sqrt(time)" (wgsl-code '(sqrt time) E))
-(assert-equal "length takes a vector to a scalar" 'f32 (wgsl-type '(length uv) E))
+(assert-equal "length takes a vector to a scalar" :f32 (wgsl-type '(length uv) E))
 (assert-equal "length emission"
               "length((uv - 0.5))" (wgsl-code '(length (- uv 0.5)) E))
-(assert-equal "dot takes two vectors to a scalar" 'f32 (wgsl-type '(dot uv uv) E))
+(assert-equal "dot takes two vectors to a scalar" :f32 (wgsl-type '(dot uv uv) E))
 (assert-equal "dot of mismatched vectors is rejected"
               'rejected (wgsl-error '(dot uv col)))
 
@@ -95,22 +95,22 @@
 (assert-equal "min of mismatched types is rejected"
               'rejected (wgsl-error '(min time uv)))
 
-(assert-equal "mix with a scalar blend factor" 'vec3f
+(assert-equal "mix with a scalar blend factor" :vec3f
               (wgsl-type '(mix col col time) E))
 (assert-equal "mix emission"
               "mix(col, col, time)" (wgsl-code '(mix col col time) E))
 (assert-equal "mix with mismatched endpoints is rejected"
               'rejected (wgsl-error '(mix col uv time)))
 (assert-equal "clamp" "clamp(time, 0.0, 1.0)" (wgsl-code '(clamp time 0 1) E))
-(assert-equal "smoothstep" 'f32 (wgsl-type '(smoothstep 0 1 time) E))
+(assert-equal "smoothstep" :f32 (wgsl-type '(smoothstep 0 1 time) E))
 
 ;;--- swizzles -----------------------------------------------------------
 
-(assert-equal "a single component is a scalar" 'f32 (wgsl-type '(swizzle col x) E))
-(assert-equal "a two-component swizzle is a vec2" 'vec2f
+(assert-equal "a single component is a scalar" :f32 (wgsl-type '(swizzle col x) E))
+(assert-equal "a two-component swizzle is a vec2" :vec2f
               (wgsl-type '(swizzle col xy) E))
 (assert-equal "swizzle emission" "col.xy" (wgsl-code '(swizzle col xy) E))
-(assert-equal "a swizzle can widen" 'vec4f (wgsl-type '(swizzle col xyzx) E))
+(assert-equal "a swizzle can widen" :vec4f (wgsl-type '(swizzle col xyzx) E))
 ;; .z on a vec2 is the error a hand-written shader makes constantly.
 (assert-equal "a component past the end is rejected"
               'rejected (wgsl-error '(swizzle uv z)))
@@ -131,7 +131,7 @@
                             (vec3 (sin (+ (* d 10.0) time)) 0.2 0.8))
                          E "  "))
 
-(assert-equal "a let binding carries its type into the body" 'vec2f
+(assert-equal "a let binding carries its type into the body" :vec2f
               (wgsl-type '(let ((q (* uv 2.0))) q) E))
 
 (assert-equal "sequential lets each get their own name"
@@ -167,13 +167,13 @@
 ;; nothing short-circuits. Right on a GPU, where a real branch diverges the
 ;; warp, but it means an arm can never guard the other from a bad value.
 
-(assert-equal "a comparison produces bool" 'bool (wgsl-type '(> time 1) E))
+(assert-equal "a comparison produces bool" :bool (wgsl-type '(> time 1) E))
 (assert-equal "comparison emission" "(time > 1.0)" (wgsl-code '(> time 1) E))
 (assert-equal "equality spells itself ==" "(time == 1.0)" (wgsl-code '(= time 1) E))
 (assert-equal "if compiles to select with the arms swapped"
               "select(0.0, 1.0, (time > 1.0))"
               (wgsl-code '(if (> time 1) 1.0 0.0) E))
-(assert-equal "if takes the type of its arms" 'vec3f
+(assert-equal "if takes the type of its arms" :vec3f
               (wgsl-type '(if (> time 1) col col) E))
 (assert-equal "and emission"
               "((time > 1.0) && (time < 2.0))"
@@ -220,7 +220,7 @@
 ;; discarded rather than evaluated — worth an error, not a shrug.
 (assert-equal "extra body forms are rejected" 'rejected
               (wgsl-error '(let ((a 1)) a a)))
-(assert-equal "a single body form is still fine" 'f32
+(assert-equal "a single body form is still fine" :f32
               (wgsl-type '(let ((a 1)) (+ a 1)) E))
 
 ;;--- a whole kernel body ------------------------------------------------
