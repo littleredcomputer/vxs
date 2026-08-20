@@ -547,7 +547,14 @@
         fresh[url] = text;
         if (watchSeen[url] !== text) changed = true;
       } catch (e) {
-        // A lib not served is not fatal — the baked-in copy still works.
+        // Not fatal — the baked-in copy still works — but not silent
+        // either. A 404 here usually means the server is rooted at web/
+        // instead of the repo, and swallowing it turns that into "watch
+        // mode mysteriously ignores my library edits".
+        if (force) {
+          logToTerm(`watch: cannot fetch ${url} — ${e.message} ` +
+                    `(serving from the repo root?)`, 'err');
+        }
       }
     }
 
@@ -606,9 +613,25 @@
   // Preset Selection Event
   selectPreset.addEventListener('change', () => {
     const val = selectPreset.value;
-    if (PRESETS[val]) {
-      logToTerm(`\n--- Loaded preset: [${selectPreset.options[selectPreset.selectedIndex].text}] ---`, 'meta');
-      loadPreset(val);
+    if (!PRESETS[val]) {
+      // Was a silent no-op, which is the worst possible answer: selecting
+      // a preset appeared to do nothing at all, with nothing in the log to
+      // explain it. In practice this means index.html reloaded while
+      // app.js came from cache, so the dropdown offers an option this
+      // script has never heard of.
+      logToTerm(`No preset named "${val}" in this script — app.js is probably ` +
+                `cached. Reload with cache disabled (Cmd-Shift-R).`, 'err');
+      return;
+    }
+    logToTerm(`\n--- Loaded preset: [${selectPreset.options[selectPreset.selectedIndex].text}] ---`, 'meta');
+    loadPreset(val);
+  });
+
+  // Same drift, caught at startup rather than on the click: every option in
+  // the markup should name a preset this script defines.
+  Array.from(selectPreset.options).forEach((opt) => {
+    if (!PRESETS[opt.value]) {
+      console.warn(`vxs: <option value="${opt.value}"> has no matching preset in app.js`);
     }
   });
 

@@ -413,6 +413,23 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
       run_pending_winders(f, 0);
     }
     return res;
+  } catch (RaiseEscape &e) {
+    // An uncaught raise/error is a fiber death like any other, and has to
+    // be REPORTED as one. Letting it unwind past here skipped everything
+    // downstream that knows what to do with a dead fiber: the scheduler
+    // never reaped it, so it sat in active_fibers raising the same error
+    // every frame; fiber_errors never learned of it, so nothing printed
+    // the message; and in the browser it escaped the wasm call entirely
+    // and reached JS as the string "#<CppException>", carrying none of the
+    // tag, message or irritants.
+    //
+    // Cleanups still run first, exactly as on the StepResult::Error path
+    // above — an uncaught error must not leave with-output-to-file's
+    // redirection in place.
+    run_pending_winders(f, 0);
+    f.state = Fiber::State::Error;
+    f.error_message = e.what();
+    return StepResult::Error;
   } catch (ContinuationEscape &) {
     // An escape targeting nothing in this fiber (invoked outside its
     // dynamic extent) is leaving the VM entirely — run the cleanups on

@@ -1457,11 +1457,25 @@ const char *vxs_eval(const char *code) {
 EMSCRIPTEN_KEEPALIVE
 int vxs_step_fibers(int instructions_per_fiber) {
   if (!g_vm) return 0;
-  size_t preempted;
-  if (instructions_per_fiber > 0) {
-    preempted = g_vm->step_all_active_fibers(static_cast<size_t>(instructions_per_fiber));
-  } else {
-    preempted = g_vm->step_all_active_fibers(VM::UNBOUNDED, std::chrono::milliseconds(8));
+  size_t preempted = 0;
+  // An uncaught (raise ...) or (error ...) inside a fiber unwinds as a C++
+  // exception. Nothing here used to catch it, so it escaped the wasm call
+  // entirely and reached JS as "#<CppException>" — a string containing none
+  // of the message, the tag or the irritants. The whole diagnosis was
+  // thrown away one frame short of the reporting below.
+  //
+  // Caught here and routed through fiber_errors, so a raise reports exactly
+  // like any other fiber death: in full, to the page.
+  try {
+    if (instructions_per_fiber > 0) {
+      preempted = g_vm->step_all_active_fibers(static_cast<size_t>(instructions_per_fiber));
+    } else {
+      preempted = g_vm->step_all_active_fibers(VM::UNBOUNDED, std::chrono::milliseconds(8));
+    }
+  } catch (const RaiseEscape &e) {
+    g_vm->fiber_errors.push_back(e.what());
+  } catch (const std::exception &e) {
+    g_vm->fiber_errors.push_back(std::string("[Error] ") + e.what());
   }
   ++g_step_calls;
   g_preempt_total += preempted;
@@ -1469,7 +1483,14 @@ int vxs_step_fibers(int instructions_per_fiber) {
   // the scheduler reaps an errored fiber exactly like a finished one. Say
   // so, loudly, on the same channel as the frame-budget warning.
   for (const std::string &msg : g_vm->fiber_errors) {
+    // Both channels, deliberately. stderr reaches the browser console,
+    // which is where a developer looks; the terminal sink reaches the PAGE,
+    // which is where the person running the program is already looking. A
+    // fiber dying is the single most important thing this system can have
+    // to say, and it used to say it only to the console.
     fprintf(stderr, "[vxs] fiber died: %s\n", msg.c_str());
+    std::string line = "[fiber died] " + msg;
+    js_sink_write("terminal", line.c_str());
   }
   g_vm->fiber_errors.clear();
   // Only meaningful on the default (deadline) path: there, a preemption
