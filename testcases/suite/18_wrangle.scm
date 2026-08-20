@@ -143,8 +143,15 @@
 ;; The cool end is dim, never black: under additive blending a black point
 ;; is invisible, so the outskirts would not fade, they would vanish and
 ;; take the cloud's silhouette with them.
-(assert-true "the cool end of the heat ramp is dim, not black"
-             (string-contains? src "clamp(u * 2.2 + 0.10, 0.0, 1.0)"))
+(assert-true "the heat ramp has a cool end to fall off toward"
+             (string-contains? src "vec3<f32>(0.08, 0.04, 0.22)"))
+(assert-true "and a white-hot top"
+             (string-contains? src "vec3<f32>(1.00, 0.98, 0.88)"))
+;; The min against 3 matters at exactly t = 1: without it the last segment
+;; degenerates to its own lower endpoint and the hottest points come out
+;; amber instead of white.
+(assert-true "the last ramp segment does not degenerate at t = 1"
+             (string-contains? src "let i = min(floor(s), 3.0);"))
 
 ;;--- the driver surface exists ------------------------------------------
 ;; Defining these needs no GPU — only CALLING them does — so a native test
