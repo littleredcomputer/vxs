@@ -32,13 +32,13 @@
 
 ;;--- the buffer ---------------------------------------------------------
 
-(assert-equal "six floats per point" 6 points-stride)
+(assert-equal "seven floats per point" 7 points-stride)
 
 (define b (make-points 4))
 (define v (points-view b))
 
-(assert-equal "buffer is stride * 4 bytes per point" 96 (bytes-length b))
-(assert-equal "the view sees every float" 24 (view-length v))
+(assert-equal "buffer is stride * 4 bytes per point" 112 (bytes-length b))
+(assert-equal "the view sees every float" 28 (view-length v))
 (assert-equal "a bound buffer is sealed, not growable"
               :sealed (bytes-residency b))
 (assert-equal "the view reads f32" :f32 (view-type v))
@@ -52,11 +52,13 @@
 ;; Exactly-representable f32 values, so these assertions test the LAYOUT
 ;; and not the float format. See the precision test below for the other
 ;; half of that story.
-(point-set! v 0 -0.5 0.25 0.03125 1.0 0.5 0.375)
-(point-set! v 3 0.75 -0.5 0.0625 0.125 0.875 0.25)
+(point-set! v 0 -0.5 0.25 0.125 0.03125 1.0 0.5 0.375)
+(point-set! v 3 0.75 -0.5 -0.375 0.0625 0.125 0.875 0.25)
 
 (assert-equal "x of point 0" -0.5 (point-x v 0))
 (assert-equal "y of point 0" 0.25 (point-y v 0))
+(assert-equal "z of point 0" 0.125 (point-z v 0))
+(assert-equal "z of point 3" -0.375 (point-z v 3))
 (assert-equal "x of point 3" 0.75 (point-x v 3))
 (assert-equal "y of point 3" -0.5 (point-y v 3))
 (assert-equal "point 1 was not touched" 0.0 (point-x v 1))
@@ -64,11 +66,11 @@
 
 ;; Every field of a point, by raw float index — this is the layout the
 ;; shader assumes, spelled out.
-(assert-equal "size sits at offset 2" 0.03125 (view-ref v 2))
-(assert-equal "red sits at offset 3"  1.0     (view-ref v 3))
-(assert-equal "green sits at offset 4" 0.5    (view-ref v 4))
-(assert-equal "blue sits at offset 5" 0.375   (view-ref v 5))
-(assert-equal "point 3 starts at float 18" 0.75 (view-ref v 18))
+(assert-equal "size sits at offset 3" 0.03125 (view-ref v 3))
+(assert-equal "red sits at offset 4"  1.0     (view-ref v 4))
+(assert-equal "green sits at offset 5" 0.5    (view-ref v 5))
+(assert-equal "blue sits at offset 6" 0.375   (view-ref v 6))
+(assert-equal "point 3 starts at float 21" 0.75 (view-ref v 21))
 
 ;;--- the shader agrees with the layout -----------------------------------
 
@@ -93,8 +95,9 @@
 
 ;; And the field offsets the shader reads, same argument.
 (assert-true "shader reads x at +0" (string-contains? points-wgsl "pts[base + 0u]"))
-(assert-true "shader reads size at +2" (string-contains? points-wgsl "pts[base + 2u]"))
-(assert-true "shader reads blue at +5" (string-contains? points-wgsl "pts[base + 5u]"))
+(assert-true "shader reads z at +2" (string-contains? points-wgsl "pts[base + 2u]"))
+(assert-true "shader reads size at +3" (string-contains? points-wgsl "pts[base + 3u]"))
+(assert-true "shader reads blue at +6" (string-contains? points-wgsl "pts[base + 6u]"))
 
 ;; A struct would have been tidier and wrong; make sure nobody quietly
 ;; reintroduces one.
@@ -119,6 +122,53 @@
 ;;--- sizing -------------------------------------------------------------
 
 (assert-equal "an empty buffer is legal" 0 (bytes-length (make-points 0)))
-(assert-equal "1000 points" 24000 (bytes-length (make-points 1000)))
+(assert-equal "1000 points" 28000 (bytes-length (make-points 1000)))
+
+;;--- the camera and its uniform -----------------------------------------
+;; The camera is PARAMETERS, not a matrix: the vertex shader does the
+;; rotate-and-project itself. Ten lines of WGSL against a mat4 library in
+;; Scheme that nothing else yet wants.
+;;
+;; struct U's field order is a second hand-maintained coupling, this one
+;; with the Float32Array written in js_gpu_draw_instances. Getting it wrong
+;; is silent in the nastiest way — the shader would animate on canvas width
+;; or orbit on the point count.
+
+(define cam (make-camera))
+(assert-equal "a camera is four numbers" 4 (vector-length cam))
+(assert-equal "yaw, pitch, distance, fov"
+              (list (camera-yaw cam) (camera-pitch cam)
+                    (camera-distance cam) (camera-fov cam))
+              (list (vector-ref cam 0) (vector-ref cam 1)
+                    (vector-ref cam 2) (vector-ref cam 3)))
+(camera-yaw-set! cam 1.25)
+(assert-equal "yaw is mutable in place" 1.25 (camera-yaw cam))
+(camera-pitch-set! cam -0.5)
+(assert-equal "pitch is mutable in place" -0.5 (camera-pitch cam))
+(assert-true "the camera starts back from the origin" (> (camera-distance cam) 1.0))
+
+(assert-true "the uniform declares all eight fields in order"
+             (string-contains?
+              points-wgsl
+              (string-append "struct U {\n"
+                             "  time : f32,\n"
+                             "  width : f32,\n"
+                             "  height : f32,\n"
+                             "  count : f32,\n"
+                             "  yaw : f32,\n"
+                             "  pitch : f32,\n"
+                             "  dist : f32,\n"
+                             "  fov : f32,\n"
+                             "};")))
+
+;; Projection details worth pinning: a point at or behind the eye must not
+;; produce an infinity, and must not smear across the screen either.
+(assert-true "guards the perspective divide against zero"
+             (string-contains? points-wgsl "max(zc, 0.05)"))
+(assert-true "pushes points behind the eye outside clip space"
+             (string-contains? points-wgsl "zc > 0.05"))
+(assert-true "rotates by yaw and pitch"
+             (and (string-contains? points-wgsl "cos(u.yaw)")
+                  (string-contains? points-wgsl "cos(u.pitch)")))
 
 (suite-summary)
