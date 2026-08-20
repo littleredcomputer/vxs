@@ -133,6 +133,19 @@
 (assert-true "logpdf_uniform"    (string-contains? src "fn logpdf_uniform("))
 (assert-true "logpdf_flip"       (string-contains? src "fn logpdf_flip("))
 
+;;--- colour ramps --------------------------------------------------------
+;; Display helpers rather than attributes: a wrangle decides what a point
+;; IS, these decide how to show it. Their own file so watch mode reloads
+;; them on save, since a ramp is the thing you tweak most.
+(assert-true "colour.wgsl is embedded" (string? (embedded-source "colour.wgsl")))
+(assert-true "heat_colour is in scope" (string-contains? src "fn heat_colour(t : f32)"))
+(assert-true "cool_colour is in scope" (string-contains? src "fn cool_colour(t : f32)"))
+;; The cool end is dim, never black: under additive blending a black point
+;; is invisible, so the outskirts would not fade, they would vanish and
+;; take the cloud's silhouette with them.
+(assert-true "the cool end of the heat ramp is dim, not black"
+             (string-contains? src "clamp(u * 2.2 + 0.10, 0.0, 1.0)"))
+
 ;;--- the driver surface exists ------------------------------------------
 ;; Defining these needs no GPU — only CALLING them does — so a native test
 ;; can check they are all still here. That is worth a test because one of

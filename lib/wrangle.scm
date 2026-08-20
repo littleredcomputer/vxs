@@ -23,6 +23,8 @@
 ;;   pt_write(i, pos, size, colour)        write
 ;;   the whole of lib/rng.wgsl and lib/stat.wgsl — random_normal,
 ;;   random_uniform, random_gamma, flip, and the logpdf_* family
+;;   heat_colour(t), cool_colour(t) from lib/colour.wgsl — display ramps,
+;;   not attributes
 ;;
 ;; rng_init is called for you, addressed by point index and w.seed, so
 ;; draws are reproducible per point and independent between points.
@@ -75,7 +77,10 @@
 ;; `body` is WGSL statements; see the header for what is in scope.
 (define (wrangle-wgsl body)
   (let ((rng (embedded-source "rng.wgsl"))
-        (stat (embedded-source "stat.wgsl")))
-    (if (not (and rng stat))
-        (error 'wrangle "rng.wgsl or stat.wgsl is missing from the binary"))
-    (string-append rng "\n" stat "\n" wrangle-preamble body "\n}\n")))
+        (stat (embedded-source "stat.wgsl"))
+        (col (embedded-source "colour.wgsl")))
+    (if (not (and rng stat col))
+        (error 'wrangle
+               "rng.wgsl, stat.wgsl or colour.wgsl is missing from the binary"))
+    (string-append rng "\n" stat "\n" col "\n"
+                   wrangle-preamble body "\n}\n")))
