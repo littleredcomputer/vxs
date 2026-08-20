@@ -174,4 +174,74 @@
 (assert-true "shadertoy"        (procedure? shadertoy))
 (assert-true "points-wgsl is a string" (string? points-wgsl))
 
+;;--- callable functions: declared and defined ---------------------------
+;; Two kinds, one table, and a caller cannot tell them apart. A DECLARED
+;; function is hand-written WGSL whose signature is asserted here, because
+;; nothing can read a signature out of WGSL text. A DEFINED one is written
+;; in the kernel language, and its result type is DERIVED by the same
+;; checker that checks everything else — which is what makes the signature
+;; honest rather than an assertion that could drift from the body.
+
+(assert-equal "the stat library is declared"
+              '(random-normal "random_normal" (f32 f32) f32)
+              (wgsl-signature 'random-normal))
+(assert-equal "so are the colour ramps"
+              '(heat-colour "heat_colour" (f32) vec3f)
+              (wgsl-signature 'heat-colour))
+
+(define-gpu (test-falloff (r f32) (k f32))
+  (/ 1.0 (+ 1.0 (* k r r))))
+
+(assert-equal "define-gpu derives the result type from the body"
+              '(test-falloff "test_falloff" (f32 f32) f32)
+              (wgsl-signature 'test-falloff))
+
+;; A defined function may call a declared one, and the result type follows
+;; through. This is the composition that makes a library possible at all.
+(define-gpu (test-ember (r f32))
+  (heat-colour (test-falloff r 2.5)))
+(assert-equal "a defined function composing a declared one"
+              'vec3f (cadddr (wgsl-signature 'test-ember)))
+
+(assert-true "it emits a real WGSL function"
+             (string-contains? (wgsl-definitions-source)
+                               "fn test_falloff(r : f32, k : f32) -> f32 {"))
+(assert-true "hyphens become underscores"
+             (string-contains? (wgsl-definitions-source) "fn test_ember(r : f32)"))
+(assert-true "the emitted body returns the compiled expression"
+             (string-contains? (wgsl-definitions-source)
+                               "return (1.0 / (1.0 + ((k * r) * r)));"))
+
+;; Call sites are checked against the derived signature.
+(define E7 '((v . vec3f) (s . f32)))
+(define (rejects-call? e) (guard (c (#t #t)) (wgsl-code e E7) #f))
+(assert-equal "a well-typed call" 'f32 (wgsl-type '(test-falloff s s) E7))
+(assert-true "wrong argument type is rejected" (rejects-call? '(test-falloff v s)))
+(assert-true "too few arguments is rejected"   (rejects-call? '(test-falloff s)))
+(assert-true "too many arguments is rejected"  (rejects-call? '(test-falloff s s s)))
+(assert-true "an undeclared function is still unknown"
+             (rejects-call? '(no-such-gpu-fn s)))
+
+;; A parameter list must be (name type) with a type this language has.
+(assert-true "a bad parameter spec is rejected"
+             (guard (c (#t #t)) (wgsl-define-fn! 'bad '((r)) '1.0) #f))
+(assert-true "an unknown parameter type is rejected"
+             (guard (c (#t #t)) (wgsl-define-fn! 'bad '((r i32)) '1.0) #f))
+
+;; Redefining replaces in place rather than appending — watch mode re-runs
+;; a file on every save, so a table that only grew would accumulate a stale
+;; entry per keystroke.
+(define before-count (string-length (wgsl-definitions-source)))
+(define-gpu (test-falloff (r f32) (k f32))
+  (/ 1.0 (+ 1.0 (* k r r))))
+(assert-equal "redefinition does not append a duplicate"
+              before-count (string-length (wgsl-definitions-source)))
+
+;; The uniform reaches a Scheme kernel through the environment: a binding
+;; may carry the name to EMIT alongside its type, so `time` in Scheme is
+;; `w.time` in WGSL without the kernel language knowing what a struct is.
+(assert-equal "time is bound to the uniform field"
+              "w.time" (wgsl-code 'time wrangle-env))
+(assert-equal "and carries its type" 'f32 (wgsl-type 'time wrangle-env))
+
 (suite-summary)

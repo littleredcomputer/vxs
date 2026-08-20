@@ -30,6 +30,44 @@
 ;; draws are reproducible per point and independent between points.
 ;;----------------------------------------------------------------------
 
+;; The kernel compiler, for wgsl-declare! and define-gpu. Explicit rather
+;; than relying on lib/gpu.scm having loaded it first: this file is loaded
+;; directly by layer 18 and by anything that wants only the wrangle.
+(load "lib/wgsl.scm")
+
+;;--- what a Scheme kernel can call --------------------------------------
+;; Signatures for the hand-written WGSL in lib/stat.wgsl and
+;; lib/colour.wgsl. They are asserted rather than derived because nothing
+;; can read a signature out of WGSL text — which is exactly the difference
+;; between these and a define-gpu function, whose result type the compiler
+;; works out for itself.
+;;
+;; Several of these could NOT be written in the kernel language: random_gamma
+;; needs a rejection loop and erfc needs a polynomial evaluated in sequence.
+;; That is the point of having two tiers rather than one. When the language
+;; grows a curated `for-i`, some of them could move across, and no caller
+;; would change.
+
+(wgsl-declare! 'random-uniform     "random_uniform"     '(f32 f32)     'f32)
+(wgsl-declare! 'random-normal      "random_normal"      '(f32 f32)     'f32)
+(wgsl-declare! 'random-exponential "random_exponential" '(f32)         'f32)
+(wgsl-declare! 'random-gamma       "random_gamma"       '(f32 f32)     'f32)
+(wgsl-declare! 'logpdf-normal      "logpdf_normal"      '(f32 f32 f32) 'f32)
+(wgsl-declare! 'logpdf-uniform     "logpdf_uniform"     '(f32 f32 f32) 'f32)
+(wgsl-declare! 'erfc               "erfc"               '(f32)         'f32)
+(wgsl-declare! 'inv-erf            "inv_erf"            '(f32)         'f32)
+(wgsl-declare! 'heat-colour        "heat_colour"        '(f32)         'vec3f)
+(wgsl-declare! 'cool-colour        "cool_colour"        '(f32)         'vec3f)
+
+;; What a wrangle kernel written in Scheme sees. `time` and `seed` are
+;; struct fields on the uniform, which the environment handles directly:
+;; a binding may carry the name to EMIT alongside the type, so the Scheme
+;; name and the WGSL spelling need not match.
+(define wrangle-env
+  '((time . (f32 . "w.time"))
+    (seed . (f32 . "w.seed"))
+    (count . (f32 . "w.count"))))
+
 (define wrangle-stride 7)   ; must match points-stride in lib/points.scm
 
 (define wrangle-preamble
@@ -82,5 +120,10 @@
     (if (not (and rng stat col))
         (error 'wrangle
                "rng.wgsl, stat.wgsl or colour.wgsl is missing from the binary"))
+    ;; Order matters: the libraries first, then anything define-gpu has
+    ;; emitted (which may call them), then the kernel. WGSL wants a
+    ;; function to appear before the code that calls it, which is also the
+    ;; order a reader expects.
     (string-append rng "\n" stat "\n" col "\n"
+                   (wgsl-definitions-source) "\n"
                    wrangle-preamble body "\n}\n")))
