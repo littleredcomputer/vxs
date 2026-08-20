@@ -169,6 +169,36 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
           r.trim() === '42', `got ${r}`);
   }
 
+  // --- watch mode: runtime library overrides --------------------------
+  // lib/*.scm is compiled into the binary, so a library edit is invisible
+  // in the browser until a rebuild — that bit us once, when `if` in the
+  // kernel language worked natively and did not exist in the page. Watch
+  // mode serves the libraries over HTTP instead and registers them here;
+  // `load` prefers a registered override over the baked-in copy.
+  {
+    const names = M.ccall('vxs_lib_names', 'string', [], []).split(',');
+    check("the binary reports which libraries it carries",
+          names.includes('wgsl.scm') && names.includes('prelude.scm'),
+          JSON.stringify(names));
+  }
+
+  {
+    const baked = ev('(begin (load "lib/wgsl.scm") (wgsl-code 1 (quote ())))');
+    check("a library loads from the baked-in copy by default",
+          baked.trim() === '"1.0"', `got ${baked}`);
+
+    M.ccall('vxs_register_lib', null, ['string', 'string'],
+            ['wgsl.scm', '(define (wgsl-code e env) "FROM-OVERRIDE")']);
+    const over = ev('(begin (load "lib/wgsl.scm") (wgsl-code 1 (quote ())))');
+    check("a registered override wins over the baked-in copy",
+          over.trim() === '"FROM-OVERRIDE"', `got ${over}`);
+
+    // Registering by basename must match however the path was spelled.
+    const byPath = ev('(begin (load "wgsl.scm") (wgsl-code 1 (quote ())))');
+    check("the override resolves by basename, not by path",
+          byPath.trim() === '"FROM-OVERRIDE"', `got ${byPath}`);
+  }
+
   console.log("\n────────────────────────────────────────────────────────────────");
   console.log(`Browser host: ${total} | Passed: ${total - bad} | Failed: ${bad}`);
   console.log(bad ? "❌ BROWSER HOST TESTS FAILED" : "✨ BROWSER HOST TESTS PASSED ✨");
