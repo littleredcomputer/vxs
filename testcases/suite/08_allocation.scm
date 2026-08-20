@@ -153,4 +153,43 @@
               #t
               (> (alloc-per-iter r-var ITERS) 0))
 
+;;--- the byte counter must not underflow ---------------------------------
+;; bytes_allocated is UNSIGNED, and the sweep used to decrement it once per
+;; corpse. That is wrong for any object whose storage arrives after the
+;; object does: make-bytes allocates an empty ObjBytes and then sizes its
+;; vector, so allocation charged for the header alone while the sweep
+;; credited back the header PLUS the data. A one-megabyte buffer added
+;; 1,248 bytes to the counter and removed 1,001,248 of them, and the
+;; difference wrapped.
+;;
+;; It surfaced as a heap of 4,187,859 KB in the browser — 32-bit wasm, so it
+;; wrapped at 2^32 — while only 622 objects were live. The sweep now
+;; recomputes from the survivors instead, which cannot underflow and is
+;; exact rather than cumulative. ObjMap had the identical shape.
+
+(define (live-bytes) (cdr (assq 'live-bytes (vm-stats))))
+
+(define alloc-baseline (begin (gc) (live-bytes)))
+(define big (make-bytes 1000000))
+(assert-true "a large buffer is actually charged for"
+             (> (- (live-bytes) alloc-baseline) 900000))
+(set! big #f)
+(gc)
+(define alloc-after (live-bytes))
+;; The load-bearing assertion: an underflowed counter is enormous, so any
+;; sane upper bound catches it.
+(assert-true "the counter does not underflow when the buffer is collected"
+             (< alloc-after (+ alloc-baseline 100000)))
+(assert-true "and the space is actually reclaimed"
+             (< alloc-after (+ alloc-baseline 50000)))
+
+;; A map grows its entries vector long after the object exists — same shape.
+(define m (hash-map))
+(let fill ((i 0))
+  (if (< i 2000) (begin (map-set! m i i) (fill (+ i 1)))))
+(set! m #f)
+(gc)
+(assert-true "nor when a grown map is collected"
+             (< (live-bytes) (+ alloc-baseline 100000)))
+
 (suite-summary)
