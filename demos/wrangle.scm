@@ -60,16 +60,16 @@
          + logpdf_normal(y0, 0.0, 0.10)
          + logpdf_normal(z0, 0.0, 0.34);
 
-  // The band deliberately never reaches the top of the ramp. Under
-  // additive blending the dense core accumulates to white on its own, so
-  // a per-point colour that is ALREADY white there just saturates and
-  // flattens the structure — measured, a tighter band put everything
-  // within one standard deviation at full white, and one standard
-  // deviation is most of the cloud. Peaking at orange leaves the white to
-  // be earned by density.
-  //   mode  -> 0.58  orange       1 sigma -> 0.42  orange-red
-  //   2 sig -> 0.04  dim red      3 sigma -> 0.00  barely there
-  let temp = smoothstep(-6.0, 8.0, lp);
+// The ramp now has a cool end, so the band can span it. Measured against
+  // the actual densities:
+  //   mode  -> 0.96  white      1 sigma -> 0.84  amber
+  //   1.5s  -> 0.61  red-orange 2 sigma -> 0.26  magenta
+  //   3 sig -> 0.00  dim violet
+  // A previous band peaked at orange because the ramp topped out at white
+  // and the dense core accumulates toward white on its own. With a violet
+  // tail underneath, the core can be allowed white per-point: most of the
+  // visible area is now the long cool run, not the peak.
+  let temp = smoothstep(-8.0, 3.0, lp);
 
   pt_write(i, p, 0.0030 + 0.0016 * temp, heat_colour(temp));
 ")
