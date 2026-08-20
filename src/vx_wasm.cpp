@@ -564,6 +564,180 @@ EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char
   }
 });
 
+// --- compute wrangle ---------------------------------------------------
+//
+// The point data now LIVES on the GPU. gpu-draw-instances! re-uploads the
+// whole buffer every frame, which is right while Scheme is the producer and
+// wrong the moment a compute pass is: uploading a buffer only to have the
+// GPU immediately overwrite it is pure waste, and it would also lose
+// whatever the previous frame computed. So the buffer is created once,
+// seeded once, and thereafter read and written in place.
+
+EM_JS(int, js_gpu_create_buffer, (int deviceId, const unsigned char *dataPtr, int dataLen), {
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var size = Math.max(16, (dataLen + 15) & ~15);
+    var buf = device.createBuffer({
+      size: size,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    if (dataLen > 0) {
+      device.queue.writeBuffer(buf, 0,
+        new Uint8Array(HEAPU8.subarray(dataPtr, dataPtr + dataLen)));
+    }
+    return globalThis.vxsHandles.put(buf);
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -2;
+  }
+});
+
+// One compute dispatch over `count` points. The pipeline is cached by
+// source, as everything else here is; the bind group additionally depends
+// on WHICH buffer, so the buffer id is part of its key.
+EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, const char *wgslPtr, int count, double time, double seed), {
+  var wgsl = UTF8ToString(wgslPtr);
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var buf = globalThis.vxsHandles.get(bufId);
+    if (!buf) { globalThis.vxsGpuError = "point buffer handle is not live"; return -2; }
+
+    globalThis.vxsWrangleCache = globalThis.vxsWrangleCache || {};
+    var key = bufId + " " + wgsl;
+    var entry = globalThis.vxsWrangleCache[key];
+    if (!entry || entry.device !== device) {
+      var module = device.createShaderModule({ code: wgsl });
+      var bgl = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+        ]
+      });
+      var pipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        compute: { module: module, entryPoint: 'main' }
+      });
+      var ubuf = device.createBuffer({
+        size: 16,   // struct WU: time, count, seed, pad
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      var bind = device.createBindGroup({
+        layout: bgl,
+        entries: [
+          { binding: 0, resource: { buffer: ubuf } },
+          { binding: 1, resource: { buffer: buf } }
+        ]
+      });
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind };
+      globalThis.vxsWrangleCache[key] = entry;
+    }
+
+    device.queue.writeBuffer(entry.ubuf, 0,
+      new Float32Array([time, count, seed, 0.0]));
+
+    var encoder = device.createCommandEncoder();
+    var pass = encoder.beginComputePass();
+    pass.setPipeline(entry.pipeline);
+    pass.setBindGroup(0, entry.bind);
+    // Workgroup size is 64 in the shader; round up so the tail is covered,
+    // and the shader early-returns for indices past the count.
+    pass.dispatchWorkgroups(Math.ceil(count / 64));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -3;
+  }
+});
+
+// Draw straight from a GPU-resident buffer. Same shader and same pipeline
+// shape as js_gpu_draw_instances, minus the per-frame upload.
+EM_JS(int, js_gpu_draw_buffer, (int deviceId, int bufId, const char *wgslPtr, const char *canvasIdPtr, int instances, double time, double yaw, double pitch, double dist, double fov), {
+  var wgsl = UTF8ToString(wgslPtr);
+  var canvasId = UTF8ToString(canvasIdPtr);
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var buf = globalThis.vxsHandles.get(bufId);
+    if (!buf) { globalThis.vxsGpuError = "point buffer handle is not live"; return -2; }
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) { globalThis.vxsGpuError = "no canvas with id " + canvasId; return -3; }
+    var ctx = canvas.getContext('webgpu');
+    if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -4; }
+
+    globalThis.vxsBufDrawCache = globalThis.vxsBufDrawCache || {};
+    var key = canvasId + " " + bufId + " " + wgsl;
+    var entry = globalThis.vxsBufDrawCache[key];
+    if (!entry || entry.device !== device) {
+      var format = navigator.gpu.getPreferredCanvasFormat();
+      ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
+      var module = device.createShaderModule({ code: wgsl });
+      var bgl = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: 'uniform' } },
+          { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: 'read-only-storage' } }
+        ]
+      });
+      var pipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex:   { module: module, entryPoint: 'vs' },
+        fragment: { module: module, entryPoint: 'fs', targets: [{
+          format: format,
+          blend: {
+            color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' }
+          }
+        }] },
+        primitive: { topology: 'triangle-list' }
+      });
+      var ubuf = device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      var bind = device.createBindGroup({
+        layout: bgl,
+        entries: [
+          { binding: 0, resource: { buffer: ubuf } },
+          { binding: 1, resource: { buffer: buf } }
+        ]
+      });
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind };
+      globalThis.vxsBufDrawCache[key] = entry;
+    }
+
+    device.queue.writeBuffer(entry.ubuf, 0,
+      new Float32Array([time, canvas.width, canvas.height, instances,
+                        yaw, pitch, dist, fov]));
+
+    var encoder = device.createCommandEncoder();
+    var pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+        loadOp: 'clear',
+        storeOp: 'store'
+      }]
+    });
+    pass.setPipeline(entry.pipeline);
+    pass.setBindGroup(0, entry.bind);
+    pass.draw(6, instances);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -5;
+  }
+});
+
 EM_JS(char *, js_gpu_last_error, (), {
   var s = globalThis.vxsGpuError || "";
   var n = lengthBytesUTF8(s) + 1;
@@ -578,6 +752,9 @@ static void js_request_device(int, int) {}
 static int js_gpu_draw(int, const char *, const char *) { return -1; }
 static int js_gpu_run_kernel(int, const char *, const char *, double) { return -1; }
 static int js_gpu_draw_instances(int, const char *, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
+static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
+static int js_gpu_wrangle(int, int, const char *, int, double, double) { return -1; }
+static int js_gpu_draw_buffer(int, int, const char *, const char *, int, double, double, double, double, double) { return -1; }
 static char *js_gpu_last_error() { return nullptr; }
 #endif
 
@@ -735,6 +912,117 @@ static void register_wasm_primitives(VM &vm) {
       std::string detail = msg ? msg : "unknown";
       if (msg) std::free(msg);
       vm.raise_contract("gpu-draw-instances!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 6, 7));
+
+  // (gpu-buffer device bytes) -> handle
+  //
+  // Uploads once and keeps the data on the GPU. Everything else in this
+  // file re-uploads per frame, which is correct while the HOST is the
+  // producer; a compute wrangle is the producer instead, so re-uploading
+  // would both waste the transfer and discard what the last dispatch
+  // computed.
+  vm.def_global("gpu-buffer", vm.heap.make_subr("gpu-buffer", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0])) {
+      vm.raise_contract("gpu-buffer: expected a device handle, got " +
+                        vm.format_value(args[0]));
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-buffer: device handle was released");
+    ObjBytes *b = vm.require_bytes(args[1], "gpu-buffer");
+    if (!b) return Value::boolean_false();
+    int id = js_gpu_create_buffer(static_cast<int>(d->id), b->data.data(),
+                                  static_cast<int>(b->data.size()));
+    if (id < 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-buffer: " + detail);
+    }
+    return vm.heap.make_handle(static_cast<uint32_t>(id), vm.intern("gpu-buffer"));
+  }, 2, 2));
+
+  // (gpu-wrangle! device buffer wgsl count time [seed]) -> #t
+  // One compute dispatch over the buffer, in place.
+  vm.def_global("gpu-wrangle!", vm.heap.make_subr("gpu-wrangle!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0]) || !Heap::is_handle(args[1])) {
+      vm.raise_contract("gpu-wrangle!: expected (device buffer wgsl count time)");
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    ObjHandle *b = args[1].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-wrangle!: device handle was released");
+    if (b->released) vm.raise_contract("gpu-wrangle!: buffer handle was released");
+    if (!Heap::is_string(args[2])) {
+      vm.raise_contract("gpu-wrangle!: expected WGSL source as a string");
+    }
+    if (!args[3].is_int()) {
+      vm.raise_contract("gpu-wrangle!: expected an integer point count, got " +
+                        vm.format_value(args[3]));
+    }
+    double t = args[4].is_int() ? static_cast<double>(args[4].as_int())
+                                : args[4].as_double();
+    double seed = 0.0;
+    if (argc > 5) {
+      seed = args[5].is_int() ? static_cast<double>(args[5].as_int())
+                              : args[5].as_double();
+    }
+    std::string wgsl(args[2].as_ptr<ObjString>()->view());
+    int rc = js_gpu_wrangle(static_cast<int>(d->id), static_cast<int>(b->id),
+                            wgsl.c_str(), args[3].as_int(), t, seed);
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-wrangle!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 5, 6));
+
+  // (gpu-draw-buffer! device buffer wgsl count time camera [canvas-id]) -> #t
+  vm.def_global("gpu-draw-buffer!", vm.heap.make_subr("gpu-draw-buffer!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0]) || !Heap::is_handle(args[1])) {
+      vm.raise_contract("gpu-draw-buffer!: expected (device buffer wgsl count time camera)");
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    ObjHandle *b = args[1].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-draw-buffer!: device handle was released");
+    if (b->released) vm.raise_contract("gpu-draw-buffer!: buffer handle was released");
+    if (!Heap::is_string(args[2])) {
+      vm.raise_contract("gpu-draw-buffer!: expected WGSL source as a string");
+    }
+    if (!args[3].is_int()) {
+      vm.raise_contract("gpu-draw-buffer!: expected an integer instance count, got " +
+                        vm.format_value(args[3]));
+    }
+    double t = args[4].is_int() ? static_cast<double>(args[4].as_int())
+                                : args[4].as_double();
+    if (!Heap::is_vector(args[5]) || args[5].as_ptr<ObjVector>()->size < 4) {
+      vm.raise_contract("gpu-draw-buffer!: expected a 4-element camera vector "
+                        "(yaw pitch distance fov), got " + vm.format_value(args[5]));
+    }
+    ObjVector *cam = args[5].as_ptr<ObjVector>();
+    double camv[4];
+    for (int i = 0; i < 4; ++i) {
+      Value cv = cam->get(static_cast<uint32_t>(i));
+      if (!cv.is_int() && !cv.is_double()) {
+        vm.raise_contract("gpu-draw-buffer!: camera components must be numbers, got " +
+                          vm.format_value(cv));
+      }
+      camv[i] = cv.is_int() ? static_cast<double>(cv.as_int()) : cv.as_double();
+    }
+    std::string wgsl(args[2].as_ptr<ObjString>()->view());
+    std::string canvas_id = (argc > 6 && Heap::is_string(args[6]))
+        ? std::string(args[6].as_ptr<ObjString>()->view())
+        : std::string("gpu-canvas");
+    int rc = js_gpu_draw_buffer(static_cast<int>(d->id), static_cast<int>(b->id),
+                                wgsl.c_str(), canvas_id.c_str(), args[3].as_int(),
+                                t, camv[0], camv[1], camv[2], camv[3]);
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-draw-buffer!: " + detail);
     }
     return Value::boolean_true();
   }, 6, 7));

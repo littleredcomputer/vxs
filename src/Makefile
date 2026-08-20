@@ -36,7 +36,7 @@ endif
 # the table is evaluated until something loads it — only prelude.scm runs
 # at startup — so a library costs nothing until it is used. Kept as real
 # Scheme on disk so it can be edited and diffed, not as escaped C++.
-SCHEME_LIBS := $(wildcard ../lib/*.scm)
+SCHEME_LIBS := $(wildcard ../lib/*.scm) $(wildcard ../lib/*.wgsl)
 
 vx_embedded_libs.h: $(SCHEME_LIBS) embed_libs.sh
 	@echo "=== EMBEDDING lib/*.scm ==="
