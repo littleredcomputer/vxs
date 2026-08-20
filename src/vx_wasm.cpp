@@ -461,7 +461,7 @@ EM_JS(int, js_gpu_run_kernel, (int deviceId, const char *wgslPtr, const char *ca
 // Pipeline, uniform buffer and storage buffer are cached by (canvas,
 // source) exactly as js_gpu_run_kernel does. The storage buffer is
 // reallocated only when it needs to grow.
-EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char *canvasIdPtr, const unsigned char *dataPtr, int dataLen, int instances, double time), {
+EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char *canvasIdPtr, const unsigned char *dataPtr, int dataLen, int instances, double time, double yaw, double pitch, double dist, double fov), {
   var wgsl = UTF8ToString(wgslPtr);
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
@@ -505,7 +505,7 @@ EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char
         primitive: { topology: 'triangle-list' }
       });
       var ubuf = device.createBuffer({
-        size: 16,
+        size: 32,   // struct U: 8 floats — see lib/points.scm
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
       entry = { device: device, pipeline: pipeline, bgl: bgl, ubuf: ubuf,
@@ -532,8 +532,12 @@ EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char
       });
     }
 
+    // Field order is a contract with struct U in lib/points.scm. Nothing
+    // but layer 17 says so, and getting it wrong is silent: the shader
+    // would animate on canvas width, or orbit on the point count.
     device.queue.writeBuffer(entry.ubuf, 0,
-      new Float32Array([time, canvas.width, canvas.height, instances]));
+      new Float32Array([time, canvas.width, canvas.height, instances,
+                        yaw, pitch, dist, fov]));
     // Copy out of the wasm heap: writeBuffer on a view INTO the heap would
     // be reading memory the VM may move or reuse before the copy happens.
     device.queue.writeBuffer(entry.sbuf, 0,
@@ -573,7 +577,7 @@ static void js_request_adapter(int) {}
 static void js_request_device(int, int) {}
 static int js_gpu_draw(int, const char *, const char *) { return -1; }
 static int js_gpu_run_kernel(int, const char *, const char *, double) { return -1; }
-static int js_gpu_draw_instances(int, const char *, const char *, const unsigned char *, int, int, double) { return -1; }
+static int js_gpu_draw_instances(int, const char *, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
 static char *js_gpu_last_error() { return nullptr; }
 #endif
 
@@ -663,7 +667,11 @@ static void register_wasm_primitives(VM &vm) {
     return Value::boolean_true();
   }, 3, 4));
 
-  // (gpu-draw-instances! device wgsl bytes count time [canvas-id])
+  // (gpu-draw-instances! device wgsl bytes count time camera [canvas-id])
+  //
+  // `camera` is a 4-vector: yaw, pitch, distance, fov. Grouped into one
+  // argument rather than spread across four so that adding a fifth later
+  // does not change the arity of every call site.
   //
   // Uploads `bytes` as a storage buffer and draws `count` instances from
   // it. The whole buffer is re-uploaded per frame rather than mutated in
@@ -697,14 +705,31 @@ static void register_wasm_primitives(VM &vm) {
     }
     double t = args[4].is_int() ? static_cast<double>(args[4].as_int())
                                 : args[4].as_double();
+    if (!Heap::is_vector(args[5]) ||
+        args[5].as_ptr<ObjVector>()->size < 4) {
+      vm.raise_contract("gpu-draw-instances!: expected a 4-element camera "
+                        "vector (yaw pitch distance fov), got " +
+                        vm.format_value(args[5]));
+    }
+    ObjVector *cam = args[5].as_ptr<ObjVector>();
+    double camv[4];
+    for (int i = 0; i < 4; ++i) {
+      Value cv = cam->get(static_cast<uint32_t>(i));
+      if (!cv.is_int() && !cv.is_double()) {
+        vm.raise_contract("gpu-draw-instances!: camera components must be "
+                          "numbers, got " + vm.format_value(cv));
+      }
+      camv[i] = cv.is_int() ? static_cast<double>(cv.as_int()) : cv.as_double();
+    }
     std::string wgsl(args[1].as_ptr<ObjString>()->view());
-    std::string canvas_id = (argc > 5 && Heap::is_string(args[5]))
-        ? std::string(args[5].as_ptr<ObjString>()->view())
+    std::string canvas_id = (argc > 6 && Heap::is_string(args[6]))
+        ? std::string(args[6].as_ptr<ObjString>()->view())
         : std::string("gpu-canvas");
     int rc = js_gpu_draw_instances(static_cast<int>(d->id), wgsl.c_str(),
                                    canvas_id.c_str(), b->data.data(),
                                    static_cast<int>(b->data.size()),
-                                   instances, t);
+                                   instances, t,
+                                   camv[0], camv[1], camv[2], camv[3]);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -712,7 +737,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-draw-instances!: " + detail);
     }
     return Value::boolean_true();
-  }, 5, 6));
+  }, 6, 7));
 
   // (sleep ms) -> future. The first consumer of the external-future path,
   // and useful in its own right: a fiber can wait without blocking the

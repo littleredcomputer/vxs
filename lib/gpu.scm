@@ -48,17 +48,18 @@
               (begin (yield) (loop))
               (begin (display "kernel loop stopped.") (newline))))))))
 
-;; (run-points-loop bytes count update! [canvas-id]) -> future
+;; (run-points-loop bytes count update! camera [canvas-id]) -> future
 ;;
 ;; The instanced-points counterpart of run-kernel-loop. `update!` is called
 ;; with the time in seconds before each draw and is expected to write the
 ;; point buffer; passing a procedure that does nothing gives a static
-;; cloud.
+;; cloud. `camera` is a mutable 4-vector (see make-camera) — update! can
+;; orbit it in place, which is why it is a vector and not four arguments.
 ;;
 ;; update! runs INSIDE the guard, so a mistake in it is reported like a
 ;; failed draw rather than silently killing the fiber — which means it must
 ;; not yield, for the same reason the draw must not: guard cannot suspend.
-(define (run-points-loop bytes count update! . opts)
+(define (run-points-loop bytes count update! camera . opts)
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
@@ -72,7 +73,35 @@
                               (newline)
                               #f))
                   (update! t)
-                  (gpu-draw-instances! device points-wgsl bytes count t canvas)
+                  (gpu-draw-instances! device points-wgsl bytes count t
+                                       camera canvas)
                   #t)
                 (begin (yield) (loop))
                 (begin (display "point loop stopped.") (newline)))))))))
+
+;; (orbit-camera! camera) — drag to spin, called from inside update!.
+;;
+;; Reads the page's mouse primitives directly rather than taking events,
+;; because a fiber polls: there is nowhere to deliver an event TO. Keeps
+;; its own last-position state in a closure so the first frame of a drag
+;; does not jump.
+(define orbit-camera!
+  (let ((last-x 0.0) (last-y 0.0) (dragging #f))
+    (lambda (camera)
+      (let ((x (mouse-x)) (y (mouse-y)))
+        (if (mouse-down?)
+            (begin
+              (if dragging
+                  (begin
+                    (camera-yaw-set! camera
+                                     (+ (camera-yaw camera)
+                                        (* 0.01 (- x last-x))))
+                    (camera-pitch-set! camera
+                                       (max -1.5
+                                            (min 1.5
+                                                 (+ (camera-pitch camera)
+                                                    (* 0.01 (- y last-y))))))))
+              (set! dragging #t))
+            (set! dragging #f))
+        (set! last-x x)
+        (set! last-y y)))))

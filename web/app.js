@@ -75,15 +75,21 @@
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
 
-  // Mouse / Touch tracking on Canvas
-  canvas.addEventListener('mousemove', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    mouseX = e.clientX - rect.left;
-    mouseY = e.clientY - rect.top;
-    mouseCoords.textContent = `Mouse: (${Math.round(mouseX)}, ${Math.round(mouseY)})`;
-  });
-
-  canvas.addEventListener('mousedown', () => { isMouseDown = true; });
+  // Mouse / touch tracking, on BOTH surfaces. Only one canvas is visible at
+  // a time and a hidden element receives no pointer events, so listening
+  // only on the 2D canvas meant mouse-x/mouse-y froze for every GPU preset
+  // — which is exactly where dragging to orbit a camera is wanted.
+  function trackMouse(el) {
+    el.addEventListener('mousemove', (e) => {
+      const rect = el.getBoundingClientRect();
+      mouseX = e.clientX - rect.left;
+      mouseY = e.clientY - rect.top;
+      mouseCoords.textContent = `Mouse: (${Math.round(mouseX)}, ${Math.round(mouseY)})`;
+    });
+    el.addEventListener('mousedown', () => { isMouseDown = true; });
+  }
+  trackMouse(canvas);
+  trackMouse(gpuCanvas);
   window.addEventListener('mouseup', () => { isMouseDown = false; });
 
   // Expose Drawing Hooks to Wasm (via EM_JS in wasm_api.cpp)
@@ -310,72 +316,73 @@
 `,
 
     points: `;;; ==========================================================
-;;; GPU Instanced Points — Scheme fills a buffer, the GPU draws it
+;;; GPU Instanced Points — a cube of points in 3D. Drag to orbit.
 ;;; ==========================================================
-;;; A second harness. The plasma kernels draw ONE full-screen quad and
-;;; compute a colour per pixel; this draws one small quad per POINT and
-;;; reads each point's attributes from a storage buffer.
+;;; Scheme fills a buffer; the GPU draws one quad per point. Seven floats
+;;; each — x, y, z, size, r, g, b — flat rather than an array of structs,
+;;; because WGSL gives vec3<f32> a 16-byte alignment inside a storage
+;;; array and a struct would not pack the way these fields pack here.
 ;;;
-;;; The buffer is six floats per point — x, y, size, r, g, b — flat rather
-;;; than an array of structs. WGSL gives vec3<f32> a 16-byte alignment
-;;; inside a storage array, so a struct would not pack the way the same
-;;; fields pack here, and the mismatch is silent: points simply appear in
-;;; the wrong places.
+;;; The camera is PARAMETERS, not a matrix: yaw, pitch, distance and fov
+;;; ride in the uniform and the vertex shader rotates and projects. There
+;;; is no depth buffer either — additive blending is commutative, so a
+;;; glowing point cloud is order-independent and never needs sorting.
 ;;;
-;;; Scheme fills the buffer every frame. That is the point of this step:
-;;; the path host -> buffer -> GPU works before any compute pass exists.
-;;; Watch the obj/f and GC counters — this is the CPU cost that a compute
-;;; wrangle will later delete.
+;;; Scheme rewrites every point each frame. Watch the obj/f and GC
+;;; counters: that CPU cost is what a compute wrangle will delete.
 
 (load "lib/gpu.scm")
 (load "lib/threefry.scm")
 
-(define N 2000)
+(define SIDE 14)                       ; SIDE^3 points
+(define N (* SIDE SIDE SIDE))
 (define buf (make-points N))
 (define pts (points-view buf))
-
-;;; Threefry doing what a counter-based RNG is for: randomness indexed by
-;;; POINT NUMBER rather than drawn from a stream. No state, no ordering,
-;;; and the same cloud every run.
-;;;
-;;; One block is FOUR independent 32-bit words and a point needs exactly
-;;; four numbers, so this is one call per POINT — not one per attribute.
-;;; The obvious-looking version calls threefry4x32 once per attribute and
-;;; reads word 0 each time, throwing away three quarters of every block:
-;;; four times the work for the same randomness. Measured at 3.9x.
+(define cam (make-camera))
 (define key (vector 0 0 0 0))
 
-(define radius   (make-vector N 0.0))
-(define phase    (make-vector N 0.0))
-(define speed    (make-vector N 0.0))
-(define hue      (make-vector N 0.0))
+;;; Lattice position of point i, in -1..1 on each axis.
+(define (grid-coord i) (- (* 2.0 (/ i (- SIDE 1.0))) 1.0))
 
+;;; One Threefry block per point gives four independent randoms — jitter
+;;; on each axis plus a hue. Indexed by point number, so the cloud is
+;;; identical every run with no state and no ordering.
+(define jitter (make-vector (* N 4) 0.0))
 (let fill ((i 0))
   (if (< i N)
       (let ((r (threefry4x32-unit (vector i 0 0 0) key)))
-        (vector-set! radius i (* 0.85 (sqrt (vector-ref r 0))))
-        (vector-set! phase  i (* 6.2831 (vector-ref r 1)))
-        (vector-set! speed  i (+ 0.15 (* 0.9 (vector-ref r 2))))
-        (vector-set! hue    i (vector-ref r 3))
+        (vector-set! jitter (+ (* i 4) 0) (- (vector-ref r 0) 0.5))
+        (vector-set! jitter (+ (* i 4) 1) (- (vector-ref r 1) 0.5))
+        (vector-set! jitter (+ (* i 4) 2) (- (vector-ref r 2) 0.5))
+        (vector-set! jitter (+ (* i 4) 3) (vector-ref r 3))
         (fill (+ i 1)))))
 
 (define (update! t)
+  (orbit-camera! cam)
   (let loop ((i 0))
     (if (< i N)
-        (let* ((r (vector-ref radius i))
-               (a (+ (vector-ref phase i) (* t (vector-ref speed i))))
-               (h (vector-ref hue i))
-               (wob (+ 1.0 (* 0.12 (sin (+ (* 3.0 a) t))))))
+        (let* ((ix (modulo i SIDE))
+               (iy (modulo (quotient i SIDE) SIDE))
+               (iz (quotient i (* SIDE SIDE)))
+               (x0 (grid-coord ix))
+               (y0 (grid-coord iy))
+               (z0 (grid-coord iz))
+               (h  (vector-ref jitter (+ (* i 4) 3)))
+               ;; A cheap standing wave through the lattice — a placeholder
+               ;; for the noise field a compute wrangle will evaluate.
+               (w  (sin (+ (* 2.2 x0) (* 1.7 y0) (* 2.9 z0) t)))
+               (d  (* 0.16 w)))
           (point-set! pts i
-                      (* r wob (cos a))
-                      (* r wob (sin a))
-                      (+ 0.006 (* 0.012 h))
-                      (+ 0.25 (* 0.75 h))
-                      (+ 0.35 (* 0.45 (sin (+ a t))))
-                      (+ 0.55 (* 0.45 (cos (* 0.7 t)))))
+                      (+ x0 d (* 0.05 (vector-ref jitter (+ (* i 4) 0))))
+                      (+ y0 d (* 0.05 (vector-ref jitter (+ (* i 4) 1))))
+                      (+ z0 d (* 0.05 (vector-ref jitter (+ (* i 4) 2))))
+                      (+ 0.008 (* 0.010 h))
+                      (+ 0.30 (* 0.60 (* 0.5 (+ 1.0 w))))
+                      (+ 0.35 (* 0.45 h))
+                      (+ 0.55 (* 0.40 (- 1.0 (* 0.5 (+ 1.0 w))))))
           (loop (+ i 1))))))
 
-(run-points-loop buf N update! "vxs-gpu-canvas")
+(run-points-loop buf N update! cam "vxs-gpu-canvas")
 `,
 
     fibers: `;;; ==========================================================
