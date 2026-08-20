@@ -143,6 +143,26 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
           /malformed parameter list/.test(r), `got ${r}`);
   }
 
+  // Malformed BINDING names. All of let/let*/letrec funnel through
+  // parse_bindings, so one check covers the three; define and set! take
+  // names from elsewhere and are checked at their own sites. Each of these
+  // aborted the module before, via Value::as_symbol_id()'s assert.
+  {
+    const cases = [
+      ["(let ((1 2)) 3)",     /let: binding name must be a symbol/],
+      ["(let* ((1 2)) 3)",    /let\*: binding name must be a symbol/],
+      ["(letrec ((1 2)) 3)",  /letrec: binding name must be a symbol/],
+      ["(define (1) 2)",      /define: procedure name must be a symbol/],
+      ["(set!)",              /set!: expected \(set! name value\)/],
+      ["(set! 5 1)",          /set!: target must be a symbol/],
+      ["(make-vector -1)",    /make-vector: expected a non-negative length/],
+    ];
+    for (const [src, want] of cases) {
+      const r = ev(src);
+      check(`${src} reports rather than crashes`, want.test(r), `got ${r}`);
+    }
+  }
+
   {
     const r = ev('(+ 20 22)');
     check("the module still evaluates after a syntax error",

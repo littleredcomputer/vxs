@@ -2891,6 +2891,14 @@ void VM::init_primitives() {
   def_global("%bracket-vector", heap.make_subr("%bracket-vector", subr_vector, 0, UINT32_MAX));
 
   auto subr_make_vector = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    // The cast to uint32_t is why this needs a guard: (make-vector -1)
+    // became a request for 4294967295 elements, which does not fail — it
+    // hangs, allocating until the process dies. make-bytes already checked
+    // this; make-vector did not.
+    if (!args[0].is_int() || args[0].as_int() < 0) {
+      vm.raise_contract("make-vector: expected a non-negative length, got " +
+                        vm.format_value(args[0]));
+    }
     uint32_t size = static_cast<uint32_t>(args[0].as_int());
     Value fill = argc > 1 ? args[1] : Value::unspecified();
     return vm.heap.make_vector(size, fill);

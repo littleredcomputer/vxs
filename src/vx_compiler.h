@@ -322,6 +322,7 @@ private:
             // (define (fn args...) body...) => (define fn (lambda (args...)
             // body...))
             Value fn_name = Heap::car(target);
+            require_name(fn_name, "define", "procedure name");
             Value fn_args = Heap::cdr(target);
             uint32_t arity = 0;
             std::vector<UpvalueDesc> upvals;
@@ -337,10 +338,14 @@ private:
 
         // (set! var val)
         if (op_name == "set!") {
+          if (!Heap::is_cons(rest) || !Heap::is_cons(Heap::cdr(rest))) {
+            vm.raise_contract("set!: expected (set! name value)");
+          }
           Value var_sym = Heap::car(rest);
           Value val_expr = Heap::car(Heap::cdr(rest));
+          uint32_t name_id = require_name(var_sym, "set!", "target");
           compile_expr(val_expr, chunk, false);
-          std::string name = vm.get_symbol_name(var_sym.as_symbol_id());
+          std::string name = vm.get_symbol_name(name_id);
           int local = resolve_local(name);
           if (local != -1) {
             emit_op(OP_SET_LOCAL, static_cast<uint16_t>(local), chunk);
@@ -621,6 +626,7 @@ private:
             let_body = Heap::cdr(let_body);
 
             auto pairs = parse_bindings(bindings);
+            check_binding_names(pairs, "let");
             std::vector<Value> params;
             std::vector<Value> inits;
             for (const auto &p : pairs) {
@@ -677,6 +683,7 @@ private:
           // enclosing scope.
           if (!VXS_INLINE_LET_DISABLED && !body_starts_with_define(let_body)) {
             auto inline_pairs = parse_bindings(bindings);
+            check_binding_names(inline_pairs, "let");
 
             // 1. Initializers all evaluate in the OUTER scope — the new
             //    names must not be visible to them (parallel let).
@@ -754,6 +761,7 @@ private:
           // gets its own fresh scope for internal defines — see the `let`
           // comment above.
           auto pairs = parse_bindings(bindings);
+          check_binding_names(pairs, "letrec");
 
           Value let_sym = Value::from_symbol_id(vm.intern("let"));
           Value set_sym = Value::from_symbol_id(vm.intern("set!"));
@@ -931,6 +939,7 @@ private:
           Value let_sym = Value::from_symbol_id(vm.intern("let"));
 
           auto pairs = parse_bindings(bindings);
+          check_binding_names(pairs, "let*");
           if (pairs.empty()) {
             // (let () body...) — routes through the `let` handler above,
             // which opens a fresh scope for internal defines.
@@ -1439,6 +1448,34 @@ private:
       b = Heap::cdr(b);
     }
     return result;
+  }
+
+  // Every binding name reaching the compiler comes from SOURCE TEXT, and
+  // Value::as_symbol_id() asserts is_symbol(). Asserts are live in this
+  // build — CXXFLAGS carries no -DNDEBUG — so an unchecked name is not a
+  // check that fires in debug, it is a crash in the shipping binary, and
+  // in the browser it takes the whole wasm module down.
+  //
+  // let, let* and letrec all funnel through parse_bindings, so validating
+  // here covers all three; the callers that take a name from somewhere
+  // else (define, set!) use require_name below.
+  void check_binding_names(const std::vector<BindingPair> &pairs,
+                           const char *form) {
+    for (const auto &p : pairs) {
+      if (!p.var.is_symbol()) {
+        vm.raise_contract(std::string(form) +
+                          ": binding name must be a symbol, got " +
+                          vm.format_value(p.var));
+      }
+    }
+  }
+
+  uint32_t require_name(Value v, const char *form, const char *what) {
+    if (!v.is_symbol()) {
+      vm.raise_contract(std::string(form) + ": " + what +
+                        " must be a symbol, got " + vm.format_value(v));
+    }
+    return v.as_symbol_id();
   }
 
   // Shared by both quasiquoted (vector ...) forms and raw [...] vector
