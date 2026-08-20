@@ -596,6 +596,11 @@ public:
   inline Value make_bytes(size_t n) {
     ObjBytes *b = allocate<ObjBytes>(ObjBytes::Residency::Sealed);
     b->data.assign(n, 0);
+    // allocate() charged for an EMPTY ObjBytes, because that is what it
+    // was. Charge for the storage now that it exists, or a 1MB buffer
+    // registers as 1,248 bytes and the allocation-rate instrument reports
+    // a number with no relation to what was allocated.
+    note_extra_bytes(b->data.capacity());
     return Value::from_ptr(b);
   }
 
@@ -696,6 +701,14 @@ public:
   }
 
   // Tracking
+  // Storage an object took on after allocate() had already charged for it.
+  // Only the instantaneous and cumulative totals move; the object count
+  // does not, since no new object came into being.
+  inline void note_extra_bytes(size_t n) {
+    bytes_allocated += n;
+    total_bytes_allocated += n;
+  }
+
   size_t get_bytes_allocated() const { return bytes_allocated; }
   size_t get_gc_threshold() const { return gc_threshold; }
 

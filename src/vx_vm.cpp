@@ -358,20 +358,35 @@ void Heap::collect_garbage() {
 }
 
 size_t Heap::sweep() {
+  // bytes_allocated is RECOMPUTED from the survivors, not decremented per
+  // corpse. Subtracting was wrong for any object that grows after it is
+  // allocated: make_bytes allocates an empty ObjBytes and then sizes its
+  // vector, so allocation charged the header alone while the sweep credited
+  // back the header PLUS the data. One megabyte buffer added 1,248 bytes to
+  // the counter and removed 1,001,248 — and the counter is unsigned, so it
+  // wrapped. In the 32-bit wasm build that reads as a heap of about 4.19GB,
+  // which is how it was noticed. ObjMap had the same shape, its entries
+  // vector growing long after the object was created.
+  //
+  // Summing the survivors costs nothing: the sweep already walks every
+  // object. It also makes the figure EXACT after each collection rather
+  // than a running approximation that can only drift.
   size_t freed_count = 0;
+  size_t live_bytes = 0;
   Obj **cur = &head_obj;
   while (*cur) {
     Obj *obj = *cur;
     if (!obj->gc_mark) {
       *cur = obj->next_all;
-      bytes_allocated -= obj_allocated_size(obj);
       destroy_obj(obj);
       ++freed_count;
     } else {
       obj->gc_mark = false; // Reset mark for next cycle
+      live_bytes += obj_allocated_size(obj);
       cur = &obj->next_all;
     }
   }
+  bytes_allocated = live_bytes;
   return freed_count;
 }
 
