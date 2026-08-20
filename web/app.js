@@ -215,6 +215,35 @@
       // light, which is worse than none. Judge this against a baseline for
       // the same scene, not against a constant.
       tagAlloc.style.color = 'var(--text-secondary)';
+
+      // THE FPS NUMBER IS NOT THE ANIMATION RATE, and conflating them cost
+      // an afternoon: a demo visibly running at about ten frames a second
+      // sat under a chip reading 60 FPS. Both were true. requestAnimationFrame
+      // fires at 60Hz whether or not the program got anywhere, and the
+      // scheduler gives all fibers a shared ~8ms budget per call — so a
+      // fiber whose pass takes 27ms is preempted repeatedly and completes
+      // one update every fourth browser frame.
+      //
+      // The honest measure is how often a fiber reaches (yield), which is
+      // once per completed pass. An earlier attempt derived it as frames
+      // minus preemptions; that is wrong, and a headless run showed it
+      // immediately — a badly overrunning fiber is preempted on EVERY step
+      // call, so the estimate collapsed to zero while the fiber was in fact
+      // completing three passes.
+      const dYield = s.total_yields - lastStats.total_yields;
+      const scenePerSec = Math.round(dYield / dSec);
+      if (dYield > 0 && scenePerSec < currentFps - 5) {
+        tagFps.textContent = `${scenePerSec}/s scene · ${currentFps} FPS`;
+        tagFps.style.color = 'var(--accent-amber, #e0a030)';
+        tagFps.title =
+          'The browser is painting at ' + currentFps + ' FPS, but fibers are ' +
+          'overrunning the frame budget so the scene only advances ' +
+          scenePerSec + ' times a second.';
+      } else {
+        tagFps.textContent = `${currentFps} FPS`;
+        tagFps.style.color = '';
+        tagFps.title = '';
+      }
     }
     tagHeap.textContent =
       `${s.live_objects.toLocaleString()} live · ${(s.live_bytes / 1024).toFixed(0)} KB`;
@@ -229,6 +258,8 @@
     frameCount++;
     if (time - lastFrameTime >= 500) {
       currentFps = Math.round((frameCount * 1000) / (time - lastFrameTime));
+      // Text is set by updateHeapTelemetry just below, which also knows
+      // whether the scene is keeping up with the paint rate.
       tagFps.textContent = `${currentFps} FPS`;
       // Sample heap counters on the same half-second cadence as FPS —
       // often enough to be live, rare enough that JSON.parse never shows

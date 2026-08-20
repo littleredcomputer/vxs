@@ -704,6 +704,12 @@ public:
   // GPU page. The embedder drains this and reports.
   std::vector<std::string> fiber_errors;
 
+  // How many times a fiber has reached (yield). This — not the browser's
+  // frame rate — is how often a render loop actually completed a pass.
+  // requestAnimationFrame fires at 60Hz whether the program got anywhere or
+  // not, so an FPS reading says only that the browser is painting.
+  size_t total_yields = 0;
+
   // Futures awaiting something outside the VM, keyed by the token handed
   // to whoever will settle them.
   //

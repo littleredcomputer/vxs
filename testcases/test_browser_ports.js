@@ -251,6 +251,39 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
     wheel = 0;
   }
 
+  // --- the scene rate is yields, not frames ---------------------------
+  // requestAnimationFrame fires at 60Hz whether or not a program got
+  // anywhere, so an FPS reading says only that the browser is painting. A
+  // fiber whose pass overruns the ~8ms budget is preempted and finishes one
+  // pass every several frames — which is how a demo visibly running at ten
+  // frames a second sat under a chip reading 60.
+  //
+  // An earlier attempt derived the rate as frames minus preemptions. That
+  // is wrong: a badly overrunning fiber is preempted on EVERY step call, so
+  // the estimate collapses to zero while real passes are being completed.
+  // Counting yields is exact, and this test is what says so.
+  {
+    const stats = () => JSON.parse(M.ccall('vxs_stats_json', 'string', [], []));
+    const step = () => M.ccall('vxs_step_fibers', 'number', ['number'], [0]);
+    ev('(define yt-passes 0)');
+    ev('(define (yt-burn n) (let l ((i 0) (a 0.0)) (if (< i n) (l (+ i 1) (+ a (sqrt i))) a)))');
+    ev('(future (let loop () (yt-burn 400000) (set! yt-passes (+ yt-passes 1)) (yield) (loop)))');
+    const before = stats();
+    for (let i = 0; i < 40; i++) step();
+    const after = stats();
+    const yields = after.total_yields - before.total_yields;
+    const passes = parseInt(ev('yt-passes'));
+    const preempts = after.fibers_preempted_total - before.fibers_preempted_total;
+
+    check("yields counted equals passes completed", yields === passes,
+          `${yields} yields vs ${passes} passes`);
+    check("the fiber really did overrun the budget", preempts > 0, `${preempts}`);
+    check("and frames-minus-preemptions would have been wrong",
+          (40 - preempts) !== passes,
+          `40-${preempts} happened to equal ${passes}`);
+    M.ccall('vxs_clear_fibers', null, [], []);
+  }
+
   console.log("\n────────────────────────────────────────────────────────────────");
   console.log(`Browser host: ${total} | Passed: ${total - bad} | Failed: ${bad}`);
   console.log(bad ? "❌ BROWSER HOST TESTS FAILED" : "✨ BROWSER HOST TESTS PASSED ✨");

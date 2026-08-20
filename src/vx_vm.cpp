@@ -903,6 +903,7 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
       case OP_YIELD: {
         frame->ip = ip;
         f.state = Fiber::State::Suspended;
+        ++total_yields;
         return StepResult::Yielded;
       }
 

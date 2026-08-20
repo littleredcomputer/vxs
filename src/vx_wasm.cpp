@@ -1551,6 +1551,7 @@ const char *vxs_stats_json() {
       ",\"active_fibers\":" + std::to_string(g_vm->active_fibers.size()) +
       ",\"step_calls\":" + std::to_string(g_step_calls) +
       ",\"fibers_preempted_total\":" + std::to_string(g_preempt_total) +
+      ",\"total_yields\":" + std::to_string(g_vm->total_yields) +
       "}";
   return g_stats_buffer.c_str();
 }
