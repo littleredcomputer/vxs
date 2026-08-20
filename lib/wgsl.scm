@@ -366,6 +366,16 @@
                                                    (wgsl-code-of b) ")"))
                        (cdr rest)))))))
 
+    ;; A declared or defined function. Last, so a built-in of the same name
+    ;; always wins and no library can quietly redefine `sin`.
+    ((wgsl-signature op)
+     (let* ((sig (wgsl-signature op))
+            (rs (map (lambda (a) (wgsl a env)) args)))
+       (wgsl-check-args op sig rs)
+       (wgsl-result (cadddr sig) (wgsl-append-stmts rs)
+                    (string-append (cadr sig) "("
+                                   (wgsl-join (map wgsl-code-of rs) ", ") ")"))))
+
     (else (error 'wgsl "unknown operator in kernel:" op))))
 
 (define (wgsl-append-stmts rs)
@@ -375,6 +385,135 @@
   (cond ((null? strs) "")
         ((null? (cdr strs)) (car strs))
         (else (string-append (car strs) sep (wgsl-join (cdr strs) sep)))))
+
+;;--- callable functions -------------------------------------------------
+;;
+;; Two kinds, one table, and callers cannot tell them apart.
+;;
+;;   DECLARED  — a function hand-written in WGSL (lib/stat.wgsl and
+;;               friends). Its signature is asserted here, because nothing
+;;               can read it out of the WGSL text.
+;;   DEFINED   — a function written in this language by define-gpu. Its
+;;               argument types are declared, since nothing can infer
+;;               those, but its RESULT type is derived by the same checker
+;;               that checks everything else.
+;;
+;; The point of the second kind is that a mistake inside the function is
+;; caught when the function is defined, and a mistake at a call site is
+;; caught at the call. Neither reaches the WGSL compiler, which is the
+;; whole reason this is a type checker and not a template. Inlining the
+;; body at each call would have worked too, but it duplicates the code and
+;; type-checks it once per call site instead of once.
+;;
+;; Because they share a table, a function can start as hand-written WGSL
+;; and later be rewritten in Scheme without any caller changing.
+
+;; (scheme-name wgsl-name (arg-type ...) result-type)
+(define wgsl-signatures '())
+
+(define (wgsl-declare! name wgsl-name arg-types result-type)
+  (let loop ((xs wgsl-signatures) (acc '()) (found #f))
+    (cond ((null? xs)
+           (set! wgsl-signatures
+                 (reverse (if found acc
+                              (cons (list name wgsl-name arg-types result-type)
+                                    acc)))))
+          ((eq? (car (car xs)) name)
+           ;; Replace rather than shadow: watch mode re-runs a file on every
+           ;; save, and a table that only ever grows would accumulate a
+           ;; stale entry per save.
+           (loop (cdr xs) (cons (list name wgsl-name arg-types result-type) acc) #t))
+          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+
+(define (wgsl-signature name) (assq name wgsl-signatures))
+
+;; Scheme spells names with hyphens, WGSL with underscores.
+(define (wgsl-fn-name name)
+  (list->string (map (lambda (c) (if (char=? c #\-) #\_ c))
+                     (string->list (symbol->string name)))))
+
+(define (wgsl-check-args op sig rs)
+  (let ((want (caddr sig)))
+    (if (not (= (length rs) (length want)))
+        (error 'wgsl
+               (string-append "(" (symbol->string op) ") takes "
+                              (number->string (length want))
+                              " arguments, got")
+               (length rs)))
+    (let check ((got rs) (w want) (i 1))
+      (if (not (null? got))
+          (begin
+            (if (not (eq? (wgsl-type-of (car got)) (car w)))
+                (error 'wgsl
+                       (string-append "(" (symbol->string op) ") argument "
+                                      (number->string i) " must be "
+                                      (wgsl-type-name (car w)) ", got: "
+                                      (wgsl-type-name (wgsl-type-of (car got))))))
+            (check (cdr got) (cdr w) (+ i 1)))))))
+
+;;--- function definitions emitted into the module ------------------------
+;; Kept in DEFINITION ORDER, and a redefinition replaces in place rather
+;; than appending — both because watch mode re-runs a file on every save,
+;; and because a function must appear before the code that calls it.
+
+(define wgsl-definitions '())    ; ((name . source) ...) in emission order
+
+(define (wgsl-put-definition! name source)
+  (let loop ((xs wgsl-definitions) (acc '()) (found #f))
+    (cond ((null? xs)
+           (set! wgsl-definitions
+                 (reverse (if found acc (cons (cons name source) acc)))))
+          ((eq? (car (car xs)) name)
+           (loop (cdr xs) (cons (cons name source) acc) #t))
+          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+
+(define (wgsl-definitions-source)
+  (wgsl-join (map cdr wgsl-definitions) "\n"))
+
+(define (wgsl-forget-definitions!)
+  (set! wgsl-definitions '()))
+
+;; (wgsl-define-fn! name ((arg type) ...) body) — compile, derive the
+;; result type, emit a WGSL fn, and register the signature.
+(define (wgsl-define-fn! name params body)
+  (for-each
+   (lambda (p)
+     (if (or (not (pair? p)) (not (symbol? (car p)))
+             (not (pair? (cdr p))) (not (memq (cadr p) wgsl-types)))
+         (error 'wgsl
+                (string-append "define-gpu: each parameter must be "
+                               "(name type), got ")
+                p)))
+   params)
+  (let* ((env (map (lambda (p) (cons (car p) (cadr p))) params))
+         (r (wgsl-compile body env))
+         (ret (wgsl-type-of r))
+         (wname (wgsl-fn-name name))
+         (lines (append (wgsl-stmts-of r)
+                        (list (string-append "return " (wgsl-code-of r) ";")))))
+    (wgsl-put-definition!
+     name
+     (string-append
+      "fn " wname "("
+      (wgsl-join (map (lambda (p)
+                        (string-append (symbol->string (car p)) " : "
+                                       (wgsl-type-name (cadr p))))
+                      params)
+                 ", ")
+      ") -> " (wgsl-type-name ret) " {\n"
+      (wgsl-join (map (lambda (l) (string-append "  " l)) lines) "\n")
+      "\n}\n"))
+    (wgsl-declare! name wname (map cadr params) ret)
+    ret))
+
+;; (define-gpu (name (arg type) ...) body)
+;;
+;; A macro for the same reason define-kernel is one: the body is code in
+;; another language and must not be evaluated as Scheme. The result type is
+;; deliberately NOT declared — deriving it is what makes the signature
+;; honest rather than an assertion that could drift from the body.
+(defmacro (define-gpu spec body)
+  `(wgsl-define-fn! ',(car spec) ',(cdr spec) ',body))
 
 ;;--- entry points -------------------------------------------------------
 
