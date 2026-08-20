@@ -355,24 +355,36 @@
 `,
 
     wrangle: `;;; ==========================================================
-;;; Compute wrangle — the GPU rewrites the point buffer. Drag to orbit.
+;;; Particle sun — a compute wrangle over 60k points. Drag to orbit,
+;;; scroll to zoom.
 ;;; ==========================================================
 ;;; The host uploads the buffer ONCE and then never touches it. Each frame
 ;;; a compute dispatch rewrites every point in place, and the draw reads
-;;; the same buffer. Compare the obj/f and GC counters against the points
-;;; preset, which rewrites all of it in Scheme every frame.
+;;; the same buffer.
 ;;;
-;;; The kernel body is WGSL, deliberately: wiring lib/wgsl.scm in here is
-;;; what would force a decision about attribute syntax (@P and friends),
-;;; and that decision wants evidence from several real programs first.
+;;; TEMPERATURE IS THE POINT'S OWN LOG-DENSITY. Each point's position is
+;;; drawn from a normal, and logpdf_normal then asks how likely that
+;;; position was — so the colour is not a stand-in for "near the middle",
+;;; it IS the density of the distribution that produced the cloud. Dense
+;;; core runs white-hot, the sparse outskirts fade through orange to a dim
+;;; red. That is also the physical story for a star, which is why it reads
+;;; as one.
+;;;
+;;; A sampler alone gives you particles; a sampler plus its log-density
+;;; gives you weights. This picture is the second thing, used for colour
+;;; rather than for inference — but it is the same quantity.
+;;;
+;;; SIZE IS ALMOST FLAT, on purpose. Letting temperature drive size as
+;;; well as colour compounds under additive blending: the core gets more
+;;; points AND bigger ones, saturates to white, and swallows the structure.
+;;; Keeping size nearly constant lets DENSITY carry the information, which
+;;; is what the distribution actually determines.
 ;;;
 ;;; Randomness is Threefry, addressed by POINT NUMBER — the same generator
 ;;; lib/threefry.scm runs on the host, checked against the same published
-;;; vectors. Because a draw is a pure function of (index, seed) rather than
-;;; a position in a stream, re-running the kernel every frame reproduces
-;;; the identical cloud instead of making it flicker. That property is the
-;;; whole reason for choosing a counter-based RNG, and this is the first
-;;; place it is load-bearing.
+;;; vectors. A draw is a pure function of (index, seed) rather than a
+;;; position in a stream, so re-running the kernel every frame reproduces
+;;; the identical cloud instead of making it flicker.
 
 (load "lib/gpu.scm")
 
@@ -382,7 +394,7 @@
 
 (define kernel "
   // Three independent normals place the point; a gamma draw gives it an
-  // orbital speed, so the cloud shears rather than rotating rigidly.
+  // orbital offset, so the cloud shears rather than rotating rigidly.
   let x0 = random_normal(0.0, 0.34);
   let y0 = random_normal(0.0, 0.10);
   let z0 = random_normal(0.0, 0.34);
@@ -397,12 +409,25 @@
                     y0 * (1.0 + 0.25 * sin(w.time * 0.6 + g)),
                     x0 * sa + z0 * ca);
 
-  let heat = clamp(1.0 - r * 1.6, 0.0, 1.0);
-  let col = vec3<f32>(0.35 + 0.65 * heat,
-                      0.30 + 0.35 * fract(g),
-                      0.75 - 0.35 * heat);
+  // Temperature = joint log-density of this point's own position, under
+  // the very distribution that placed it. The y term dominates because
+  // its scale is smallest, which is what makes the disc read as a disc.
+  let lp = logpdf_normal(x0, 0.0, 0.34)
+         + logpdf_normal(y0, 0.0, 0.10)
+         + logpdf_normal(z0, 0.0, 0.34);
 
-  pt_write(i, p, 0.0035 + 0.0075 * heat, col);
+  // The band deliberately never reaches the top of the ramp. Under
+  // additive blending the dense core accumulates to white on its own, so
+  // a per-point colour that is ALREADY white there just saturates and
+  // flattens the structure — measured, a tighter band put everything
+  // within one standard deviation at full white, and one standard
+  // deviation is most of the cloud. Peaking at orange leaves the white to
+  // be earned by density.
+  //   mode  -> 0.58  orange       1 sigma -> 0.42  orange-red
+  //   2 sig -> 0.04  dim red      3 sigma -> 0.00  barely there
+  let temp = smoothstep(-6.0, 8.0, lp);
+
+  pt_write(i, p, 0.0030 + 0.0016 * temp, heat_colour(temp));
 ")
 
 (define wrangle-src (wrangle-wgsl kernel))
