@@ -23,31 +23,29 @@
 ;; Acquires the device and animates the kernel, one frame per yield, off
 ;; whatever driver is pumping the scheduler.
 ;;
-;; Three rules are encoded here so that no caller has to remember them:
+;; NOTHING HERE CATCHES. These loops used to wrap the draw in a guard that
+;; printed a message and stopped — and it was worse than useless, because
+;; `error-object-message` returns the error's TAG, not its text. A shader
+;; that failed to compile reported the single word "wgsl" and discarded the
+;; compile log underneath it.
 ;;
-;;   1. guard wraps ONLY the draw, never the yield. guard cannot suspend a
-;;      fiber, so yielding inside one kills it — and silently, which is the
-;;      worst version of that bug.
-;;   2. The awaits happen OUTSIDE any guard, for the same reason: touch
-;;      suspends.
-;;   3. A failing draw stops the loop instead of reporting the same error
-;;      sixty times a second.
+;; An uncaught error kills the fiber, which stops the loop just the same,
+;; and the scheduler now reports the death IN FULL to the page terminal. So
+;; removing the guard costs nothing and recovers the message. At this stage
+;; a failure that blasts through with everything attached beats a tidy one
+;; that has thrown the evidence away.
+;;
+;; The rule that still matters: the awaits sit outside any guard anyone
+;; might add later, because guard cannot suspend a fiber and `touch` does.
 (define (run-kernel-loop wgsl . opts)
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter))))
         (let loop ()
-          (if (guard (e (#t (display "kernel failed: ")
-                            (display (if (error-object? e)
-                                         (error-object-message e)
-                                         e))
-                            (newline)
-                            #f))
-                (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) canvas)
-                #t)
-              (begin (yield) (loop))
-              (begin (display "kernel loop stopped.") (newline))))))))
+          (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) canvas)
+          (yield)
+          (loop))))))
 
 ;; (run-points-loop bytes count update! camera [canvas-id]) -> future
 ;;
@@ -57,9 +55,9 @@
 ;; cloud. `camera` is a mutable 4-vector (see make-camera) — update! can
 ;; orbit it in place, which is why it is a vector and not four arguments.
 ;;
-;; update! runs INSIDE the guard, so a mistake in it is reported like a
-;; failed draw rather than silently killing the fiber — which means it must
-;; not yield, for the same reason the draw must not: guard cannot suspend.
+;; A mistake in update! kills the fiber, and the scheduler reports the death
+;; in full to the page terminal. That is on purpose — see the note at the
+;; top of this file about why nothing here catches.
 (define (run-points-loop bytes count update! camera . opts)
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
     (future
@@ -67,18 +65,10 @@
              (device  (touch (request-device adapter))))
         (let loop ()
           (let ((t (/ (current-time) 1000.0)))
-            (if (guard (e (#t (display "points failed: ")
-                              (display (if (error-object? e)
-                                           (error-object-message e)
-                                           e))
-                              (newline)
-                              #f))
-                  (update! t)
-                  (gpu-draw-instances! device points-wgsl bytes count t
-                                       camera canvas)
-                  #t)
-                (begin (yield) (loop))
-                (begin (display "point loop stopped.") (newline)))))))))
+            (update! t)
+            (gpu-draw-instances! device points-wgsl bytes count t camera canvas)
+            (yield)
+            (loop)))))))
 
 ;; (orbit-camera! camera) — drag to spin, called from inside update!.
 ;;
@@ -126,15 +116,8 @@
         (display "wrangle: buffer uploaded, dispatching.") (newline)
         (let loop ()
           (let ((t (/ (current-time) 1000.0)))
-            (if (guard (e (#t (display "wrangle failed: ")
-                              (display (if (error-object? e)
-                                           (error-object-message e)
-                                           e))
-                              (newline)
-                              #f))
-                  (frame! t)
-                  (gpu-wrangle! device buf wrangle-src count t 1)
-                  (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
-                  #t)
-                (begin (yield) (loop))
-                (begin (display "wrangle loop stopped.") (newline)))))))))
+            (frame! t)
+            (gpu-wrangle! device buf wrangle-src count t 1)
+            (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
+            (yield)
+            (loop)))))))
