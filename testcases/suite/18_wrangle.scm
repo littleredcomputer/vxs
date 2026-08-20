@@ -183,25 +183,25 @@
 ;; honest rather than an assertion that could drift from the body.
 
 (assert-equal "the stat library is declared"
-              '(random-normal "random_normal" (f32 f32) f32)
+              '(random-normal "random_normal" (:f32 :f32) :f32)
               (wgsl-signature 'random-normal))
 (assert-equal "so are the colour ramps"
-              '(heat-colour "heat_colour" (f32) vec3f)
+              '(heat-colour "heat_colour" (:f32) :vec3f)
               (wgsl-signature 'heat-colour))
 
-(define-gpu (test-falloff (r f32) (k f32))
+(define-gpu (test-falloff (r :f32) (k :f32))
   (/ 1.0 (+ 1.0 (* k r r))))
 
 (assert-equal "define-gpu derives the result type from the body"
-              '(test-falloff "test_falloff" (f32 f32) f32)
+              '(test-falloff "test_falloff" (:f32 :f32) :f32)
               (wgsl-signature 'test-falloff))
 
 ;; A defined function may call a declared one, and the result type follows
 ;; through. This is the composition that makes a library possible at all.
-(define-gpu (test-ember (r f32))
+(define-gpu (test-ember (r :f32))
   (heat-colour (test-falloff r 2.5)))
 (assert-equal "a defined function composing a declared one"
-              'vec3f (cadddr (wgsl-signature 'test-ember)))
+              :vec3f (cadddr (wgsl-signature 'test-ember)))
 
 (assert-true "it emits a real WGSL function"
              (string-contains? (wgsl-definitions-source)
@@ -213,9 +213,9 @@
                                "return (1.0 / (1.0 + ((k * r) * r)));"))
 
 ;; Call sites are checked against the derived signature.
-(define E7 '((v . vec3f) (s . f32)))
+(define E7 '((v . :vec3f) (s . :f32)))
 (define (rejects-call? e) (guard (c (#t #t)) (wgsl-code e E7) #f))
-(assert-equal "a well-typed call" 'f32 (wgsl-type '(test-falloff s s) E7))
+(assert-equal "a well-typed call" :f32 (wgsl-type '(test-falloff s s) E7))
 (assert-true "wrong argument type is rejected" (rejects-call? '(test-falloff v s)))
 (assert-true "too few arguments is rejected"   (rejects-call? '(test-falloff s)))
 (assert-true "too many arguments is rejected"  (rejects-call? '(test-falloff s s s)))
@@ -232,7 +232,7 @@
 ;; a file on every save, so a table that only grew would accumulate a stale
 ;; entry per keystroke.
 (define before-count (string-length (wgsl-definitions-source)))
-(define-gpu (test-falloff (r f32) (k f32))
+(define-gpu (test-falloff (r :f32) (k :f32))
   (/ 1.0 (+ 1.0 (* k r r))))
 (assert-equal "redefinition does not append a duplicate"
               before-count (string-length (wgsl-definitions-source)))
@@ -242,6 +242,6 @@
 ;; `w.time` in WGSL without the kernel language knowing what a struct is.
 (assert-equal "time is bound to the uniform field"
               "w.time" (wgsl-code 'time wrangle-env))
-(assert-equal "and carries its type" 'f32 (wgsl-type 'time wrangle-env))
+(assert-equal "and carries its type" :f32 (wgsl-type 'time wrangle-env))
 
 (suite-summary)

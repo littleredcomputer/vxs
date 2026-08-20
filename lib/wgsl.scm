@@ -31,24 +31,24 @@
 ;; rather than on a test.
 ;;----------------------------------------------------------------------
 
-(define wgsl-types '(f32 bool vec2f vec3f vec4f))
+(define wgsl-types '(:f32 :bool :vec2f :vec3f :vec4f))
 
 (define (wgsl-type-name t)
-  (cond ((eq? t 'f32)   "f32")
-        ((eq? t 'bool)  "bool")
-        ((eq? t 'vec2f) "vec2<f32>")
-        ((eq? t 'vec3f) "vec3<f32>")
-        ((eq? t 'vec4f) "vec4<f32>")
+  (cond ((eq? t :f32)   "f32")
+        ((eq? t :bool)  "bool")
+        ((eq? t :vec2f) "vec2<f32>")
+        ((eq? t :vec3f) "vec3<f32>")
+        ((eq? t :vec4f) "vec4<f32>")
         (else (error 'wgsl "unknown type:" t))))
 
 (define (wgsl-vec-width t)
-  (cond ((eq? t 'f32) 1) ((eq? t 'vec2f) 2)
-        ((eq? t 'vec3f) 3) ((eq? t 'vec4f) 4)
+  (cond ((eq? t :f32) 1) ((eq? t :vec2f) 2)
+        ((eq? t :vec3f) 3) ((eq? t :vec4f) 4)
         (else 0)))
 
 (define (wgsl-width->type n)
-  (cond ((= n 1) 'f32) ((= n 2) 'vec2f)
-        ((= n 3) 'vec3f) ((= n 4) 'vec4f)
+  (cond ((= n 1) :f32) ((= n 2) :vec2f)
+        ((= n 3) :vec3f) ((= n 4) :vec4f)
         (else (error 'wgsl "no vector type of width" n))))
 
 ;; A compiled expression: its type, the statements that must precede it,
@@ -72,7 +72,7 @@
 (define (wgsl-number n) (number->string (* 1.0 n)))
 
 ;; Returns (type . emitted-name). A caller's environment is written the
-;; obvious way, ((uv . vec2f) (time . f32)), where the WGSL name matches
+;; obvious way, ((uv . :vec2f) (time . :f32)), where the WGSL name matches
 ;; the Scheme name. A `let` binds (name type . fresh-name) instead,
 ;; because its WGSL name is numbered — and getting that wrong is silent:
 ;; the statement declares d_1 while the body still says d, which is either
@@ -108,12 +108,12 @@
 ;; The broadcast rule: identical types combine to themselves, and a scalar
 ;; combines with any vector to give that vector.
 (define (wgsl-arith-type op ta tb)
-  (if (or (eq? ta 'bool) (eq? tb 'bool))
+  (if (or (eq? ta :bool) (eq? tb :bool))
       (error 'wgsl (string-append "(" (symbol->string op)
                                   ") does not apply to bool")))
   (cond ((eq? ta tb) ta)
-        ((eq? ta 'f32) tb)
-        ((eq? tb 'f32) ta)
+        ((eq? ta :f32) tb)
+        ((eq? tb :f32) ta)
         (else (error 'wgsl
                      (string-append "type mismatch in (" (symbol->string op) "): "
                                     (wgsl-type-name ta) " and " (wgsl-type-name tb))))))
@@ -176,7 +176,7 @@
 
 (define (wgsl expr env)
   (cond
-    ((number? expr) (wgsl-result 'f32 '() (wgsl-number expr)))
+    ((number? expr) (wgsl-result :f32 '() (wgsl-number expr)))
     ((symbol? expr)
      (let ((tn (wgsl-lookup expr env)))
        (wgsl-result (car tn) '() (cdr tn))))
@@ -194,7 +194,7 @@
                                        (number->string want) " components, got")
                   (length rs)))
        (for-each (lambda (r)
-                   (if (not (eq? (wgsl-type-of r) 'f32))
+                   (if (not (eq? (wgsl-type-of r) :f32))
                        (error 'wgsl
                               (string-append (symbol->string op)
                                              " components must be f32, got:")
@@ -250,7 +250,7 @@
     ((eq? op 'dot)
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
        (wgsl-check-same 'dot (wgsl-type-of a) (wgsl-type-of b))
-       (wgsl-result 'f32 (wgsl-append-stmts (list a b))
+       (wgsl-result :f32 (wgsl-append-stmts (list a b))
                     (string-append "dot(" (wgsl-code-of a) ", " (wgsl-code-of b) ")"))))
 
     ;; (mix a b t) / (clamp x lo hi) / (smoothstep e0 e1 x)
@@ -264,7 +264,7 @@
        ;; must match the first.
        (wgsl-check-same op t0 (wgsl-type-of (cadr rs)))
        (let ((t2 (wgsl-type-of (caddr rs))))
-         (if (and (not (eq? t2 t0)) (not (eq? t2 'f32)))
+         (if (and (not (eq? t2 t0)) (not (eq? t2 :f32)))
              (error 'wgsl (string-append "(" (symbol->string op)
                                          ") third argument must be "
                                          (wgsl-type-name t0) " or f32, got:")
@@ -275,7 +275,7 @@
 
     ((assq op wgsl-vector-to-scalar)
      (let ((r (wgsl (car args) env)))
-       (wgsl-result 'f32 (wgsl-stmts-of r)
+       (wgsl-result :f32 (wgsl-stmts-of r)
                     (string-append (cdr (assq op wgsl-vector-to-scalar))
                                    "(" (wgsl-code-of r) ")"))))
 
@@ -297,32 +297,32 @@
     ;; else consumes one.
     ((memq op '(< > <= >= =))
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
-       (if (not (and (eq? (wgsl-type-of a) 'f32) (eq? (wgsl-type-of b) 'f32)))
+       (if (not (and (eq? (wgsl-type-of a) :f32) (eq? (wgsl-type-of b) :f32)))
            (error 'wgsl
                   (string-append "(" (symbol->string op)
                                  ") compares scalars, got: "
                                  (wgsl-type-name (wgsl-type-of a)) " and "
                                  (wgsl-type-name (wgsl-type-of b)))))
-       (wgsl-result 'bool (wgsl-append-stmts (list a b))
+       (wgsl-result :bool (wgsl-append-stmts (list a b))
                     (string-append "(" (wgsl-code-of a) " "
                                    (if (eq? op '=) "==" (symbol->string op))
                                    " " (wgsl-code-of b) ")"))))
 
     ((memq op '(and or))
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
-       (if (not (and (eq? (wgsl-type-of a) 'bool) (eq? (wgsl-type-of b) 'bool)))
+       (if (not (and (eq? (wgsl-type-of a) :bool) (eq? (wgsl-type-of b) :bool)))
            (error 'wgsl (string-append "(" (symbol->string op)
                                        ") needs bool operands")))
-       (wgsl-result 'bool (wgsl-append-stmts (list a b))
+       (wgsl-result :bool (wgsl-append-stmts (list a b))
                     (string-append "(" (wgsl-code-of a)
                                    (if (eq? op 'and) " && " " || ")
                                    (wgsl-code-of b) ")"))))
 
     ((eq? op 'not)
      (let ((a (wgsl (car args) env)))
-       (if (not (eq? (wgsl-type-of a) 'bool))
+       (if (not (eq? (wgsl-type-of a) :bool))
            (error 'wgsl "(not) needs a bool operand"))
-       (wgsl-result 'bool (wgsl-stmts-of a)
+       (wgsl-result :bool (wgsl-stmts-of a)
                     (string-append "!(" (wgsl-code-of a) ")"))))
 
     ;; (if c a b) compiles to WGSL select(b, a, c) — note the reversed
@@ -337,7 +337,7 @@
      (let ((c (wgsl (car args) env))
            (a (wgsl (cadr args) env))
            (b (wgsl (caddr args) env)))
-       (if (not (eq? (wgsl-type-of c) 'bool))
+       (if (not (eq? (wgsl-type-of c) :bool))
            (error 'wgsl (string-append "(if) needs a bool condition, got: "
                                        (wgsl-type-name (wgsl-type-of c)))))
        (wgsl-check-same 'if (wgsl-type-of a) (wgsl-type-of b))

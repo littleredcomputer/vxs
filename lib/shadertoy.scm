@@ -28,7 +28,7 @@
 (load "lib/wgsl.scm")
 
 ;; What a Shadertoy-shaped kernel may refer to.
-(define shadertoy-env '((uv . vec2f) (time . f32) (res . vec2f)))
+(define shadertoy-env '((uv . :vec2f) (time . :f32) (res . :vec2f)))
 
 ;; The uniform block. Padded to 16 bytes because WGSL uniform buffers
 ;; require it; the host writes the same four floats in this order.
@@ -74,7 +74,7 @@
 ;; `body` is a lib/wgsl.scm expression returning vec3f.
 (define (shadertoy body)
   (let ((compiled (wgsl-compile body shadertoy-env)))
-    (if (not (eq? (wgsl-type-of compiled) 'vec3f))
+    (if (not (eq? (wgsl-type-of compiled) :vec3f))
         (error 'shadertoy
                (string-append "kernel must return vec3<f32>, got: "
                               (wgsl-type-name (wgsl-type-of compiled)))))
