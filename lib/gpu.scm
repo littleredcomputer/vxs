@@ -70,16 +70,35 @@
             (yield)
             (loop)))))))
 
-;; (orbit-camera! camera) — drag to spin, called from inside update!.
+;; (make-orbiter) -> (lambda (camera) ...) — drag to spin, scroll to zoom.
+;;
+;; A FACTORY rather than one shared procedure, because the last-position
+;; and last-wheel state has to belong to the orbiter. A single shared
+;; closure appears to work with one camera and silently breaks with two:
+;; the first call consumes the wheel delta and the second sees zero, so the
+;; second camera never zooms and nothing says why. orbit-camera! below is
+;; just the instance most programs want.
 ;;
 ;; Reads the page's mouse primitives directly rather than taking events,
-;; because a fiber polls: there is nowhere to deliver an event TO. Keeps
-;; its own last-position state in a closure so the first frame of a drag
-;; does not jump.
-(define orbit-camera!
-  (let ((last-x 0.0) (last-y 0.0) (dragging #f))
+;; because a fiber polls: there is nowhere to deliver an event TO. Keeps its
+;; own last-position and last-wheel state in a closure, and on the first
+;; call after a gap only RECORDS them — otherwise the first frame of a drag
+;; would jump by however far the pointer had travelled since last time, and
+;; the first frame after loading would zoom by however much the page had
+;; been scrolled before the program started.
+;;
+;; Zoom is multiplicative. Additive zoom crawls when you are far away and
+;; slams into the origin when you are close; scaling by exp(k * scroll)
+;; makes a notch of the wheel cover the same PROPORTION of the distance
+;; wherever you happen to be.
+(define (make-orbiter)
+  (let ((last-x 0.0) (last-y 0.0) (last-wheel 0.0)
+        (dragging #f) (started #f))
     (lambda (camera)
-      (let ((x (mouse-x)) (y (mouse-y)))
+      (let ((x (mouse-x)) (y (mouse-y)) (wheel (mouse-wheel)))
+        (if (not started)
+            (begin (set! last-wheel wheel) (set! started #t)))
+        ;; --- drag to orbit ---
         (if (mouse-down?)
             (begin
               (if dragging
@@ -87,6 +106,9 @@
                     (camera-yaw-set! camera
                                      (+ (camera-yaw camera)
                                         (* 0.01 (- x last-x))))
+                    ;; Pitch is clamped just shy of straight up or down:
+                    ;; at exactly +/- pi/2 the yaw axis and the view axis
+                    ;; line up and the orbit loses a degree of freedom.
                     (camera-pitch-set! camera
                                        (max -1.5
                                             (min 1.5
@@ -94,30 +116,17 @@
                                                     (* 0.01 (- y last-y))))))))
               (set! dragging #t))
             (set! dragging #f))
+        ;; --- scroll to zoom ---
+        (let ((dw (- wheel last-wheel)))
+          (if (not (= dw 0.0))
+              (camera-distance-set!
+               camera
+               (max 0.35
+                    (min 24.0
+                         (* (camera-distance camera) (exp (* 0.0014 dw))))))))
         (set! last-x x)
-        (set! last-y y)))))
+        (set! last-y y)
+        (set! last-wheel wheel)))))
 
-;; (run-wrangle-loop device-less: buf count wrangle-src update-camera! camera [canvas])
-;;
-;; The GPU-resident counterpart of run-points-loop. The point data lives in
-;; a GPU buffer, a compute dispatch rewrites it, and the draw reads it — the
-;; host touches none of it per frame. `seed-bytes` seeds the buffer once at
-;; the start, which is the only upload that happens.
-;;
-;; `frame!` is called with the time before each dispatch and exists for
-;; whatever the host still owns — orbiting the camera, mostly. It is not
-;; where point work belongs any more.
-(define (run-wrangle-loop seed-bytes count wrangle-src frame! camera . opts)
-  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
-    (future
-      (let* ((adapter (touch (request-adapter)))
-             (device  (touch (request-device adapter)))
-             (buf     (gpu-buffer device seed-bytes)))
-        (display "wrangle: buffer uploaded, dispatching.") (newline)
-        (let loop ()
-          (let ((t (/ (current-time) 1000.0)))
-            (frame! t)
-            (gpu-wrangle! device buf wrangle-src count t 1)
-            (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
-            (yield)
-            (loop)))))))
+;; The orbiter most programs want. Two viewports want two orbiters.
+(define orbit-camera! (make-orbiter))

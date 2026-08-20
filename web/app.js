@@ -55,6 +55,7 @@
   let mouseX = 400;
   let mouseY = 300;
   let isMouseDown = false;
+  let wheelTotal = 0;
 
   // FPS Telemetry
   let lastFrameTime = performance.now();
@@ -87,6 +88,12 @@
       mouseCoords.textContent = `Mouse: (${Math.round(mouseX)}, ${Math.round(mouseY)})`;
     });
     el.addEventListener('mousedown', () => { isMouseDown = true; });
+    // passive:false so preventDefault actually applies — otherwise the
+    // page scrolls away underneath while you are zooming the scene.
+    el.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      wheelTotal += e.deltaY;
+    }, { passive: false });
   }
   trackMouse(canvas);
   trackMouse(gpuCanvas);
@@ -130,6 +137,7 @@
   window.vxsMouseX = function() { return mouseX; };
   window.vxsMouseY = function() { return mouseY; };
   window.vxsMouseDown = function() { return isMouseDown ? 1 : 0; };
+  window.vxsMouseWheel = function() { return wheelTotal; };
   // One call per COMPLETE LINE, buffered by the sink port in the VM — so
   // one div per line is now correct. It used to be one div per `display`
   // call, which split `(display "x = ") (display 42)` across two lines.
