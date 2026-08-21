@@ -72,9 +72,16 @@ from the REPO ROOT rather than `web/`, so that `lib/` and `demos/` are
 reachable alongside the page:
 
 ```sh
-python3 -m http.server
+python3 serve.py
 # then open http://localhost:8000/web/index.html
 ```
+
+`serve.py` is `python3 -m http.server` with caching turned off. That
+matters more than it sounds: a cached `app.js` presents as a preset that
+silently does nothing, and a cached `vxs.wasm` is worse — the page loads,
+the Scheme runs, and a primitive added in the last build is simply absent.
+Safari is the most aggressive about it, and its hard-reload chord is
+Cmd-Option-R rather than the Cmd-Shift-R everything else uses.
 
 ### Watch mode
 

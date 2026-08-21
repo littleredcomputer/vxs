@@ -797,8 +797,10 @@
       // explain it. In practice this means index.html reloaded while
       // app.js came from cache, so the dropdown offers an option this
       // script has never heard of.
-      logToTerm(`No preset named "${val}" in this script — app.js is probably ` +
-                `cached. Reload with cache disabled (Cmd-Shift-R).`, 'err');
+      logToTerm(`No preset named "${val}" in this script — app.js is stale, ` +
+                `almost certainly cached. Serve with "python3 serve.py" from ` +
+                `the repo root, which disables caching. To force it now: ` +
+                `Cmd-Option-R in Safari, Cmd-Shift-R elsewhere.`, 'err');
       return;
     }
     logToTerm(`\n--- Loaded preset: [${selectPreset.options[selectPreset.selectedIndex].text}] ---`, 'meta');
