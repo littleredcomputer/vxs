@@ -21,6 +21,7 @@
 ;;----------------------------------------------------------------------
 
 (load "lib/points.scm")
+(load "lib/colour.scm")
 
 ;; (make-point-pool capacity) -> pool
 ;; A pool is (bytes view free-list live-count capacity).
@@ -65,3 +66,31 @@
 ;; (pool-write! pool i x y z size r g b) — an actor writing its own point.
 (define (pool-write! p i x y z size r g b)
   (point-set! (pool-view p) i x y z size r g b))
+
+;; (pool-write-heat! pool i x y z size t) — write a point coloured by the
+;; heat ramp at t, where 1 is white-hot and 0 is a dim violet.
+;;
+;; One call rather than three heat-ref calls, because the segment lookup
+;; costs more than the interpolation and doing it per channel tripled it —
+;; measured at 3.15ms to 5.57ms per step across five hundred actors, which
+;; is most of a frame budget for nothing.
+;;
+;; The obvious alternative, a shared scratch vector filled by one call and
+;; read by three, would be WRONG here and quietly so: a fiber can be
+;; preempted between any two operations, so another actor could overwrite
+;; the scratch between the write and the reads. Shared mutable temporaries
+;; and preemptible fibers do not mix.
+(define (pool-write-heat! p i x y z size t)
+  (let* ((u (max 0.0 (min 1.0 t)))
+         (s (* u 4.0))
+         (k (min 3 (inexact->exact (floor s))))
+         (f (- s k))
+         (b0 (* k 3))
+         (b1 (+ b0 3))
+         (r0 (vector-ref heat-stops b0))
+         (g0 (vector-ref heat-stops (+ b0 1)))
+         (c0 (vector-ref heat-stops (+ b0 2))))
+    (point-set! (pool-view p) i x y z size
+                (+ r0 (* (- (vector-ref heat-stops b1) r0) f))
+                (+ g0 (* (- (vector-ref heat-stops (+ b1 1)) g0) f))
+                (+ c0 (* (- (vector-ref heat-stops (+ b1 2)) c0) f)))))
