@@ -402,6 +402,8 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
   f.parent_fiber = current_fiber;
   current_fiber = &f;
   f.state = Fiber::State::Running;
+  const size_t entry_temp_roots = temp_roots.size();
+  const size_t entry_temp_obj_roots = temp_obj_roots.size();
 
   struct FiberGuard {
     VM &vm;
@@ -441,6 +443,10 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
     // Cleanups still run first, exactly as on the StepResult::Error path
     // above — an uncaught error must not leave with-output-to-file's
     // redirection in place.
+    // Same obligation as the escape catches in the guard subrs: unwinding
+    // skipped every pop_temp_root between the throw and here.
+    truncate_temp_roots(entry_temp_roots);
+    truncate_temp_obj_roots(entry_temp_obj_roots);
     run_pending_winders(f, 0);
     f.state = Fiber::State::Error;
     f.error_message = e.what();
@@ -449,6 +455,8 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
     // An escape targeting nothing in this fiber (invoked outside its
     // dynamic extent) is leaving the VM entirely — run the cleanups on
     // its way through, then let it surface as the usual top-level error.
+    truncate_temp_roots(entry_temp_roots);
+    truncate_temp_obj_roots(entry_temp_obj_roots);
     run_pending_winders(f, 0);
     throw;
   }
@@ -4056,6 +4064,11 @@ void VM::init_primitives() {
     size_t saved_stack_size = f ? f->stack.size() : 0;
     size_t saved_frames_size = f ? f->frames.size() : 0;
     size_t saved_winders_size = f ? f->winders.size() : 0;
+    // See truncate_temp_roots: unwinding skips every pop_temp_root between
+    // the throw and here, and each skipped one leaves the collector a
+    // pointer to a dead stack local.
+    size_t saved_temp_roots = vm.temp_roots.size();
+    size_t saved_temp_obj_roots = vm.temp_obj_roots.size();
 
     try {
       if (Heap::is_closure(proc)) {
@@ -4073,6 +4086,11 @@ void VM::init_primitives() {
       // would be invisible to the collector. escape_value is an ordinary
       // local instead, protected the ordinary way.
       Value escape_value = e.value;
+      // Truncate FIRST, then root the value being carried out: rooting it
+      // before would push it above the dead entries and the truncation
+      // would drop it again.
+      vm.truncate_temp_roots(saved_temp_roots);
+      vm.truncate_temp_obj_roots(saved_temp_obj_roots);
       vm.push_temp_root(&escape_value);
       if (f) {
         f->stack.resize(saved_stack_size);
@@ -4109,6 +4127,11 @@ void VM::init_primitives() {
     size_t saved_stack_size = f ? f->stack.size() : 0;
     size_t saved_frames_size = f ? f->frames.size() : 0;
     size_t saved_winders_size = f ? f->winders.size() : 0;
+    // See truncate_temp_roots: unwinding skips every pop_temp_root between
+    // the throw and here, and each skipped one leaves the collector a
+    // pointer to a dead stack local.
+    size_t saved_temp_roots = vm.temp_roots.size();
+    size_t saved_temp_obj_roots = vm.temp_obj_roots.size();
 
     try {
       if (Heap::is_closure(thunk)) {
@@ -4121,6 +4144,8 @@ void VM::init_primitives() {
       Value raised = vm.in_flight_raises.back();
       vm.in_flight_raises.pop_back();
       vm.push_temp_root(&raised);
+      vm.truncate_temp_roots(saved_temp_roots);
+      vm.truncate_temp_obj_roots(saved_temp_obj_roots);
       if (f) {
         f->stack.resize(saved_stack_size);
         f->frames.resize(saved_frames_size);
