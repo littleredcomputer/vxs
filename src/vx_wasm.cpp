@@ -747,6 +747,147 @@ EM_JS(int, js_gpu_draw_buffer, (int deviceId, int bufId, const char *wgslPtr, co
   }
 });
 
+// Push host bytes into a GPU-resident buffer.
+//
+// gpu-buffer uploads once, which is right when a compute pass is the
+// producer. When the HOST is the producer — actors writing their own
+// points — the buffer has to be refreshed each frame, and this is that
+// refresh. The alternative, a draw call that takes bytes and uploads them
+// itself, would have tied the upload to the draw and made it impossible to
+// write once and draw twice.
+EM_JS(int, js_gpu_buffer_write, (int deviceId, int bufId, const unsigned char *dataPtr, int dataLen), {
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var buf = globalThis.vxsHandles.get(bufId);
+    if (!buf) { globalThis.vxsGpuError = "buffer handle is not live"; return -2; }
+    if (dataLen > 0) {
+      // Copy out of the wasm heap: writeBuffer on a view INTO it would be
+      // reading memory the VM may move or reuse before the copy happens.
+      device.queue.writeBuffer(buf, 0,
+        new Uint8Array(HEAPU8.subarray(dataPtr, dataPtr + dataLen)));
+    }
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -3;
+  }
+});
+
+// Instanced GEOMETRY, as opposed to instanced sprites.
+//
+// Separate from js_gpu_draw_buffer rather than a mode flag on it, because
+// almost every piece of pipeline state differs: depth testing instead of
+// additive blending, a depth attachment, no blend state, and a vertex
+// count that comes from the caller. Sharing them behind a boolean would
+// have made both harder to read for no saving.
+//
+// The depth texture is cached with the pipeline and rebuilt when the
+// canvas resizes — a stale one would silently reject every fragment once
+// the window grew.
+EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, const char *wgslPtr, const char *canvasIdPtr, int vertsPerInstance, int instances, double time, double yaw, double pitch, double dist, double fov), {
+  var wgsl = UTF8ToString(wgslPtr);
+  var canvasId = UTF8ToString(canvasIdPtr);
+  globalThis.vxsGpuError = "";
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
+    var buf = globalThis.vxsHandles.get(bufId);
+    if (!buf) { globalThis.vxsGpuError = "point buffer handle is not live"; return -2; }
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) { globalThis.vxsGpuError = "no canvas with id " + canvasId; return -3; }
+    var ctx = canvas.getContext('webgpu');
+    if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -4; }
+
+    globalThis.vxsGeomCache = globalThis.vxsGeomCache || {};
+    var key = canvasId + " " + bufId + " " + wgsl;
+    var entry = globalThis.vxsGeomCache[key];
+    if (!entry || entry.device !== device) {
+      var format = navigator.gpu.getPreferredCanvasFormat();
+      ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
+      var module = device.createShaderModule({ code: wgsl });
+      var bgl = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: 'uniform' } },
+          { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: 'read-only-storage' } }
+        ]
+      });
+      var pipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+        vertex:   { module: module, entryPoint: 'vs' },
+        // No blending: solid geometry occludes rather than accumulating.
+        fragment: { module: module, entryPoint: 'fs', targets: [{ format: format }] },
+        // cullMode 'none' deliberately. Back faces cost fragments we do not
+        // need, but a winding mistake with culling on makes cubes vanish
+        // instead of merely being slower — the wrong failure to risk first.
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        depthStencil: {
+          format: 'depth24plus',
+          depthWriteEnabled: true,
+          depthCompare: 'less'
+        }
+      });
+      var ubuf = device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      var bind = device.createBindGroup({
+        layout: bgl,
+        entries: [
+          { binding: 0, resource: { buffer: ubuf } },
+          { binding: 1, resource: { buffer: buf } }
+        ]
+      });
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind,
+                depth: null, depthW: 0, depthH: 0 };
+      globalThis.vxsGeomCache[key] = entry;
+    }
+
+    if (!entry.depth || entry.depthW !== canvas.width || entry.depthH !== canvas.height) {
+      if (entry.depth) entry.depth.destroy();
+      entry.depth = device.createTexture({
+        size: [canvas.width, canvas.height],
+        format: 'depth24plus',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      entry.depthW = canvas.width;
+      entry.depthH = canvas.height;
+    }
+
+    device.queue.writeBuffer(entry.ubuf, 0,
+      new Float32Array([time, canvas.width, canvas.height, instances,
+                        yaw, pitch, dist, fov]));
+
+    var encoder = device.createCommandEncoder();
+    var pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0.02, g: 0.025, b: 0.04, a: 1.0 },
+        loadOp: 'clear',
+        storeOp: 'store'
+      }],
+      depthStencilAttachment: {
+        view: entry.depth.createView(),
+        depthClearValue: 1.0,
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store'
+      }
+    });
+    pass.setPipeline(entry.pipeline);
+    pass.setBindGroup(0, entry.bind);
+    pass.draw(vertsPerInstance, instances);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return 0;
+  } catch (e) {
+    globalThis.vxsGpuError = String(e && e.message ? e.message : e);
+    return -5;
+  }
+});
+
 EM_JS(char *, js_gpu_last_error, (), {
   var s = globalThis.vxsGpuError || "";
   var n = lengthBytesUTF8(s) + 1;
@@ -764,6 +905,8 @@ static int js_gpu_draw_instances(int, const char *, const char *, const unsigned
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
 static int js_gpu_wrangle(int, int, const char *, int, double, double) { return -1; }
 static int js_gpu_draw_buffer(int, int, const char *, const char *, int, double, double, double, double, double) { return -1; }
+static int js_gpu_draw_geometry(int, int, const char *, const char *, int, int, double, double, double, double, double) { return -1; }
+static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
 static char *js_gpu_last_error() { return nullptr; }
 #endif
 
@@ -1035,6 +1178,88 @@ static void register_wasm_primitives(VM &vm) {
     }
     return Value::boolean_true();
   }, 6, 7));
+
+  // (gpu-buffer-write! device buffer bytes) -> #t
+  // Refresh a GPU-resident buffer from the host copy.
+  vm.def_global("gpu-buffer-write!", vm.heap.make_subr("gpu-buffer-write!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_handle(args[0]) || !Heap::is_handle(args[1])) {
+      vm.raise_contract("gpu-buffer-write!: expected (device buffer bytes)");
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    ObjHandle *b = args[1].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-buffer-write!: device handle was released");
+    if (b->released) vm.raise_contract("gpu-buffer-write!: buffer handle was released");
+    ObjBytes *bytes = vm.require_bytes(args[2], "gpu-buffer-write!");
+    if (!bytes) return Value::boolean_false();
+    int rc = js_gpu_buffer_write(static_cast<int>(d->id), static_cast<int>(b->id),
+                                 bytes->data.data(),
+                                 static_cast<int>(bytes->data.size()));
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-buffer-write!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 3, 3));
+
+  // (gpu-draw-geometry! device buffer wgsl verts-per-instance count time
+  //                      camera [canvas-id]) -> #t
+  //
+  // Instanced geometry: depth-tested and opaque, where gpu-draw-buffer! is
+  // additive and depth-free. Sprites accumulate and order does not matter;
+  // solid geometry occludes, and occlusion is order-dependent.
+  vm.def_global("gpu-draw-geometry!", vm.heap.make_subr("gpu-draw-geometry!", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0]) || !Heap::is_handle(args[1])) {
+      vm.raise_contract("gpu-draw-geometry!: expected (device buffer wgsl verts count time camera)");
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    ObjHandle *b = args[1].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-draw-geometry!: device handle was released");
+    if (b->released) vm.raise_contract("gpu-draw-geometry!: buffer handle was released");
+    if (!Heap::is_string(args[2])) {
+      vm.raise_contract("gpu-draw-geometry!: expected WGSL source as a string");
+    }
+    if (!args[3].is_int() || args[3].as_int() <= 0) {
+      vm.raise_contract("gpu-draw-geometry!: expected a positive vertex count, got " +
+                        vm.format_value(args[3]));
+    }
+    if (!args[4].is_int() || args[4].as_int() < 0) {
+      vm.raise_contract("gpu-draw-geometry!: expected a non-negative instance count, got " +
+                        vm.format_value(args[4]));
+    }
+    double t = args[5].is_int() ? static_cast<double>(args[5].as_int())
+                                : args[5].as_double();
+    if (!Heap::is_vector(args[6]) || args[6].as_ptr<ObjVector>()->size < 4) {
+      vm.raise_contract("gpu-draw-geometry!: expected a 4-element camera vector "
+                        "(yaw pitch distance fov), got " + vm.format_value(args[6]));
+    }
+    ObjVector *cam = args[6].as_ptr<ObjVector>();
+    double camv[4];
+    for (int i = 0; i < 4; ++i) {
+      Value cv = cam->get(static_cast<uint32_t>(i));
+      if (!cv.is_int() && !cv.is_double()) {
+        vm.raise_contract("gpu-draw-geometry!: camera components must be numbers, got " +
+                          vm.format_value(cv));
+      }
+      camv[i] = cv.is_int() ? static_cast<double>(cv.as_int()) : cv.as_double();
+    }
+    std::string wgsl(args[2].as_ptr<ObjString>()->view());
+    std::string canvas_id = (argc > 7 && Heap::is_string(args[7]))
+        ? std::string(args[7].as_ptr<ObjString>()->view())
+        : std::string("gpu-canvas");
+    int rc = js_gpu_draw_geometry(static_cast<int>(d->id), static_cast<int>(b->id),
+                                  wgsl.c_str(), canvas_id.c_str(),
+                                  args[3].as_int(), args[4].as_int(), t,
+                                  camv[0], camv[1], camv[2], camv[3]);
+    if (rc != 0) {
+      char *msg = js_gpu_last_error();
+      std::string detail = msg ? msg : "unknown";
+      if (msg) std::free(msg);
+      vm.raise_contract("gpu-draw-geometry!: " + detail);
+    }
+    return Value::boolean_true();
+  }, 7, 8));
 
   // (sleep ms) -> future. The first consumer of the external-future path,
   // and useful in its own right: a fiber can wait without blocking the
