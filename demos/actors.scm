@@ -61,6 +61,10 @@
             ;; authored rather than grown. The offset is small against the
             ;; swarm's ~0.9 radius, and flattened in y to match the heading
             ;; distribution, so the cloud keeps its shape.
+            ;; r1's fourth component was going spare — the position
+            ;; offset needs three — so temperament costs no extra draw.
+            (let* ((period (+ 6 (inexact->exact
+                                 (floor (* 48.0 (vector-ref r1 3)))))))
             (let loop ((x (* 0.20 (- (vector-ref r1 0) 0.5)))
                        (y (* 0.08 (- (vector-ref r1 1) 0.5)))
                        (z (* 0.20 (- (vector-ref r1 2) 0.5)))
@@ -73,16 +77,24 @@
                   ;; Death: give the slot back. The release blanks the point,
                   ;; so the actor leaves no corpse on screen.
                   (pool-release! pool slot)
-                  (let* ((think? (= 0 (modulo n 24)))
+                  (let* ((think? (= 0 (modulo n period)))
                          (r (if think? (decide id n) #f))
-                         ;; Deciding costs energy. An actor that changes its
-                         ;; mind often does not live as long as one that
-                         ;; commits — which is the cheapest possible way to
-                         ;; give a choice a consequence.
+                         ;; Deciding costs energy, and each actor decides at
+                         ;; its OWN rate — drawn at birth, from every six
+                         ;; frames to every fifty-four. That is what makes
+                         ;; the cost mean anything: with a rate shared by
+                         ;; everyone it would be a constant tax, identical
+                         ;; for all, and no actor would differ from another.
+                         ;;
+                         ;; It pushes twice in the same direction. An
+                         ;; impulsive actor turns often, so its random walk
+                         ;; goes nowhere, AND it pays to turn — near and
+                         ;; cold. A committed one holds a heading, travels,
+                         ;; and pays less — far and still warm.
                          (nhx (if think? (+ (* 0.6 hx) (- (vector-ref r 0) 0.5)) hx))
                          (nhy (if think? (+ (* 0.6 hy) (* 0.4 (- (vector-ref r 1) 0.5))) hy))
                          (nhz (if think? (+ (* 0.6 hz) (- (vector-ref r 2) 0.5)) hz))
-                         (cost (if think? 0.010 0.0035))
+                         (cost (if think? 0.014 0.0035))
                          (nx (+ x (* 0.012 nhx)))
                          (ny (+ y (* 0.012 nhy)))
                          (nz (+ z (* 0.012 nhz)))
@@ -106,7 +118,7 @@
                     ;; it out of the scheduler — so the renderer keeps
                     ;; drawing and the camera keeps orbiting.
                     (actor-yield)
-                    (loop nx ny nz nhx nhy nhz e (+ n 1))))))))))
+                    (loop nx ny nz nhx nhy nhz e (+ n 1)))))))))))
 
 ;;; A fiber whose whole job is making more fibers. Population is dynamic:
 ;;; actors die on their own schedule and the spawner refills, so the count
