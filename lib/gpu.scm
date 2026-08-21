@@ -17,6 +17,7 @@
 (load "lib/shadertoy.scm")
 (load "lib/points.scm")
 (load "lib/wrangle.scm")
+(load "lib/cubes.scm")
 
 ;; (run-kernel-loop wgsl [canvas-id]) -> future
 ;;
@@ -153,5 +154,28 @@
             (frame! t)
             (gpu-wrangle! device buf wrangle-src count t 1)
             (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
+            (yield)
+            (loop)))))))
+
+;; (run-cubes-loop bytes count update! camera [canvas-id]) -> future
+;;
+;; map cube over the point buffer: the same seven floats per point, drawn
+;; as solid geometry rather than sprites. The buffer is uploaded per frame
+;; exactly as run-points-loop does, so anything that fills one can fill the
+;; other and the only change at the call site is which loop is running.
+(define (run-cubes-loop bytes count update! camera . opts)
+  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
+    (future
+      (let* ((adapter (touch (request-adapter)))
+             (device  (touch (request-device adapter)))
+             (buf     (gpu-buffer device bytes)))
+        (let loop ()
+          (let ((t (/ (current-time) 1000.0)))
+            (update! t)
+            ;; The buffer lives on the GPU, so a host-side writer has to
+            ;; push its changes each frame. gpu-buffer-write! is that push.
+            (gpu-buffer-write! device buf bytes)
+            (gpu-draw-geometry! device buf cubes-wgsl cube-vertex-count
+                                count t camera canvas)
             (yield)
             (loop)))))))
