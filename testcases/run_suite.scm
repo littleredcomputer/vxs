@@ -26,6 +26,7 @@
 (load "testcases/suite/16_shadertoy.scm")
 (load "testcases/suite/17_points.scm")
 (load "testcases/suite/18_wrangle.scm")
+(load "testcases/suite/19_actors.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")
