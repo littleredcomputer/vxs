@@ -59,8 +59,22 @@
   (let ((slot (pool-claim! pool)))
     (if slot
         (future
-          (let ((r0 (decide id 0)))
-            (let loop ((x 0.0) (y 0.0) (z 0.0)
+          ;; Two draws at birth, not one: decision 0 sets the heading,
+          ;; decision 1 places the actor. Decision indices 1..23 are
+          ;; otherwise unused — the first re-think is at 24 — so this costs
+          ;; nothing an actor was going to spend anyway.
+          (let ((r0 (decide id 0))
+                (r1 (decide id 1)))
+            ;; Newborns emerge from a REGION rather than a point. Spawning
+            ;; every actor at exactly the origin piled the freshest, largest,
+            ;; whitest ones on top of each other, and the result read as one
+            ;; solid mass — the only part of the picture that looked
+            ;; authored rather than grown. The offset is small against the
+            ;; swarm's ~0.9 radius, and flattened in y to match the heading
+            ;; distribution, so the cloud keeps its shape.
+            (let loop ((x (* 0.20 (- (vector-ref r1 0) 0.5)))
+                       (y (* 0.08 (- (vector-ref r1 1) 0.5)))
+                       (z (* 0.20 (- (vector-ref r1 2) 0.5)))
                        (hx (- (vector-ref r0 0) 0.5))
                        (hy (* 0.4 (- (vector-ref r0 1) 0.5)))
                        (hz (- (vector-ref r0 2) 0.5))
