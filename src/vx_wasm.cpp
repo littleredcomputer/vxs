@@ -69,6 +69,17 @@ EM_JS(int, js_canvas_mouse_down, (), {
 // rather than an event. A "give me the delta and reset" call would be
 // simpler and would break the moment two things wanted to read it; a
 // running total lets each reader keep its own last value.
+// Is the page asking the simulation to hold still?
+//
+// A pause that stopped the scheduler would freeze the RENDERER too, since
+// the render loop is a fiber like any other — and then the camera could
+// not be moved while paused, which is exactly when you most want to move
+// it. So pause is a flag the running program consults rather than
+// something done to the program.
+EM_JS(int, js_paused, (), {
+  return (typeof globalThis !== 'undefined' && globalThis.vxsPaused) ? 1 : 0;
+});
+
 EM_JS(double, js_canvas_mouse_wheel, (), {
   return (typeof globalThis !== 'undefined' && globalThis.vxsMouseWheel) ? globalThis.vxsMouseWheel() : 0.0;
 });
@@ -117,6 +128,7 @@ static double js_canvas_mouse_x() { return 0.0; }
 static double js_canvas_mouse_y() { return 0.0; }
 static int js_canvas_mouse_down() { return 0; }
 static double js_canvas_mouse_wheel() { return 0.0; }
+static int js_paused() { return 0; }
 static double js_now() { return 0.0; }
 static void js_console_log(const char *text) { std::cout << "[CONSOLE.LOG] " << text << std::endl; }
 static void js_sink_write(const char *name, const char *text) {
@@ -1367,6 +1379,11 @@ static void register_wasm_primitives(VM &vm) {
     return Value::from_double(js_canvas_mouse_wheel());
   };
   vm.def_global("mouse-wheel", vm.heap.make_subr("mouse-wheel", subr_mouse_wheel, 0, 0));
+
+  auto subr_paused = [](VM &, uint32_t, Value *) -> Value {
+    return Value::from_bool(js_paused() != 0);
+  };
+  vm.def_global("paused?", vm.heap.make_subr("paused?", subr_paused, 0, 0));
 
   auto subr_now = [](VM &, uint32_t, Value *) -> Value {
     return Value::from_double(js_now());

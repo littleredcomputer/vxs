@@ -52,6 +52,7 @@
   let lastStats = null;
   let isWasmReady = false;
   let fibersRunning = true;
+  window.vxsPaused = false;
   let mouseX = 400;
   let mouseY = 300;
   let isMouseDown = false;
@@ -269,7 +270,11 @@
       lastFrameTime = time;
     }
 
-    if (isWasmReady && fibersRunning) {
+    // The pump ALWAYS runs. Pausing is a flag the program reads (see
+    // paused? in Scheme), not something done to the scheduler — because
+    // the renderer and the camera are fibers too, and stopping them is the
+    // opposite of what "pause" should mean here.
+    if (isWasmReady) {
       try {
         // 0 = default scheduling: every fiber runs to its own (yield)
         // under a shared ~8ms wall-clock backstop inside the VM. The
@@ -468,7 +473,11 @@
                     ;; largest allocation source in the program.
                     (pool-write-heat! pool slot nx ny nz
                                       (+ 0.006 (* 0.020 e)) e)
-                    (yield)
+                    ;; actor-yield rather than yield: it also holds the
+                    ;; actor still while the page is paused, without taking
+                    ;; it out of the scheduler — so the renderer keeps
+                    ;; drawing and the camera keeps orbiting.
+                    (actor-yield)
                     (loop nx ny nz nhx nhy nhz e (+ n 1))))))))))
 
 ;;; A fiber whose whole job is making more fibers. Population is dynamic:
@@ -479,7 +488,8 @@
 (future
   (let loop ()
     (let born ((k 0))
-      (if (and (< k BIRTHS-PER-FRAME) (< (pool-live pool) CAPACITY))
+      (if (and (not (paused?))
+               (< k BIRTHS-PER-FRAME) (< (pool-live pool) CAPACITY))
           (begin (spawn-actor! next-id)
                  (set! next-id (+ next-id 1))
                  (born (+ k 1)))))
@@ -596,7 +606,11 @@
                     ;; largest allocation source in the program.
                     (pool-write-heat! pool slot nx ny nz
                                       (+ 0.003 (* 0.011 e)) e)
-                    (yield)
+                    ;; actor-yield rather than yield: it also holds the
+                    ;; actor still while the page is paused, without taking
+                    ;; it out of the scheduler — so the renderer keeps
+                    ;; drawing and the camera keeps orbiting.
+                    (actor-yield)
                     (loop nx ny nz nhx nhy nhz e (+ n 1))))))))))
 
 ;;; A fiber whose whole job is making more fibers. Population is dynamic:
@@ -607,7 +621,8 @@
 (future
   (let loop ()
     (let born ((k 0))
-      (if (and (< k BIRTHS-PER-FRAME) (< (pool-live pool) CAPACITY))
+      (if (and (not (paused?))
+               (< k BIRTHS-PER-FRAME) (< (pool-live pool) CAPACITY))
           (begin (spawn-actor! next-id)
                  (set! next-id (+ next-id 1))
                  (born (+ k 1)))))
@@ -996,13 +1011,14 @@
 
   btnToggleFibers.addEventListener('click', () => {
     fibersRunning = !fibersRunning;
+    window.vxsPaused = !fibersRunning;
     if (fibersRunning) {
       fibersToggleIcon.textContent = '⏸';
-      fibersToggleText.textContent = 'Fibers Running';
+      fibersToggleText.textContent = 'Running';
       btnToggleFibers.style.borderColor = 'var(--accent-green)';
     } else {
       fibersToggleIcon.textContent = '▶';
-      fibersToggleText.textContent = 'Fibers Paused';
+      fibersToggleText.textContent = 'Paused — drag to orbit';
       btnToggleFibers.style.borderColor = 'var(--accent-amber)';
     }
   });
