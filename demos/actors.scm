@@ -8,6 +8,10 @@
 ;;; energy runs out it dies and hands its slot back. Nothing steps a list
 ;;; of particles; each actor runs its own loop and yields once per frame.
 ;;;
+;;; Colour is age. A new actor is white-hot; as its energy drains it cools
+;;; through amber and red to a dim violet, and then it is gone. Thinking
+;;; costs more energy than coasting, so the restless ones cool fastest.
+;;;
 ;;; That distinction is the whole point. A fiber per bouncing ball proves
 ;;; nothing — an array does that better. A fiber earns its keep when the
 ;;; thing it models has private evolving state AND its own control flow,
@@ -74,11 +78,15 @@
                          (rad (sqrt (+ (* nx nx) (* ny ny) (* nz nz))))
                          (drag (if (> rad 0.9) 0.010 0.0))
                          (e (- energy cost drag)))
-                    (pool-write! pool slot nx ny nz
-                                 (+ 0.004 (* 0.010 e))
-                                 (+ 0.25 (* 0.75 e))
-                                 (+ 0.20 (* 0.45 (- 1.0 e)))
-                                 (+ 0.55 (* 0.35 e)))
+                    ;; Heat death: an actor is white-hot when it is new and
+                    ;; cools through amber, red and magenta to a dim violet
+                    ;; as its energy goes. The same ramp the GPU wrangle
+                    ;; uses, evaluated here because the actor picks its own
+                    ;; colour — and read a channel at a time, since a fresh
+                    ;; colour vector per actor per frame would have been the
+                    ;; largest allocation source in the program.
+                    (pool-write-heat! pool slot nx ny nz
+                                      (+ 0.003 (* 0.011 e)) e)
                     (yield)
                     (loop nx ny nz nhx nhy nhz e (+ n 1))))))))))
 

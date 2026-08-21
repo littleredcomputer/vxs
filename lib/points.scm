@@ -157,8 +157,8 @@
    "\n"
    "@fragment\n"
    "fn fs(v : VSOut) -> @location(0) vec4<f32> {\n"
-   "  let d = abs(v.quad.x) + abs(v.quad.y); ///Users/colin/Library/Application Support/CleanShot/media/media_e7ctMJUOE6/CleanShot 2026-08-21 at 15.01.57@2x.png  length(v.quad);\n"
-   "  //if (d > 1.0) { discard; }\n"
+   "  let d = length(v.quad);\n"
+   "  if (d > 1.0) { discard; }\n"
    "  let a = 1.0 - smoothstep(0.35, 1.0, d);\n"
    "  return vec4<f32>(v.tint, a);\n"
    "}\n"))
