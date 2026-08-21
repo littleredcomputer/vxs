@@ -94,3 +94,16 @@
                 (+ r0 (* (- (vector-ref heat-stops b1) r0) f))
                 (+ g0 (* (- (vector-ref heat-stops (+ b1 1)) g0) f))
                 (+ c0 (* (- (vector-ref heat-stops (+ b1 2)) c0) f)))))
+
+;; (actor-yield) — an actor's yield, which also honours a pause.
+;;
+;; Yields once as usual, then keeps yielding without advancing for as long
+;; as the page is paused. The actor stays IN the scheduler while paused —
+;; it is visited every frame and does nothing — which is what lets the
+;; renderer, which is another fiber, carry on drawing and let the camera be
+;; dragged. Stopping the scheduler would have stopped both.
+(define (actor-yield)
+  (yield)
+  (let wait ()
+    (if (paused?)
+        (begin (yield) (wait)))))

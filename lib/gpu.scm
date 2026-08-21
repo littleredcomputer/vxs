@@ -19,6 +19,14 @@
 (load "lib/wrangle.scm")
 (load "lib/cubes.scm")
 
+;; PAUSING. Every loop below keeps DRAWING while paused and only stops the
+;; simulation CLOCK. Stopping the scheduler instead would freeze the
+;; renderer too — it is a fiber like anything else — and the camera with
+;; it, which is precisely when you most want to orbit. So `paused?` holds
+;; the clock still and everything else carries on: the shader sees a frozen
+;; time, update! is still called so the camera still responds, and the
+;; scene still redraws from whatever angle you drag it to.
+
 ;; (run-kernel-loop wgsl [canvas-id]) -> future
 ;;
 ;; Acquires the device and animates the kernel, one frame per yield, off
@@ -43,10 +51,12 @@
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter))))
-        (let loop ()
-          (gpu-run-kernel! device wgsl (/ (current-time) 1000.0) canvas)
-          (yield)
-          (loop))))))
+        (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
+          (let* ((now (/ (current-time) 1000.0))
+                 (t2 (if (paused?) t (+ t (- now last)))))
+            (gpu-run-kernel! device wgsl t2 canvas)
+            (yield)
+            (loop t2 now)))))))
 
 ;; (run-points-loop bytes count update! camera [canvas-id]) -> future
 ;;
@@ -64,12 +74,15 @@
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter))))
-        (let loop ()
-          (let ((t (/ (current-time) 1000.0)))
-            (update! t)
-            (gpu-draw-instances! device points-wgsl bytes count t camera canvas)
+        (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
+          (let* ((now (/ (current-time) 1000.0))
+                 (t2 (if (paused?) t (+ t (- now last)))))
+            ;; update! runs even when paused, because that is where the
+            ;; camera is orbited.
+            (update! t2)
+            (gpu-draw-instances! device points-wgsl bytes count t2 camera canvas)
             (yield)
-            (loop)))))))
+            (loop t2 now)))))))
 
 ;; (make-orbiter) -> (lambda (camera) ...) — drag to spin, scroll to zoom.
 ;;
@@ -149,13 +162,18 @@
              (device  (touch (request-device adapter)))
              (buf     (gpu-buffer device seed-bytes)))
         (display "wrangle: buffer uploaded, dispatching.") (newline)
-        (let loop ()
-          (let ((t (/ (current-time) 1000.0)))
-            (frame! t)
-            (gpu-wrangle! device buf wrangle-src count t 1)
-            (gpu-draw-buffer! device buf points-wgsl count t camera canvas)
+        (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
+          (let* ((now (/ (current-time) 1000.0))
+                 (t2 (if (paused?) t (+ t (- now last)))))
+            (frame! t2)
+            ;; The dispatch still runs while paused. It is a pure function
+            ;; of (index, time), so re-running it with a frozen clock
+            ;; reproduces the identical cloud — the counter-based RNG is
+            ;; what makes a paused frame stable rather than shimmering.
+            (gpu-wrangle! device buf wrangle-src count t2 1)
+            (gpu-draw-buffer! device buf points-wgsl count t2 camera canvas)
             (yield)
-            (loop)))))))
+            (loop t2 now)))))))
 
 ;; (run-cubes-loop bytes count update! camera [canvas-id]) -> future
 ;;
@@ -169,13 +187,14 @@
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
              (buf     (gpu-buffer device bytes)))
-        (let loop ()
-          (let ((t (/ (current-time) 1000.0)))
-            (update! t)
+        (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
+          (let* ((now (/ (current-time) 1000.0))
+                 (t2 (if (paused?) t (+ t (- now last)))))
+            (update! t2)
             ;; The buffer lives on the GPU, so a host-side writer has to
             ;; push its changes each frame. gpu-buffer-write! is that push.
             (gpu-buffer-write! device buf bytes)
             (gpu-draw-geometry! device buf cubes-wgsl cube-vertex-count
-                                count t camera canvas)
+                                count t2 camera canvas)
             (yield)
-            (loop)))))))
+            (loop t2 now)))))))
