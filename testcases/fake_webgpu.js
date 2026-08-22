@@ -58,6 +58,7 @@ function makeDevice(opts) {
     addEventListener(kind, fn) { listeners.push([kind, fn]); },
     createBuffer({ size, usage }) { return makeBuffer(size, usage); },
     createShaderModule({ code }) {
+      this._compiles = (this._compiles || 0) + 1;
       return {
         code,
         getCompilationInfo() {
@@ -69,7 +70,10 @@ function makeDevice(opts) {
     createBindGroupLayout() { return { _kind: 'bgl' }; },
     createBindGroup() { return { _kind: 'bindgroup' }; },
     createPipelineLayout() { return { _kind: 'layout' }; },
-    createComputePipeline() { return { _kind: 'compute' }; },
+    createComputePipeline() {
+      this._computePipelines = (this._computePipelines || 0) + 1;
+      return { _kind: 'compute' };
+    },
     createRenderPipeline() { return { _kind: 'render' }; },
     createTexture() { return { createView: () => ({}), destroy() {} }; },
     createCommandEncoder() {
@@ -89,10 +93,14 @@ function makeDevice(opts) {
     },
     queue: {
       writeBuffer(buf, offset, data) {
+        // Record the last uniform write so a test can read back what the
+        // kernel would have seen, without running a kernel.
+        this._lastWrite = { size: buf.size, bytes: null };
         const src = data instanceof Uint8Array
           ? data
           : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         buf._bytes.set(src, offset);
+        this._lastWrite.bytes = buf._bytes.slice(0, buf.size);
       },
       submit(list) { for (const c of list) for (const f of c._cmds) f(); },
     },

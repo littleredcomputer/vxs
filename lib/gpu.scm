@@ -156,7 +156,8 @@
 ;; The orbiter most programs want. Two viewports want two orbiters.
 (define orbit-camera! (make-orbiter))
 
-;; (run-wrangle-loop seed-bytes count wrangle-src frame! camera [canvas-id])
+;; (run-wrangle-loop seed-bytes count wrangle-src frame! camera
+;;                    [canvas-id [params]])
 ;;
 ;; The GPU-resident counterpart of run-points-loop. The point data lives in
 ;; a GPU buffer, a compute dispatch rewrites it, and the draw reads it — the
@@ -166,8 +167,14 @@
 ;; `frame!` is called with the time before each dispatch and exists for
 ;; whatever the host still owns — orbiting the camera, mostly. It is not
 ;; where point work belongs any more.
+;;
+;; The optional `params` is a block from make-wrangle-params. Write it in
+;; frame! and the kernel sees the new values on the very next dispatch,
+;; with no recompile: that is what makes a slider playable rather than
+;; merely demonstrable. Pass #f (or omit it) and the slots read zero.
 (define (run-wrangle-loop seed-bytes count wrangle-src frame! camera . opts)
-  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
+  (let ((canvas (if (null? opts) "gpu-canvas" (car opts)))
+        (params (if (or (null? opts) (null? (cdr opts))) #f (cadr opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
@@ -185,7 +192,7 @@
             ;; of (index, time), so re-running it with a frozen clock
             ;; reproduces the identical cloud — the counter-based RNG is
             ;; what makes a paused frame stable rather than shimmering.
-            (gpu-wrangle! device buf kernel count t2 1)
+            (gpu-wrangle! device buf kernel count t2 1 params)
             (gpu-draw-buffer! device buf draw count t2 camera canvas)
             (yield)
             (loop t2 now)))))))
