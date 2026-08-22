@@ -5,6 +5,7 @@
 #include "vx_compiler.h"
 #include "vx_embedded_libs.h"
 #include <string>
+#include <cstring>
 #include <memory>
 #include <iostream>
 #include <chrono>
@@ -20,6 +21,11 @@ namespace vxs {
 
 // Global VM instance for WebAssembly
 static std::unique_ptr<VM> g_vm;
+
+// Frames pumped. Declared here rather than beside the scheduler because
+// gpu-buffer-read stamps its snapshot with it, and that primitive is
+// registered long before the scheduler code appears.
+static size_t g_step_calls = 0;
 
 // EM_JS Canvas & Browser Interface
 extern "C" {
@@ -1018,6 +1024,85 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, const char *wgslPtr, 
   }
 });
 
+// Bring a GPU buffer home.
+//
+// Everything else in this file is a write or a draw: data went out and
+// never came back. That was tolerable while the buffer was an OUTPUT — you
+// look at the picture and the picture is the answer — and it stops being
+// tolerable the moment the buffer is STATE, because then the picture is a
+// claim and there is no way to check it. Sixty thousand elements doing
+// something plausible, and not one number computable about them: no mean,
+// no spread, no count. The eye says it looks right and nothing can
+// disagree.
+//
+// Which is the failure this system is otherwise good at avoiding. Every
+// good decision here came from being able to count something — allocation
+// counters, the scene rate, known-answer vectors. On the GPU side there
+// was nothing to count with.
+//
+// The standard staging dance: copy into a MAP_READ buffer, map it, copy
+// out. No new async machinery is needed, because a promise is already a
+// future here — the fiber blocks on touch, the copy lands, the fiber
+// resumes. And every buffer gpu-buffer makes already carries COPY_SRC, so
+// readback attaches to an existing buffer without recreating it or
+// rebuilding a bind group.
+//
+// THE SNAPSHOT IS LAGGED, unavoidably: mapAsync settles a frame or two
+// after the copy is submitted, so what returns is the most recent
+// completed state and never the current one. Invisible when you are
+// looking at it; a correctness trap for anything that feeds a result back
+// in. Hence the frame stamp travelling with the bytes — it turns "why is
+// this unstable" into "I am reacting to two-frame-old data".
+EM_JS(void, js_gpu_buffer_read, (int token, int deviceId, int bufId, int byteLen, int frame), {
+  var fail = function(msg) {
+    Module.ccall('vxs_settle_error', 'number', ['number', 'string'], [token, msg]);
+  };
+  try {
+    var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
+    var buf = globalThis.vxsHandles ? globalThis.vxsHandles.get(bufId) : null;
+    if (!device) { fail("gpu-buffer-read: device handle is not live"); return; }
+    if (!buf) { fail("gpu-buffer-read: buffer handle is not live"); return; }
+
+    // copyBufferToBuffer requires a multiple of 4, and cannot exceed the
+    // source.
+    var want = byteLen > 0 ? byteLen : buf.size;
+    if (want > buf.size) want = buf.size;
+    want = want & ~3;
+    if (want <= 0) { fail("gpu-buffer-read: nothing to read"); return; }
+
+    var staging = device.createBuffer({
+      size: want,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    var enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(buf, 0, staging, 0, want);
+    device.queue.submit([enc.finish()]);
+
+    staging.mapAsync(GPUMapMode.READ).then(function() {
+      try {
+        var src = new Uint8Array(staging.getMappedRange());
+        // Bare, not Module-qualified: inside EM_JS these are globals in
+        // the generated scope, the way js_gpu_buffer_write and
+        // js_gpu_last_error already use them.
+        var ptr = _malloc(src.length);
+        HEAPU8.set(src, ptr);
+        Module.ccall('vxs_settle_bytes', 'number',
+                     ['number', 'number', 'number', 'number'],
+                     [token, ptr, src.length, frame]);
+        _free(ptr);
+        staging.unmap();
+        staging.destroy();
+      } catch (inner) {
+        fail("gpu-buffer-read: settling failed: " + inner);
+      }
+    }, function(e) {
+      fail("gpu-buffer-read: mapAsync rejected: " + e);
+    });
+  } catch (e) {
+    fail("gpu-buffer-read: " + e);
+  }
+});
+
 EM_JS(char *, js_gpu_last_error, (), {
   var s = globalThis.vxsGpuError || "";
   var n = lengthBytesUTF8(s) + 1;
@@ -1037,6 +1122,7 @@ static int js_gpu_wrangle(int, int, const char *, int, double, double) { return 
 static int js_gpu_draw_buffer(int, int, const char *, const char *, int, double, double, double, double, double) { return -1; }
 static int js_gpu_draw_geometry(int, int, const char *, const char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
+static void js_gpu_buffer_read(int, int, int, int, int) {}
 static char *js_gpu_last_error() { return nullptr; }
 #endif
 
@@ -1391,6 +1477,39 @@ static void register_wasm_primitives(VM &vm) {
     return Value::boolean_true();
   }, 7, 8));
 
+  // (gpu-buffer-read device buffer [byte-length]) -> future
+  //
+  // Settles with (frame . bytes): the frame the copy was submitted on, and
+  // the data. Read back the whole buffer by omitting the length, or narrow
+  // it — a full readback of sixty thousand seven-float elements is 1.7MB a
+  // probe, and most questions want a summary a kernel could have reduced
+  // to a few hundred numbers first.
+  vm.def_global("gpu-buffer-read", vm.heap.make_subr("gpu-buffer-read", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_handle(args[0]) || !Heap::is_handle(args[1])) {
+      vm.raise_contract("gpu-buffer-read: expected (device buffer [byte-length])");
+    }
+    ObjHandle *d = args[0].as_ptr<ObjHandle>();
+    ObjHandle *b = args[1].as_ptr<ObjHandle>();
+    if (d->released) vm.raise_contract("gpu-buffer-read: device handle was released");
+    if (b->released) vm.raise_contract("gpu-buffer-read: buffer handle was released");
+    int want = 0;   // 0 means the whole buffer
+    if (argc > 2) {
+      if (!args[2].is_int() || args[2].as_int() < 0) {
+        vm.raise_contract("gpu-buffer-read: expected a non-negative byte length, got " +
+                          vm.format_value(args[2]));
+      }
+      want = args[2].as_int();
+    }
+    Value fut = vm.heap.make_external_future();
+    vm.push_temp_root(&fut);
+    uint32_t token = vm.register_external(fut);
+    vm.pop_temp_root();
+    js_gpu_buffer_read(static_cast<int>(token), static_cast<int>(d->id),
+                       static_cast<int>(b->id), want,
+                       static_cast<int>(g_step_calls));
+    return fut;
+  }, 2, 3));
+
   // (sleep ms) -> future. The first consumer of the external-future path,
   // and useful in its own right: a fiber can wait without blocking the
   // browser, because waiting means "suspend and let the scheduler run",
@@ -1604,7 +1723,6 @@ static VM::StepResult pump_until_settled(Fiber &fiber, VM::StepResult res,
 static std::string g_stats_buffer;
 // Scheduler counters the VM itself has no reason to keep: these describe
 // how the embedder has been pumping it, not the VM's own state.
-static size_t g_step_calls = 0;
 static size_t g_preempt_total = 0;
 
 extern "C" {
@@ -1967,6 +2085,30 @@ int vxs_settle_handle(int token, int id, const char *kind) {
   Value h = g_vm->heap.make_handle(static_cast<uint32_t>(id),
                                    g_vm->intern(kind ? kind : "host-object"));
   return g_vm->settle_external(static_cast<uint32_t>(token), h, false) ? 1 : 0;
+}
+
+// Settle an external future with a BYTES value, stamped with the frame the
+// copy was submitted on.
+//
+// A pair — (frame . bytes) — rather than the bytes alone, because the
+// snapshot is always lagged and silently pretending otherwise is how a
+// feedback loop becomes mysterious. Callers that do not care write
+// (cdr result) and ignore it.
+EMSCRIPTEN_KEEPALIVE
+int vxs_settle_bytes(int token, const unsigned char *data, int len, int frame) {
+  if (!g_vm) return 0;
+  size_t n = len > 0 ? static_cast<size_t>(len) : 0;
+  Value b = g_vm->heap.make_bytes(n);
+  g_vm->push_temp_root(&b);
+  if (n > 0 && data) {
+    std::memcpy(b.as_ptr<ObjBytes>()->data.data(), data, n);
+  }
+  Value stamped = g_vm->heap.cons(Value::from_int(frame), b);
+  g_vm->pop_temp_root();
+  g_vm->push_temp_root(&stamped);
+  bool ok = g_vm->settle_external(static_cast<uint32_t>(token), stamped, false);
+  g_vm->pop_temp_root();
+  return ok ? 1 : 0;
 }
 
 // How many host objects we are holding. Nothing collects these, so this is
