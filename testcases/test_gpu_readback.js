@@ -2,30 +2,43 @@
 // GPU host paths, against a fake WebGPU.
 //
 // No shader ever runs here. What is under test is everything AROUND the
-// shader — handle lifetimes, buffer uploads, the readback staging dance,
-// error settling — and those are precisely the places where failures have
-// been silent.
+// shader — handle lifetimes, uploads, the readback staging dance, error
+// settling, and whether a compile diagnostic reaches the page — and those
+// are precisely the places where failures were silent.
 //
-// This exists because of one line in a field report: nothing could be read
-// back off the device, so a GPU-resident program had exactly zero
-// measurable quantities. A round trip that returns the bytes that were
-// written is the smallest possible proof that a number can be got out.
+// Two things this exists to keep honest, both from a field report:
 //
-// It also answers the reporter's other constraint — "I work without a
-// browser, so a failure only reaches me if it becomes text someone can
-// paste." Every path here used to require a canvas and a pair of eyes.
+//   A bad shader used to produce 60fps, no error, and a black canvas,
+//   because createShaderModule does not throw and nothing read the
+//   compilation info. Compilation is now a future, and the draw calls take
+//   the handle it settles with, so nothing can reach a pipeline without
+//   having waited for the compile. The fake reports compile messages the
+//   way WebGPU does — asynchronously, after the call has returned — so the
+//   test exercises the real timing rather than a convenient version of it.
+//
+//   Nothing could be read back off the device, so a GPU-resident program
+//   had exactly zero measurable quantities. A round trip that returns the
+//   bytes that were written is the smallest possible proof that a number
+//   can now be got out.
 //----------------------------------------------------------------------
 
 const path = require('path');
 const { installFakeWebGPU } = require(path.join(__dirname, 'fake_webgpu.js'));
 
-// Must run before the module loads: js_ensure_handle_table only builds a
-// table if none exists, and navigator.gpu is read at adapter request.
-installFakeWebGPU({ compileMessages: () => [] });
+// A shader carrying this marker is reported as failing to compile.
+const POISON = 'BADSHADER';
+installFakeWebGPU({
+  compileMessages: (code) =>
+    code.indexOf(POISON) >= 0
+      ? [{ type: 'error', lineNum: 2, linePos: 4, message: 'no entry point found' },
+         { type: 'warning', lineNum: 3, linePos: 1, message: 'unused binding' }]
+      : [],
+});
 
 const createVxsModule = require(path.join(__dirname, '..', 'web', 'vxs.js'));
 
 let bad = 0, total = 0;
+const terminal = [];
 function check(name, cond, detail) {
   total++;
   if (!cond) bad++;
@@ -33,12 +46,12 @@ function check(name, cond, detail) {
 }
 
 (async () => {
-  globalThis.vxsPrint = () => {};
+  globalThis.vxsPrint = (t) => terminal.push(t);
   const M = await createVxsModule();
   M.ccall('vxs_init', null, [], []);
   const ev = (s) => M.ccall('vxs_eval', 'string', ['string'], [s]).trim();
   // The fake resolves promises on later turns, as the real API does, so
-  // pumping has to give the event loop a turn between steps.
+  // pumping has to yield to the event loop between steps.
   const pump = async (n) => {
     for (let i = 0; i < n; i++) {
       M.ccall('vxs_step_fibers', 'number', ['number'], [0]);
@@ -61,6 +74,7 @@ function check(name, cond, detail) {
             (set! result (touch (gpu-buffer-read d h))))))`);
   await pump(30);
 
+  //--- readback round trip ---------------------------------------------
   check('a readback settles', ev('(pair? result)') === '#t', ev('result'));
   check('stamped with the frame the copy was submitted on',
         parseInt(ev('(car result)'), 10) >= 0, ev('(car result)'));
@@ -78,8 +92,7 @@ function check(name, cond, detail) {
 
   // gpu-buffer rounds allocations up to 16 bytes, so a whole-buffer read
   // returns the padding too. That is what the length argument is for — and
-  // reading everything is rarely what you want anyway: a full readback of
-  // sixty thousand seven-float points is 1.7MB a probe.
+  // reading everything is rarely what you want anyway.
   ev('(define narrowed #f)');
   ev('(future (set! narrowed (touch (gpu-buffer-read dev handle 84))))');
   await pump(15);
@@ -87,6 +100,65 @@ function check(name, cond, detail) {
         ev('(bytes-length (cdr narrowed))') === '84',
         ev('(bytes-length (cdr narrowed))'));
 
+  //--- compilation is a future -----------------------------------------
+  const GOOD = '@compute @workgroup_size(64)\\nfn main() {}\\n';
+  const BAD  = `@compute @workgroup_size(64)\\nfn ${POISON}() {\\n  let x = 1;\\n}\\n`;
+
+  terminal.length = 0;
+  ev('(define good-sh #f)');
+  ev(`(future (set! good-sh (touch (gpu-compile dev "${GOOD}"))))`);
+  await pump(10);
+  check('a good shader settles with a handle',
+        ev('(handle? good-sh)') === '#t', ev('good-sh'));
+  check('of kind :gpu-shader',
+        ev('(handle-kind good-sh)') === ':gpu-shader', ev('(handle-kind good-sh)'));
+  check('and says nothing', !/WGSL/.test(terminal.join('\n')), terminal.join('\n'));
+
+  // The report's acceptance criteria: a message carrying line, column,
+  // text and the source line must reach the PAGE, and the program must
+  // stop rather than looping silently forever.
+  // A failed compile CANNOT be caught with `guard`: touch has to suspend
+  // the fiber, and guard's continuation contains native frames, so a touch
+  // inside one is refused outright. That is a pre-existing rule of this
+  // system, not something compilation introduces — every await in
+  // lib/gpu.scm already sits outside any guard for the same reason.
+  //
+  // So the shape under test is the legal one: a bare await, and a bad
+  // shader kills the fiber loudly with the compile message attached. The
+  // statement after the touch must never run.
+  terminal.length = 0;
+  ev('(define bad-sh (quote untouched))');
+  ev(`(future (set! bad-sh (touch (gpu-compile dev "${BAD}"))))`);
+  await pump(10);
+
+  const joined = terminal.join('\n');
+  check('a bad shader reports its error to the page terminal',
+        /WGSL error at line 2:4 — no entry point found/.test(joined), joined);
+  check('with the offending source line',
+        /2 \| fn BADSHADER\(\) \{/.test(joined), joined);
+  check('warnings are reported too, and labelled as warnings',
+        /WGSL warning at line 3:1 — unused binding/.test(joined), joined);
+  check('the fiber dies at the touch, so nothing downstream of it runs',
+        ev('bad-sh') === 'untouched', ev('bad-sh'));
+  check('and the death report names the compile error, not a bare tag',
+        /no entry point found/.test(joined), joined);
+
+  //--- the draw path cannot be reached without one ----------------------
+  ev('(define bypass #f)');
+  ev(`(future (set! bypass
+              (guard (e (#t 'raised)) (gpu-wrangle! dev handle "${GOOD}" 3 0.0 1))))`);
+  await pump(5);
+  check('passing SOURCE where a shader handle belongs raises',
+        ev('bypass') === 'raised', ev('bypass'));
+
+  ev('(define drew #f)');
+  ev(`(future (set! drew
+              (guard (e (#t (list 'raised (error-object-message e))))
+                (begin (gpu-wrangle! dev handle good-sh 3 0.0 1) 'ok))))`);
+  await pump(5);
+  check('passing the compiled handle works', ev('drew') === 'ok', ev('drew'));
+
+  //--- handle hygiene ---------------------------------------------------
   ev('(define after-release #f)');
   ev(`(future (set! after-release
               (guard (e (#t 'raised)) (gpu-buffer-read dev 42))))`);

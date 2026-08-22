@@ -105,13 +105,16 @@ test-async:
 # The GPU host paths, against a fake WebGPU (testcases/fake_webgpu.js).
 #
 # No shader runs and no GPU is involved. What this covers is everything
-# AROUND the shader — handle lifetimes, uploads, readback — which is where
-# every silent failure has actually been. Those paths used to be reachable
-# only by opening a browser and looking at a canvas, which meant a failure
-# could only be described, never pasted.
+# AROUND the shader — compile futures, shader and buffer handle lifetimes,
+# uploads, readback — which is where every silent failure has actually
+# been. Those paths used to be reachable only by opening a browser and
+# looking at a canvas, which meant a failure could only be described, never
+# pasted.
 test-gpu:
 	@echo "=== RUNNING GPU HOST-PATH TESTS (fake WebGPU) ==="
 	$(Q)$(NODE) ../testcases/test_gpu_readback.js
+	@echo "=== RUNNING ALL GPU PRESETS (fake WebGPU) ==="
+	$(Q)$(NODE) ../testcases/test_gpu_presets.js
 
 # AOT: compile a program to a standalone native binary and check what it
 # prints against the same golden file the interpreter is held to. Used to
