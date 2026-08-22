@@ -796,6 +796,17 @@ public:
   // budget, fiber 0 ran on all 120 ticks and 1649 fibers ran zero times.)
   size_t round_cursor = 0;
 
+  // Take a finished/dead fiber out of active_fibers, settle its future and
+  // free it, locating it BY IDENTITY — this scheduler is re-entrant, so a
+  // position recorded before a step means nothing after it. See the
+  // definition in vx_vm.cpp for the crash this exists to prevent.
+  void retire_fiber(Fiber *f, bool record_error);
+
+  // True if f is on the current C++ dispatch stack (current_fiber and its
+  // parent_fiber chain). Such a fiber must never be stepped or retired —
+  // see the definition in vx_vm.cpp.
+  bool is_dispatching(const Fiber *f) const;
+
   // Shared dispatch loop body. step_fiber calls this with stop_at_depth=0
   // (today's behavior: run until the fiber is genuinely done). call_closure
   // calls it directly with stop_at_depth set to the frame depth it started

@@ -1096,6 +1096,68 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
   return StepResult::Preempted;
 }
 
+// Is this fiber currently mid-dispatch — i.e. somewhere on the C++ stack
+// above us, waiting for a nested call to return?
+//
+// step_fiber links each fiber to the one it interrupted (parent_fiber) and
+// makes itself current, so the chain from current_fiber IS the set of
+// fibers that are presently running. None of them may be stepped: doing so
+// re-enters a dispatch that is already in flight, and if it runs to
+// completion the scheduler retires and frees a fiber whose stack frames an
+// outer C++ frame is about to write to.
+//
+// step_all_active_fibers takes an `exclude` argument for exactly this, but
+// one pointer only ever names the INNERMOST such fiber. That was enough
+// while the scheduler could be re-entered once. It is not enough now that
+// a rescue can nest — fiber A blocks inside guard and pumps the scheduler,
+// which runs fiber B, which blocks inside map and pumps it again. That
+// inner round excludes B and steps A, which is already running. Found by
+// AddressSanitizer as a heap-use-after-free; the chain costs a pointer
+// walk of depth equal to the nesting, which is one or two.
+bool VM::is_dispatching(const Fiber *f) const {
+  for (const Fiber *c = current_fiber; c != nullptr; c = c->parent_fiber) {
+    if (c == f) return true;
+  }
+  return false;
+}
+
+// Retire a fiber that has finished or died: take it out of
+// active_fibers, settle whatever was waiting on it, and free it.
+//
+// LOCATES IT BY IDENTITY rather than trusting a position recorded before
+// it ran. That is not defensive habit, it is required: this scheduler is
+// RE-ENTRANT. A fiber touching a future backed by another fiber, from
+// somewhere it cannot suspend (inside guard, map, apply, ...), pumps the
+// whole scheduler from inside its own step — see OP_TOUCH's rescue path.
+// The nested round appends fibers, retires others, and moves round_cursor,
+// so by the time the outer step_fiber returns, neither the index nor the
+// iterator it started with means anything.
+//
+// Both callers below used to erase by a stale position. It was a genuine
+// memory-safety bug, not a theoretical one: erase() past the end computes
+// a negative move size, which is a SIGBUS natively and an out-of-bounds
+// memory access in wasm. Reachable from ordinary Scheme —
+//
+//   (future (guard (e (#t 'caught)) (touch (future 42))))
+//
+// — and it crashed the whole VM rather than raising anything catchable.
+void VM::retire_fiber(Fiber *f, bool record_error) {
+  if (record_error && !f->error_message.empty()) {
+    fiber_errors.push_back(f->error_message);
+  }
+  auto it = std::find(active_fibers.begin(), active_fibers.end(), f);
+  if (it != active_fibers.end()) {
+    size_t pos = static_cast<size_t>(it - active_fibers.begin());
+    active_fibers.erase(it);
+    // Everything after pos shifted down one; keep the cursor pointing at
+    // whatever fiber it was pointing at before.
+    if (round_cursor > pos) --round_cursor;
+  }
+  if (preempted_fiber == f) preempted_fiber = nullptr;
+  settle_backing_future(f);
+  delete f;
+}
+
 // Step all active background fibers — see the declaration's comment for
 // the shared-deadline and exclusive-resume (preempted_fiber) policies.
 size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
@@ -1109,9 +1171,12 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
   // A fiber the deadline cut off mid-flight last call is owed an
   // exclusive resume: nothing else may step until it reaches its own
   // yield, so no sibling ever observes its half-finished work.
-  if (preempted_fiber && preempted_fiber != exclude) {
-    auto it = std::find(active_fibers.begin(), active_fibers.end(), preempted_fiber);
-    if (it == active_fibers.end()) {
+  if (preempted_fiber && preempted_fiber != exclude &&
+      !is_dispatching(preempted_fiber)) {
+    // Membership is checked, but no iterator is carried across the step:
+    // step_fiber can re-enter this whole function (see retire_fiber).
+    if (std::find(active_fibers.begin(), active_fibers.end(),
+                  preempted_fiber) == active_fibers.end()) {
       preempted_fiber = nullptr; // it died elsewhere; nothing owed
     } else {
       Fiber *f = preempted_fiber;
@@ -1121,16 +1186,7 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
       }
       preempted_fiber = nullptr;
       if (res == StepResult::Completed || res == StepResult::Error) {
-        if (res == StepResult::Error && !f->error_message.empty()) {
-          fiber_errors.push_back(f->error_message);
-        }
-        size_t pos = static_cast<size_t>(it - active_fibers.begin());
-        active_fibers.erase(it);
-        settle_backing_future(f);
-        delete f;
-        // Everything after pos shifted down one; keep the cursor on the
-        // same fiber it was pointing at.
-        if (round_cursor > pos) --round_cursor;
+        retire_fiber(f, res == StepResult::Error);
       }
       // it yielded (or finished) — the round may proceed below
     }
@@ -1152,7 +1208,7 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
     }
     if (round_cursor >= active_fibers.size()) round_cursor = 0;
     Fiber *f = active_fibers[round_cursor];
-    if (f == exclude) {   // mid-dispatch above us; stepping it would recurse
+    if (f == exclude || is_dispatching(f)) {  // mid-dispatch above us; stepping it would recurse
       ++visited;
       ++round_cursor;
       if (round_cursor >= active_fibers.size()) round_cursor = 0;
@@ -1161,12 +1217,10 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
     StepResult res = step_fiber(*f, instructions_per_fiber, deadline);
     ++visited;
     if (res == StepResult::Completed || res == StepResult::Error) {
-      if (res == StepResult::Error && !f->error_message.empty()) {
-        fiber_errors.push_back(f->error_message);
-      }
-      active_fibers.erase(active_fibers.begin() + round_cursor);
-      settle_backing_future(f);
-      delete f;
+      // NOT active_fibers.begin() + round_cursor: the step may have
+      // re-entered this function and moved f, or moved the cursor, or
+      // both. retire_fiber finds it by identity and fixes the cursor.
+      retire_fiber(f, res == StepResult::Error);
       // Successor shifted into this slot: leave the cursor where it is.
     } else if (res == StepResult::Preempted) {
       // First preemption ends the round: this fiber takes the exclusive-
