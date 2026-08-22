@@ -740,7 +740,7 @@
 
 (define (frame! t) (orbit-camera! cam))
 
-(run-wrangle-loop seed-buf N wrangle-src frame! cam "vxs-gpu-canvas")
+(run-wrangle-loop seed-buf N wrangle-src frame! cam :canvas "vxs-gpu-canvas")
 `,
 
     points: `;;; ==========================================================

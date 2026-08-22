@@ -77,7 +77,10 @@ function makeDevice(opts) {
       // declare an explicit size, or it runs to the end of the buffer and
       // every offset past the first overruns it.
       this._lastBindGroup = desc;
-      return { _kind: 'bindgroup' };
+      // Carry the descriptor on the object: pipelines are cached, so a
+      // later dispatch may BIND a group without CREATING one, and a test
+      // that reads the last-created group would be reading a stale one.
+      return { _kind: 'bindgroup', _desc: desc };
     },
     createPipelineLayout() { return { _kind: 'layout' }; },
     createComputePipeline() {
@@ -101,8 +104,9 @@ function makeDevice(opts) {
           const log = (self._passLog = { offsets: [], dispatches: 0 });
           return {
             setPipeline() {},
-            setBindGroup(_i, _bg, dyn) {
+            setBindGroup(_i, bg, dyn) {
               if (dyn) log.offsets.push(dyn[0]);
+              if (bg && bg._desc) self._boundGroup = bg._desc;
             },
             dispatchWorkgroups() { log.dispatches++; },
             end() {},
