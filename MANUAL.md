@@ -236,6 +236,11 @@ quietly wrong, suspect this first.
 
 ## 4. The GPU pipeline
 
+Four plumbing sections first — how a shader is compiled, how buffers move,
+how to get a number back, and what may be wrapped in a `guard`. Then the
+three kinds of data a kernel can see, then the kernel language itself, then
+how a dispatch is scheduled.
+
 ### Compile, then draw
 
 Compilation is asynchronous and returns a future. The draw primitives take
@@ -346,11 +351,12 @@ Omit it and the slots read zero.
 ### Scratch attributes
 
 State the simulation needs and the renderer must not see — weight, age,
-velocity, an index into another element. Declared once; the library computes offsets
+velocity, an index into another element. Declared once; the library
+computes offsets
 and generates accessors for both sides:
 
 ```scheme
-(scratch-attributes! '((weight :f32) (age :f32) (source :u32)))
+(scratch-attributes! '((charge :f32) (age :f32) (source :u32)))
 
 (define SB (make-scratch n))       ; a second buffer, bound at 2
 (define SV (scratch-view SB))
@@ -364,12 +370,11 @@ In a kernel, an attribute name means **this point's** value, the way VEX
 means `@Cd` — every invocation owns exactly one index:
 
 ```wgsl
-attr_charge_set(i, weight * 0.99);      // read `charge`, write via the setter
+attr_charge_set(i, charge * 0.99);      // read `charge`, write via the setter
 ```
 
-Types are `:f32`, `:u32` and `:vec3f`. `:u32` is not decoration — an
-index into another element stored as a float aliases past 2²⁴, the same failure the
-seed had. Integer attributes are `bitcast` in the shader and read through a
+Types are `:f32`, `:u32` and `:vec3f`. `:u32` is not decoration — an index
+stored as a float aliases past 2²⁴, the same failure the seed had. Integer attributes are `bitcast` in the shader and read through a
 second view on the host, so the round trip is exact in both directions.
 
 A `:vec3f` is three flat floats with the accessor building the vector,
@@ -381,6 +386,94 @@ exactly the text and the two-binding layout it always did.
 ⚠️ Both `scratch-attributes!` and `wrangle-params!` **replace** rather than
 extend, and the kernel environment is rebuilt from both. They do not clear
 each other.
+
+### Shared read-only data
+
+Data every element **reads**, as against scratch, which each element
+**owns** — a lookup table every element consults, a per-frame input every
+element reads. Scratch is addressed `scratch[i * stride + off]`, so it is
+per-element by construction; the parameter block is eight floats; and
+anything that changes per frame cannot be baked into the source.
+
+```scheme
+(shared-layout! '((table 48) (samples 41)))   ; named regions, in order
+
+(define SH (make-shared))
+(define SHV (shared-view SH))
+(shared-set! SHV 'samples 0 2.5)
+(run-wrangle-loop … :shared SH)            ; re-uploaded every frame
+```
+
+Each region gets an accessor carrying its offset, so a kernel calls
+`(shared-samples k)` and never writes an offset by hand. Indexing past a
+region's end raises rather than quietly reading its neighbour.
+
+Bound at 3 as `read-only-storage`. ⚠️ The WGSL identifier is **`sdata`**,
+not `shared` — `shared` is a reserved word in WGSL.
+
+Unlike `:scratch`, which uploads once, `:shared` is re-uploaded before
+every dispatch: the case it exists for is data that changes each frame.
+
+### `if` is a selection, not a branch
+
+In the kernel language `(if c a b)` compiles to WGSL `select(b, a, c)`.
+Both arms are evaluated; the condition chooses which value is kept. This is
+a **guarantee**, not an implementation detail:
+
+> Every `random-*` call site in either arm executes exactly once per
+> evaluation of the enclosing form. The number of draws a kernel consumes
+> is a static property of its text, independent of any data.
+
+That last sentence is the reason to want it. Stream alignment across points
+and substeps is guaranteed rather than hoped for, and a paused frame is
+reproducible by construction. It also matches the hardware: a divergent
+branch on a GPU executes both paths anyway, so a "real branch" would be a
+lie about cost dressed as a saving.
+
+⚠️ The consequence to keep in mind: a conditional draw is not conditional.
+
+```scheme
+(if lost? (random-normal 0.0 1.0) 0.0)   ; the draw happens either way
+```
+
+The value is discarded when `lost?` is false, but the RNG stream advances
+regardless. If you want the other thing — data-dependent consumption — it
+needs a construct that deliberately does not look like `if`, and none
+exists yet.
+
+`if` also hoists **both** arms' `let`-lifted statements, not just the tail
+expression.
+
+### Bounded folds
+
+The kernel language is pure-expression, and `fold-i` keeps it that way: an
+accumulator and a **compile-time** bound, no mutation, no break, no early
+exit. The whole form is one value, so it nests inside arithmetic and inside
+itself.
+
+```scheme
+;; Sum over 41 directions; for each, take the nearest of 12 segments.
+(fold-i 41 0.0 (k acc)
+  (let* ((ang (+ theta (* (f32 k) 0.0785)))
+         (dir (vec2 (cos ang) (sin ang)))
+         (d   (fold-i 12 far (w best)
+                (min best (seg-hit o dir (seg-a w) (seg-b w) far)))))
+    (+ acc (score (shared-samples k) d noise))))
+```
+
+The index is **`:u32`** — an address, not a quantity. WGSL has no implicit
+coercion, so using it as a number says `(f32 k)`. The body must have the
+accumulator's type, and the bound must be a literal: a runtime bound is a
+different performance object on a GPU, and a static one is what lets the
+draw count stay a property of the text.
+
+The body's own `let` bindings are emitted **inside** the loop. Every other
+form here hoists its statements; hoisting these would evaluate them once
+against the first index and reuse the answer for every iteration.
+
+⚠️ `let` binds **sequentially** here — it lowers to a run of WGSL `let`
+statements, so each binding is in scope for the next. `let*` is accepted as
+the same form. This differs from R7RS `let`, which is parallel.
 
 ### Substeps
 
@@ -459,13 +552,13 @@ What is wrong, what is missing, and what was decided about each. Kept here
 rather than in a separate file so that a rule and its known exceptions stay
 next to each other.
 
-Nothing here is scheduled. Items marked **agreed** have been explicitly
-decided on; the rest are candidates.
+Nothing here is scheduled. **Decided** marks a course that has been
+settled; the rest are candidates.
 
 
 ### Correctness gaps
 
-#### `guard` cannot catch native VM errors — **agreed, worth fixing**
+#### `guard` cannot catch native VM errors — **decided: worth fixing**
 
 Symptom in [§3](#3-errors-what-is-catchable). The cause is two error
 mechanisms that grew apart, not a design decision:
@@ -492,16 +585,15 @@ judgement call — add the `[VM Error]` prefix at the *reporting* site rather
 than in the message, so top-level output stays recognisable while
 `error-object-message` hands `guard` clean text.
 
-**Why the cost is acceptable (Colin).** Throwing is more expensive than
-setting a field, but the exception path here is not performance sensitive,
-and none of the exceptions we throw have a control-flow application the way
-something like `StopIteration` would. One caveat, which sharpens the argument
-rather than weakening it: `ContinuationEscape` (escape-only `call/cc`) *is*
-a control-flow use of a C++ exception. But it is a single throw site, and
-if a program ever put one in a hot loop the remedy would be to redesign
-that program, not to make throwing cheaper — so the exception path stays
-outside the performance envelope by construction. `RaiseEscape`, the one
-this change would multiply, has no control-flow use at all.
+**Why the cost is acceptable.** Throwing is dearer than setting a field,
+but this exception path is not performance sensitive, and no exception here
+has a control-flow application the way something like `StopIteration`
+would. `ContinuationEscape` (escape-only `call/cc`) is the one exception
+that *is* control flow — but it is a single throw site, and a program that
+put one in a hot loop would need redesigning rather than a cheaper throw.
+So the exception path stays outside the performance envelope by
+construction. `RaiseEscape`, the one this change multiplies, has no
+control-flow use at all.
 
 #### The reader has no `#x` / `#b` / `#o` literals
 
@@ -516,95 +608,88 @@ zero, so a typo'd name yields a plausible wrong number rather than a
 complaint.
 
 Entangled with keeping `+` first-class and un-opcoded for speed, which is a
-deliberate trade — so this is **undecided**, not agreed. Any fix has to
-answer what it costs on the benchmark suite before it is worth having.
+deliberate trade — so this is **undecided**. Any fix has to answer what it
+costs on the benchmark suite before it is worth having.
 
 ---
 
 ### Planned
 
-Items §1, §2, §4, §7, §8, §9 are done — §7 as a live parameter block and
-§4 as substeps, both in [§4 of this manual](#4-the-gpu-pipeline), together
-with the `seed`-as-`u32` fix §7 carried. Still outstanding from §7: `make`
-should degrade gracefully without emsdk. Order below is the,
-revised after seeing the compile-future work land — it is not the numbering
-order.
+#### A gather primitive
 
-#### §5 + §6 — scratch attributes and a third binding
+Some algorithms need `new[i] = old[a[i]]` — each element taking its value
+from an arbitrary other element rather than computing it.
 
-**§5 is built** — see [Scratch attributes](#4-the-gpu-pipeline).
+This does **not** break the diagonal write model. `new[i] = old[a[i]]`
+still writes only element `i`, so the "return, not clamp" invariant is
+untouched. What it breaks is in-place safety: within one dispatch, `i` may
+read a slot `j` has already overwritten.
 
-**§6 remains**: the same declaration machinery instantiated once more as a
-READ-ONLY buffer, for data a kernel reads but never writes — the gather
-indices being the immediate case. Everything below still applies; only the
-access mode differs.
-
-**A second buffer, not a wider point stride.** The renderer is the hot
-path and the kernel is not: widening the stride makes the vertex shader
-fetch fifteen floats to use seven, for every point every frame, for data it
-never reads. Two further arguments point the same way:
-
-- A second buffer need not have the same element count. A widened stride
-  forces every scratch quantity to be per-point, which rules out a
-  histogram, per-workgroup partials, or a cumulative array.
-- Selection needs only one column. Reading 60k floats back is 240 KB; a
-  widened stride would mean dragging the whole 1.7 MB point buffer across
-  to get one column of it.
-
-**Declared, not dynamic.** VEX creates attributes on the fly; a GPU buffer
-cannot, because allocation precedes dispatch. So attributes are declared
-once and the library computes offsets and accessors for both sides — the
-`wrangle-params!` pattern.
-
-**Typed, including `:u32`.** Charge and age are floats, but an source
-index is an integer, and storing it as a float aliases past 2²⁴ — the same
-class as the `seed` bug. `:vec3f` should be three flat floats with the
-accessor building the vector, as `pt_pos` already does, because
-`vec3<f32>` carries 16-byte alignment inside a storage array.
-
-#### Gathering, and why the wrangle does not change
-
-The question that shaped the above: some algorithms need `new[i] =
-old[a[i]]`, and it is the defining operation, not an exotic one.
-
-It does **not** break the diagonal write model. `new[i] = old[a[i]]` still
-writes only point `i`, so the "return, not clamp" invariant is untouched.
-What it breaks is in-place safety: within one dispatch, `i` may read a slot
-`j` has already overwritten.
-
-So the copy is **a primitive, not a wrangle**:
+So the copy should be **a primitive, not a wrangle**:
 
 ```scheme
 (gpu-gather! device dst src indices count)
 ```
 
 with a fixed shader vxs ships, compiled once, no user WGSL. The wrangle
-then stays strictly diagonal permanently, and the double-buffering becomes
-an internal detail of the primitive — a `copyBufferToBuffer` into a cached
+then stays strictly diagonal permanently, and the double-buffering is an
+internal detail of the primitive — a `copyBufferToBuffer` into a cached
 temp, then one gather pass. At 1.7 MB the extra copy is nothing.
 
-`indices` is a **buffer handle, not host bytes**. Today it is filled from
-the host; when a GPU-side cumulative sum exists it writes the same buffer
-and the primitive does not change.
+`indices` should be a **buffer handle, not host bytes**. Filled from the
+host through a `shared-layout!` region today; if something on the device
+ever computes them instead, it writes the same buffer and the primitive
+does not change.
 
-**Host-side selection is practical, not a fallback.** Systematic
-selection — one uniform, then N evenly spaced strata against the
-cumulative values — is a single O(N) pass with no per-element search, and
-lower variance than multinomial. For 60k points that is ~120k simple VM
-operations: a few milliseconds, fine at 10 Hz, and nothing needs it
-every frame anyway.
+Building the index array on the host is practical rather than a fallback:
+a single O(N) pass over 60k elements is ~120k simple VM operations, a few
+milliseconds, and nothing needs it every frame.
 
-So the whole pass is: values come home by readback, Scheme picks
-indices, indices go out through binding 2, one primitive does the take.
-Neither step is a wrangle. A GPU prefix sum becomes an optimisation for
-later rather than a prerequisite.
+#### `point`: a terminal form for wrangle bodies
 
-#### §3 — `define-once`  ← last
+Today a wrangle body is WGSL text. Everything above its final writes is
+already pure — `let`-bound expressions, no effects, no order dependence —
+so the body is really
 
-Ranked last by the report: "the setter pattern turned out to be the
-better shape anyway." Nearly free if picked up; `defined?` exists. The
-report's "leaked fiber" half does **not** apply to `web/app.js`, which
-clears fibers at line 179.
+```
+(state, randomness) → (new position, new colour, new attributes)
+```
+
+with the only effects at the very end, together. That needs no statements
+in the kernel language, only a terminal form:
+
+```scheme
+(define-wrangle drift
+  (let* ((cur  (* position inv-s))
+         (prop (+ cur (vec3 (random-normal 0.0 sigma)
+                            (random-normal 0.0 sigma)
+                            (random-normal 0.0 sigma))))
+         (keep (< (random-uniform 0.0 1.0) rate))
+         (nxt  (if keep prop cur)))
+    (point (* nxt s) size (heat-colour (length nxt)) :age (+ age 1.0))))
+```
+
+Two rules, both legible from the storage layout rather than memorised:
+
+- **Point fields are total.** `pt_write` is one packed write of seven
+  floats, so a partial point must read back what it does not mention.
+  Naming the input — `(point pos size colour)` — makes that visible, and
+  `(point pos)` simply does not parse.
+- **Attributes are partial.** They are written by independent setters into
+  a separate buffer, so omitting one means not emitting its setter. No
+  read-modify-write, nothing hidden.
+
+Keywords validate against `scratch-attributes!`, so `:acceptence` fails at
+expand time.
+
+This also finishes something half-built: `wrangle-env` already resolves a
+declared parameter to `w.p0` and a declared attribute to `attr_…(i)`, and
+nothing consumes those bindings yet, because no body is compiled from
+Scheme.
+
+#### `define-once`
+
+Nearly free; `defined?` exists.
 
 ### Infrastructure
 
@@ -621,7 +706,7 @@ than `web/vxs.wasm`.
 
 #### Migrate the classic testcases into the ground-up suite
 
-Colin's own idea, explicitly not urgent. The 13 `vx-test.scm` cases move
+Not urgent. The 13 `vx-test.scm` cases move
 from I/O-diff-against-golden-file to `assert-equal`-on-return-value —
 except `r4rstest.scm`, which is fundamentally a printing conformance suite
 and has to stay on the I/O path. Keep `dynamic.scm` whatever happens: its
@@ -659,3 +744,11 @@ Not scheduled, kept so they are not rediscovered from scratch.
 - Two wasm modules in one Node process interfere enough to distort timings.
   Benchmark one module per process.
 - `guard` does not catch `(car '())`. §3.
+- `shared` is a **reserved word** in WGSL. The shared binding is spelled
+  `sdata`; a binding named `shared` will not compile.
+- `let` in the kernel language binds **sequentially**, unlike R7RS `let`.
+  `let*` is accepted as the same form.
+- A `fold-i` index is `:u32`. Using it as a number needs `(f32 k)`, because
+  WGSL has no implicit coercion.
+- A conditional draw is not conditional: `if` is a selection, so a
+  `random-*` in either arm advances the stream every time. §4.

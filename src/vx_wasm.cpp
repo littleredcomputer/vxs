@@ -710,7 +710,7 @@ EM_JS(int, js_gpu_create_buffer, (int deviceId, const unsigned char *dataPtr, in
 // One compute dispatch over `count` points. The pipeline is cached by
 // source, as everything else here is; the bind group additionally depends
 // on WHICH buffer, so the buffer id is part of its key.
-EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, int seed, const unsigned char *paramsPtr, int paramsLen, int steps, int scratchId), {
+EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, int seed, const unsigned char *paramsPtr, int paramsLen, int steps, int scratchId, int sharedId), {
   globalThis.vxsGpuError = "";
   try {
     var shader = globalThis.vxsHandles ? globalThis.vxsHandles.get(shaderId) : null;
@@ -725,7 +725,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
     // kernel that declares binding 2 needs a three-entry layout, and one
     // that does not must keep the two-entry layout it had — a pipeline
     // cannot be reused across the two.
-    var key = bufId + " " + shaderId + " " + scratchId;
+    var key = bufId + " " + shaderId + " " + scratchId + " " + sharedId;
     if (steps < 1) steps = 1;
     var scratch = scratchId
       ? (globalThis.vxsHandles ? globalThis.vxsHandles.get(scratchId) : null)
@@ -733,6 +733,18 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
     if (scratchId && !scratch) {
       globalThis.vxsGpuError = "scratch buffer handle is not live";
       return -7;
+    }
+    // Shared data every element reads, as opposed to scratch, which each
+    // element owns. READ-ONLY in the shader, so the layout entry must say
+    // 'read-only-storage' — a plain 'storage' entry against a
+    // var<storage, read> declaration is a validation failure, and one that
+    // surfaces through uncapturederror rather than as a compile error.
+    var shared = sharedId
+      ? (globalThis.vxsHandles ? globalThis.vxsHandles.get(sharedId) : null)
+      : null;
+    if (sharedId && !shared) {
+      globalThis.vxsGpuError = "shared buffer handle is not live";
+      return -8;
     }
     // Alignment is a device limit, not a constant. 256 is the guaranteed
     // maximum and the near-universal value, but reading it is free.
@@ -748,6 +760,9 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
           { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
         ].concat(scratch ? [
           { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+        ] : []).concat(shared ? [
+          { binding: 3, visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: 'read-only-storage' } }
         ] : [])
       });
       var pipeline = device.createComputePipeline({
@@ -778,6 +793,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
           { binding: 0, resource: { buffer: ubuf, offset: 0, size: 48 } },
           { binding: 1, resource: { buffer: buf } }
         ].concat(scratch ? [{ binding: 2, resource: { buffer: scratch } }] : [])
+         .concat(shared ? [{ binding: 3, resource: { buffer: shared } }] : [])
       });
       entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind,
                 bgl: bgl, ustride: ustride, cap: steps };
@@ -799,6 +815,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
           { binding: 0, resource: { buffer: entry.ubuf, offset: 0, size: 48 } },
           { binding: 1, resource: { buffer: buf } }
         ].concat(scratch ? [{ binding: 2, resource: { buffer: scratch } }] : [])
+         .concat(shared ? [{ binding: 3, resource: { buffer: shared } }] : [])
       });
       entry.cap = steps;
       entry.uarr = null;
@@ -1182,7 +1199,7 @@ static int js_gpu_draw(int, int, const char *) { return -1; }
 static int js_gpu_run_kernel(int, int, const char *, double) { return -1; }
 static int js_gpu_draw_instances(int, int, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
-static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int, int, int) { return -1; }
+static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int, int, int, int) { return -1; }
 static int js_gpu_draw_buffer(int, int, int, const char *, int, double, double, double, double, double) { return -1; }
 static int js_gpu_draw_geometry(int, int, int, const char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
@@ -1482,9 +1499,20 @@ static void register_wasm_primitives(VM &vm) {
       if (sc->released) vm.raise_contract("gpu-wrangle!: scratch handle was released");
       scratch_id = static_cast<int>(sc->id);
     }
+    // Optional shared read-only buffer, bound at 3.
+    int shared_id = 0;
+    if (argc > 9 && !args[9].is_false()) {
+      if (!Heap::is_handle(args[9])) {
+        vm.raise_contract("gpu-wrangle!: expected a shared buffer handle, got " +
+                          vm.format_value(args[9]));
+      }
+      ObjHandle *sd = args[9].as_ptr<ObjHandle>();
+      if (sd->released) vm.raise_contract("gpu-wrangle!: shared handle was released");
+      shared_id = static_cast<int>(sd->id);
+    }
     int rc = js_gpu_wrangle(static_cast<int>(d->id), static_cast<int>(b->id),
                             static_cast<int>(sh->id), args[3].as_int(), t, seed,
-                            params, params_len, steps, scratch_id);
+                            params, params_len, steps, scratch_id, shared_id);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -1492,7 +1520,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-wrangle!: " + detail);
     }
     return Value::boolean_true();
-  }, 5, 9));
+  }, 5, 10));
 
   // (gpu-draw-buffer! device buffer wgsl count time camera [canvas-id]) -> #t
   vm.def_global("gpu-draw-buffer!", vm.heap.make_subr("gpu-draw-buffer!", [](VM &vm, uint32_t argc, Value *args) -> Value {

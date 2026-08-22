@@ -320,6 +320,49 @@ function check(name, cond, detail) {
         ev('bad-scratch') === 'raised', ev('bad-scratch'));
   ev(`(scratch-attributes! '())`);
 
+  //--- shared read-only data, bound at 3 -------------------------------
+  ev(`(shared-layout! '((walls 48) (obs 41)))`);
+  ev('(define SH (make-shared)) (define SHV (shared-view SH))');
+  ev(`(shared-set! SHV 'walls 0 1.5)
+      (shared-set! SHV 'obs 0 2.5)
+      (shared-set! SHV 'obs 40 3.5)`);
+  ev('(define shb #f) (define shsh #f) (define shback #f)');
+  ev(`(future (let* ((h (gpu-buffer dev SH))
+                     (k (touch (gpu-compile dev (wrangle-wgsl
+                          "attr_weight_set(i, shared_obs(0u) + shared_walls(0u));")))))
+                (set! shb h) (set! shsh k)
+                (gpu-wrangle! dev handle k 3 0.0 1 #f 1 sbuf h)
+                (set! shback (touch (gpu-buffer-read dev h)))))`);
+  await pump(20);
+
+  check('a kernel reading shared data compiles', ev('(handle? shsh)') === '#t', ev('shsh'));
+  check('and binds four buffers',
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)) ===
+          JSON.stringify([0, 1, 2, 3]),
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)));
+  // A plain 'storage' entry against a var<storage, read> declaration is a
+  // validation failure that surfaces through uncapturederror rather than
+  // as a compile error — which is to say silently, unless someone listens.
+  check('binding 3 is read-only-storage, not storage',
+        JSON.stringify(fakeDevice._lastBGL.entries.map((e) => [e.binding, e.buffer.type])) ===
+          JSON.stringify([[0, 'uniform'], [1, 'storage'], [2, 'storage'], [3, 'read-only-storage']]),
+        JSON.stringify(fakeDevice._lastBGL.entries.map((e) => [e.binding, e.buffer.type])));
+
+  ev('(define SRV (shared-view (cdr shback)))');
+  check('shared data round-trips off the device',
+        ev(`(shared-ref SRV 'obs 0)`) === '2.5', ev(`(shared-ref SRV 'obs 0)`));
+  check('and regions land at their declared offsets',
+        ev(`(list (shared-ref SRV 'walls 0) (shared-ref SRV 'obs 40))`) === '(1.5 3.5)',
+        ev(`(list (shared-ref SRV 'walls 0) (shared-ref SRV 'obs 40))`));
+
+  ev('(define bad-shared #f)');
+  ev(`(future (set! bad-shared (guard (e (#t 'raised))
+                (gpu-wrangle! dev handle wsh 3 0.0 7 PB 1 #f 42))))`);
+  await pump(4);
+  check('a non-handle shared argument raises',
+        ev('bad-shared') === 'raised', ev('bad-shared'));
+  ev(`(shared-layout! '()) (scratch-attributes! '())`);
+
   ev('(define after-release #f)');
   ev(`(future (set! after-release
               (guard (e (#t 'raised)) (gpu-buffer-read dev 42))))`);
