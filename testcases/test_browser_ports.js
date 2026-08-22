@@ -269,18 +269,32 @@ const createVxsModule = require(require('path').join(__dirname, '..', 'web', 'vx
     ev('(define (yt-burn n) (let l ((i 0) (a 0.0)) (if (< i n) (l (+ i 1) (+ a (sqrt i))) a)))');
     ev('(future (let loop () (yt-burn 400000) (set! yt-passes (+ yt-passes 1)) (yield) (loop)))');
     const before = stats();
-    for (let i = 0; i < 40; i++) step();
+    // STEP UNTIL THE FIBER HAS FINISHED SOMETHING, rather than a fixed 40
+    // frames. How many frames a 400,000-iteration pass takes is a property
+    // of the machine, and on a slower one no pass completed inside 40:
+    // passes was 0 and preempts was 40, so frames-minus-preemptions came
+    // out to 0 as well and the bad metric was accidentally RIGHT. The test
+    // then failed for the one reason it should never fail — it had nothing
+    // to measure. A fixed frame count was measuring the box, not the code.
+    let frames = 0;
+    let passes = 0;
+    while (frames < 600 && passes < 2) {
+      step();
+      frames++;
+      passes = parseInt(ev('yt-passes'));
+    }
     const after = stats();
     const yields = after.total_yields - before.total_yields;
-    const passes = parseInt(ev('yt-passes'));
     const preempts = after.fibers_preempted_total - before.fibers_preempted_total;
 
+    check("the fiber completed passes there were to count",
+          passes > 0, `${passes} passes in ${frames} frames — nothing to measure`);
     check("yields counted equals passes completed", yields === passes,
           `${yields} yields vs ${passes} passes`);
     check("the fiber really did overrun the budget", preempts > 0, `${preempts}`);
     check("and frames-minus-preemptions would have been wrong",
-          (40 - preempts) !== passes,
-          `40-${preempts} happened to equal ${passes}`);
+          (frames - preempts) !== passes,
+          `${frames}-${preempts} happened to equal ${passes}`);
     M.ccall('vxs_clear_fibers', null, [], []);
   }
 

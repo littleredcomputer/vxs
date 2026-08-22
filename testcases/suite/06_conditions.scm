@@ -196,6 +196,48 @@
 (assert-false "exact-integer? false for an inexact whole number" (exact-integer? 5.0))
 (assert-true "nan? detects NaN" (nan? (/ 0.0 0.0)))
 (assert-false "nan? false for an ordinary number" (nan? 5))
+(assert-true "and NaN from a domain error" (nan? (sqrt -1.0)))
+(assert-false "a NaN is not equal to itself, per IEEE"
+              (= (/ 0.0 0.0) (/ 0.0 0.0)))
+(assert-false "infinities are not NaN and must survive untouched"
+              (or (nan? (/ 1.0 0.0)) (nan? (/ -1.0 0.0))))
+
+;;--- EVERY NaN must canonicalize ----------------------------------------
+;; The tag space 0xFFF8-0xFFFF IS the negative-quiet-NaN range, so a NaN
+;; that reaches storage unchanged does not merely misprint — it becomes
+;; another type:
+;;
+;;   0xFFF8  the empty list     0xFFFE  an integer
+;;   0xFFF9  #f                 0xFFFF  a POINTER, dereferenced
+;;
+;; from_double used to test the bits by hand and required the quiet bit to
+;; be CLEAR, so it caught only signalling NaNs. On arm64 0.0/0.0 yields a
+;; POSITIVE quiet NaN and nothing showed; on x86-64 it yields
+;; 0xFFF8000000000000 and (nan? (/ 0.0 0.0)) was #f, because the NaN had
+;; become the empty list. The last two cases below used to SIGSEGV on the
+;; read, on every architecture, and gpu-buffer-read hands back device bytes
+;; that a program may legitimately view as :f64.
+
+;; Spelled through string->number because the reader has no #x literals
+;; (see MANUAL.md §6) — which is just as well here, since the hex is the
+;; whole point and a decimal constant would hide it.
+(define (f64-from-hi hex)
+  (let* ((b (make-bytes 8))
+         (u (bytes-view b :u32))
+         (f (bytes-view b :f64)))
+    (view-set! u 0 0)
+    (view-set! u 1 (string->number hex 16))
+    (view-ref f 0)))
+
+(assert-true "a positive quiet NaN reads as NaN"     (nan? (f64-from-hi "7FF80000")))
+(assert-true "a NEGATIVE quiet NaN is not the empty list" (nan? (f64-from-hi "FFF80000")))
+(assert-false "and really is not"                    (null? (f64-from-hi "FFF80000")))
+(assert-true "nor #f"                                (nan? (f64-from-hi "FFF90000")))
+(assert-true "nor an integer"                        (nan? (f64-from-hi "FFFE0000")))
+(assert-false "and really is not that either"        (integer? (f64-from-hi "FFFE0000")))
+;; This one dereferenced the payload as a pointer.
+(assert-true "nor a pointer"                         (nan? (f64-from-hi "FFFF0000")))
+(assert-true "with every payload bit set either"     (nan? (f64-from-hi "FFFFFFFF")))
 (assert-true "infinite? detects infinity" (infinite? (/ 1.0 0.0)))
 (assert-false "infinite? false for a finite float" (infinite? 5.0))
 (assert-true "finite? true for an exact integer" (finite? 5))

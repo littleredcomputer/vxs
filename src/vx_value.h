@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -63,10 +64,28 @@ struct Value {
   static inline Value from_double(double d) {
     uint64_t bits;
     std::memcpy(&bits, &d, sizeof(bits));
-    // If it's a NaN, canonicalize to a positive quiet NaN so it doesn't collide
-    // with tags
-    if ((bits & 0x7FF8000000000000ULL) == 0x7FF0000000000000ULL &&
-        (bits & 0x0007FFFFFFFFFFFFULL) != 0) {
+    // EVERY NaN becomes the one canonical NaN. This is the invariant the
+    // whole representation rests on: the tag space 0xFFF8-0xFFFF IS the
+    // negative-quiet-NaN range, so a NaN that reaches storage unchanged
+    // does not merely misprint — it becomes another type.
+    //
+    //   0xFFF8  the empty list        0xFFFE  an integer
+    //   0xFFF9  #f                    0xFFFF  a POINTER, dereferenced
+    //
+    // The previous test required the exponent to be all ones AND the quiet
+    // bit to be CLEAR, so it caught only SIGNALLING NaNs and let every
+    // quiet one through untouched. It also never masked the sign.
+    //
+    // On arm64 0.0/0.0 yields +qNaN (0x7FF8...), which is harmless, so the
+    // suite was green on a Mac and red on x86-64 — where 0.0/0.0 yields
+    // 0xFFF8000000000000, bit-identical to the empty list. The dangerous
+    // half was never architecture-specific though: any :f64 view over
+    // bytes could produce 0xFFFF... and segfault on the read, and
+    // gpu-buffer-read hands back device bytes a program may view that way.
+    //
+    // std::isnan rather than a bit test, because the bit test is the thing
+    // that was wrong twice.
+    if (std::isnan(d)) {
       bits = 0x7FF8000000000000ULL;
     }
     return Value(bits);
