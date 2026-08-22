@@ -710,7 +710,7 @@ EM_JS(int, js_gpu_create_buffer, (int deviceId, const unsigned char *dataPtr, in
 // One compute dispatch over `count` points. The pipeline is cached by
 // source, as everything else here is; the bind group additionally depends
 // on WHICH buffer, so the buffer id is part of its key.
-EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, double seed), {
+EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, int seed, const unsigned char *paramsPtr, int paramsLen), {
   globalThis.vxsGpuError = "";
   try {
     var shader = globalThis.vxsHandles ? globalThis.vxsHandles.get(shaderId) : null;
@@ -736,7 +736,12 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
         compute: { module: module, entryPoint: 'main' }
       });
       var ubuf = device.createBuffer({
-        size: 16,   // struct WU: time, count, seed, pad
+        // struct WU: time/count/seed/pad, then eight parameter slots.
+        // 48 rather than 16 because a kernel constant baked into the
+        // source recompiles the shader every time it changes; in the
+        // uniform it is free, and the uniform is rewritten before every
+        // dispatch anyway.
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
       var bind = device.createBindGroup({
@@ -750,8 +755,28 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
       globalThis.vxsWrangleCache[key] = entry;
     }
 
-    device.queue.writeBuffer(entry.ubuf, 0,
-      new Float32Array([time, count, seed, 0.0]));
+    // MIXED f32/u32, so one typed array will not do: count and seed are
+    // integers in the struct. seed especially — as an f32 converted with
+    // u32() it aliased every value past 2^24 onto its neighbours, so
+    // "a different seed" quietly meant "the same noise".
+    if (!entry.uarr) {
+      entry.uarr = new ArrayBuffer(48);
+      entry.uf32 = new Float32Array(entry.uarr);
+      entry.uu32 = new Uint32Array(entry.uarr);
+    }
+    entry.uf32[0] = time;
+    entry.uu32[1] = count >>> 0;
+    entry.uu32[2] = seed >>> 0;
+    entry.uf32[3] = 0.0;
+    // Parameters are optional; absent means the slots stay zero. The
+    // caller owns the block and rewrites it in place, so this is a copy of
+    // at most 32 bytes and never an allocation.
+    for (var pi = 0; pi < 8; pi++) {
+      entry.uf32[4 + pi] = (paramsPtr && pi * 4 < paramsLen)
+        ? HEAPF32[(paramsPtr >> 2) + pi]
+        : 0.0;
+    }
+    device.queue.writeBuffer(entry.ubuf, 0, entry.uf32);
 
     var encoder = device.createCommandEncoder();
     var pass = encoder.beginComputePass();
@@ -1089,7 +1114,7 @@ static int js_gpu_draw(int, int, const char *) { return -1; }
 static int js_gpu_run_kernel(int, int, const char *, double) { return -1; }
 static int js_gpu_draw_instances(int, int, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
-static int js_gpu_wrangle(int, int, int, int, double, double) { return -1; }
+static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int) { return -1; }
 static int js_gpu_draw_buffer(int, int, int, const char *, int, double, double, double, double, double) { return -1; }
 static int js_gpu_draw_geometry(int, int, int, const char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
@@ -1344,13 +1369,30 @@ static void register_wasm_primitives(VM &vm) {
     }
     double t = args[4].is_int() ? static_cast<double>(args[4].as_int())
                                 : args[4].as_double();
-    double seed = 0.0;
+    // The seed is an INTEGER all the way down now. It used to be carried
+    // as a double and converted in the shader with u32(), which aliases
+    // every value past 2^24 onto its neighbours — a counter-based RNG
+    // addressed by a float is not addressed at all. A real given as a seed
+    // is truncated rather than refused, so existing callers keep working.
+    int seed = 0;
     if (argc > 5) {
-      seed = args[5].is_int() ? static_cast<double>(args[5].as_int())
-                              : args[5].as_double();
+      seed = args[5].is_int() ? args[5].as_int()
+                              : static_cast<int>(args[5].as_double());
+    }
+    // Optional parameter block: eight floats the caller owns and rewrites
+    // in place between frames, so a live knob costs a 32-byte copy rather
+    // than a shader recompile. Absent means the slots read zero.
+    const unsigned char *params = nullptr;
+    int params_len = 0;
+    if (argc > 6 && !args[6].is_false()) {
+      ObjBytes *pb = vm.require_bytes(args[6], "gpu-wrangle!");
+      params = pb->data.data();
+      params_len = static_cast<int>(pb->data.size());
+      if (params_len > 32) params_len = 32;
     }
     int rc = js_gpu_wrangle(static_cast<int>(d->id), static_cast<int>(b->id),
-                            static_cast<int>(sh->id), args[3].as_int(), t, seed);
+                            static_cast<int>(sh->id), args[3].as_int(), t, seed,
+                            params, params_len);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -1358,7 +1400,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-wrangle!: " + detail);
     }
     return Value::boolean_true();
-  }, 5, 6));
+  }, 5, 7));
 
   // (gpu-draw-buffer! device buffer wgsl count time camera [canvas-id]) -> #t
   vm.def_global("gpu-draw-buffer!", vm.heap.make_subr("gpu-draw-buffer!", [](VM &vm, uint32_t argc, Value *args) -> Value {

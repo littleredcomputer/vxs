@@ -319,6 +319,35 @@ have reduced to a few hundred numbers first.
 | `gpu-buffer`, `gpu-buffer-write!` | synchronous | ✅ |
 | all six draw primitives | synchronous | ✅ |
 
+### Live parameters
+
+A constant written into a kernel lives in the shader *source*, so changing
+it recompiles — dragging a slider hitches on every frame it moves. The
+wrangle uniform has eight spare slots for values that change per frame:
+
+```scheme
+(wrangle-params! '(sigma radius gain))   ; kernel writes `sigma`, gets w.p0
+
+(define PB (make-wrangle-params))        ; 8 floats, made ONCE
+(define PV (wrangle-params-view PB))
+(param-set! PV 'sigma 0.7)               ; no allocation
+(gpu-wrangle! device buf shader n t seed PB)
+```
+
+One declaration is the single source of truth for both sides, so a typo is
+an error rather than a silently wrong slot. The block is a bytes object
+written in place rather than a fresh list per frame, because at sixty
+frames a second a list allocates sixty times a second and these demos
+otherwise run at zero objects per frame.
+
+`run-wrangle-loop` takes it as an optional argument after the canvas id.
+Omit it and the slots read zero.
+
+⚠️ Eight slots is the limit, and it is `p0 : f32, p1 : f32, …` in the
+struct rather than `array<f32, 8>` on purpose: in the uniform address space
+an array's stride is padded to 16 bytes, so the array spelling would cost
+128 bytes and index wrongly for anyone assuming the floats were packed.
+
 ### Pausing
 
 Every render loop keeps **drawing** while paused and stops only the
@@ -425,25 +454,13 @@ answer what it costs on the benchmark suite before it is worth having.
 
 ### Planned
 
-Items §1, §2, §8, §9 are done. Order below is the, revised after
+Items §1, §2, §7, §8, §9 are done — §7 as a live parameter block (see
+[§4](#4-the-gpu-pipeline)), together with the `seed`-as-`u32` fix it
+carried. Still outstanding from §7: `make` should degrade gracefully
+without emsdk. Order below is the, revised after
 seeing the compile-future work land — it is not the numbering order.
 
-#### §7 — a live parameter block  ← **next**
-
-Bigger than the `w.pad` it was first written as. Today a kernel constant is
-baked into the shader SOURCE, so dragging a slider recompiles on every
-change and the motion hitches. Making it a uniform is the difference
-between "a knob you demonstrate and a knob you play."
-
-`w.pad` is one spare float and would fit exactly one parameter, which is
-why it was proposed — but the struct should grow to a few general-purpose
-slots instead. It costs nothing, and per the report it is "the last thing
-standing between a control panel and a real instrument."
-
-Also in §7, unrelated and small: `seed` should be a `u32` rather than a
-float, and `make` should degrade gracefully without emsdk.
-
-#### §4 — `gpu-wrangle!` repeat count
+#### §4 — `gpu-wrangle!` repeat count  ← **next**
 
 Small, and it lifts steps-per-frame past the frame-budget warning. Run the
 kernel N times under one encoder and one submit. Not fixable from Scheme:

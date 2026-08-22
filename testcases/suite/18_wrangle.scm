@@ -74,8 +74,12 @@
 (assert-true "rng_unit is clamped away from zero"
              (string-contains? src "max(bitcast<f32>((rng_u32() >> 9u) | 1065353216u) - 1.0, 5.9604645e-8)"))
 
-(assert-true "draws are addressed by point index"
-             (string-contains? src "rng_init(i, u32(w.seed), 0u);"))
+;; NO u32() CONVERSION HERE. The seed is a u32 in the struct because it
+;; used to be an f32 the preamble converted, and that aliases every seed
+;; past 2^24 onto its neighbours — "a different seed" quietly meaning "the
+;; same noise". A counter-based RNG addressed by a float is not addressed.
+(assert-true "draws are addressed by point index, from an integer seed"
+             (string-contains? src "rng_init(i, w.seed, 0u);"))
 
 ;; The rotation constants are the ones the host uses. If these ever
 ;; disagreed, GPU and host randomness would silently diverge — and the
@@ -110,7 +114,7 @@
 ;; The tail of the last workgroup runs with indices past the end. It must
 ;; RETURN — clamping would make several invocations write the same point.
 (assert-true "out-of-range invocations return"
-             (string-contains? src "if (i >= u32(w.count)) { return; }"))
+             (string-contains? src "if (i >= w.count) { return; }"))
 
 ;;--- the storage binding is writable ------------------------------------
 ;; The renderer binds the same buffer read-only; the wrangle must not.
@@ -126,7 +130,18 @@
 (assert-true "colour accessor"    (string-contains? src "fn pt_colour(i : u32)"))
 (assert-true "writer"             (string-contains? src "fn pt_write(i : u32,"))
 (assert-true "the uniform carries time, count and seed"
-             (string-contains? src "struct WU {\n  time : f32,\n  count : f32,\n  seed : f32,"))
+             (string-contains? src "struct WU {\n  time : f32,\n  count : u32,\n  seed : u32,"))
+
+;; Eight spare slots, and named scalars rather than array<f32, 8>: in the
+;; uniform address space an array's stride is padded to 16 bytes, so the
+;; array spelling would cost 128 bytes and index wrongly for anyone who
+;; assumed the floats were packed. This way the struct is exactly 48.
+(assert-true "and eight live parameter slots"
+             (string-contains? src "  p0 : f32,\n  p1 : f32,"))
+(assert-true "through to the eighth"
+             (string-contains? src "  p7 : f32,\n};"))
+(assert-true "not an array, whose uniform stride would be 16 bytes each"
+             (not (string-contains? src "array<f32, 8>")))
 
 ;; The distributions the body can reach. Named individually because the
 ;; point of welding this library in was to have them.
@@ -252,5 +267,59 @@
 (assert-equal "time is bound to the uniform field"
               "w.time" (wgsl-code 'time wrangle-env))
 (assert-equal "and carries its type" :f32 (wgsl-type 'time wrangle-env))
+
+;;--- live parameters ----------------------------------------------------
+;; A kernel constant baked into the shader SOURCE means changing it
+;; recompiles, so a slider hitches on every frame it moves. These slots
+;; live in the uniform, which is rewritten before every dispatch anyway.
+;;
+;; The declaration is the single source of truth for both sides: the kernel
+;; writes `sigma` and gets w.p0, the host writes 'sigma and hits float 0.
+;; A positional (param 0) would let the two drift apart silently.
+
+(wrangle-params! '(sigma radius gain))
+(assert-equal "a declared parameter emits its slot" "w.p0" (wgsl-code 'sigma wrangle-env))
+(assert-equal "in declaration order" "w.p2" (wgsl-code 'gain wrangle-env))
+(assert-equal "and is an f32 to the kernel" :f32 (wgsl-type 'gain wrangle-env))
+(assert-equal "parameters compose into expressions"
+              "(w.p0 * w.time)" (wgsl-code '(* sigma time) wrangle-env))
+
+;; count and seed are u32 in the struct but :f32 here, because WGSL has no
+;; implicit coercion and every use of them in a kernel is arithmetic. The
+;; env carries the text to emit, so the conversion is part of the spelling.
+(assert-equal "seed reads as a float in a kernel"
+              "f32(w.seed)" (wgsl-code 'seed wrangle-env))
+(assert-equal "and so does count"
+              "f32(w.count)" (wgsl-code 'count wrangle-env))
+
+;; Redeclaring REPLACES. Appending instead would leave the old names
+;; resolving to slots the host is no longer writing.
+(wrangle-params! '(alpha))
+(assert-equal "redeclaring rebinds the first slot" "w.p0" (wgsl-code 'alpha wrangle-env))
+(assert-equal "and drops the previous names" #f (assq 'sigma wrangle-env))
+(assert-equal "while the built-ins survive" "w.time" (wgsl-code 'time wrangle-env))
+
+;; The block itself: eight floats, made once and written in place, because
+;; a fresh list per frame would allocate sixty times a second in a demo
+;; that otherwise runs at zero objects per frame.
+(wrangle-params! '(sigma radius gain))
+(define PB (make-wrangle-params))
+(define PV (wrangle-params-view PB))
+(assert-equal "the block is eight floats" 32 (bytes-length PB))
+(assert-equal "unset slots read zero" 0.0 (param-ref PV 'gain))
+(param-set! PV 'gain 2.5)
+(param-set! PV 'sigma 0.25)
+(assert-equal "a parameter round-trips by name" 2.5 (param-ref PV 'gain))
+(assert-equal "and does not disturb its neighbours" 0.25 (param-ref PV 'sigma))
+(assert-equal "or the ones between" 0.0 (param-ref PV 'radius))
+(assert-equal "writing by name lands in the declared slot" 0.25 (view-ref PV 0))
+(assert-equal "third name, third float" 2.5 (view-ref PV 2))
+
+(assert-equal "an undeclared name is an error, not slot zero"
+              'raised (guard (e (#t 'raised)) (param-set! PV 'nonesuch 1.0)))
+(assert-equal "more than eight parameters is an error"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-params! '(a b c d e f g h i))))
+(wrangle-params! '(sigma radius gain))   ; leave the env as we found it
 
 (suite-summary)

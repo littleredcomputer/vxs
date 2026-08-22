@@ -27,7 +27,7 @@ const { installFakeWebGPU } = require(path.join(__dirname, 'fake_webgpu.js'));
 
 // A shader carrying this marker is reported as failing to compile.
 const POISON = 'BADSHADER';
-installFakeWebGPU({
+const fakeDevice = installFakeWebGPU({
   compileMessages: (code) =>
     code.indexOf(POISON) >= 0
       ? [{ type: 'error', lineNum: 2, linePos: 4, message: 'no entry point found' },
@@ -159,6 +159,54 @@ function check(name, cond, detail) {
   check('passing the compiled handle works', ev('drew') === 'ok', ev('drew'));
 
   //--- handle hygiene ---------------------------------------------------
+  //--- live parameters cost no recompile -------------------------------
+  // The whole point of the parameter block. A constant baked into the
+  // shader SOURCE means moving a slider produces a new source string, a
+  // new shader and a new pipeline, once per frame the slider moves — which
+  // is the difference between a knob you demonstrate and a knob you play.
+  // Here the values ride in the uniform, which is rewritten before every
+  // dispatch anyway.
+  ev(`(wrangle-params! '(sigma gain))`);
+  ev('(define PB (make-wrangle-params)) (define PV (wrangle-params-view PB))');
+  ev('(define wsh #f)');
+  ev(`(future (set! wsh (touch (gpu-compile dev
+        (wrangle-wgsl "pt_write(i, pt_pos(i), 1.0, vec3<f32>(w.p0, w.p1, 0.0));")))))`);
+  await pump(8);
+  check('a wrangle kernel compiles', ev('(handle? wsh)') === '#t', ev('wsh'));
+
+  const compiles0 = fakeDevice._compiles || 0;
+  const seen = [];
+  for (const [sg, gn] of [[0.25, 1.0], [0.5, 2.0], [0.75, 3.0]]) {
+    ev(`(param-set! PV 'sigma ${sg}) (param-set! PV 'gain ${gn})`);
+    ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB)`);
+    const w = fakeDevice.queue._lastWrite;
+    const f = new Float32Array(w.bytes.buffer, 0, 12);
+    const u = new Uint32Array(w.bytes.buffer, 0, 12);
+    seen.push({ size: w.size, seed: u[2], p0: f[4], p1: f[5] });
+  }
+  check('the uniform block is 48 bytes',
+        seen.every((r) => r.size === 48), JSON.stringify(seen[0]));
+  check('parameters reach the kernel by declared slot',
+        seen[0].p0 === 0.25 && seen[0].p1 === 1 &&
+        seen[2].p0 === 0.75 && seen[2].p1 === 3, JSON.stringify(seen));
+  check('and changing them recompiles NOTHING',
+        (fakeDevice._compiles || 0) - compiles0 === 0,
+        `${(fakeDevice._compiles || 0) - compiles0} extra compiles`);
+
+  // The seed used to be an f32 the shader converted with u32(), which
+  // aliases every value past 2^24 onto its neighbours: "a different seed"
+  // quietly meaning "the same noise".
+  check('the seed arrives as a true u32',
+        seen.every((r) => r.seed === 7), JSON.stringify(seen.map((r) => r.seed)));
+  ev(`(gpu-wrangle! dev handle wsh 3 0.0 16777217)`);
+  const tail = fakeDevice.queue._lastWrite.bytes.buffer;
+  check('so a seed past 2^24 survives exactly',
+        new Uint32Array(tail, 0, 12)[2] === 16777217,
+        String(new Uint32Array(tail, 0, 12)[2]));
+  check('and omitting the block leaves the slots zero',
+        new Float32Array(tail, 0, 12)[4] === 0,
+        String(new Float32Array(tail, 0, 12)[4]));
+
   ev('(define after-release #f)');
   ev(`(future (set! after-release
               (guard (e (#t 'raised)) (gpu-buffer-read dev 42))))`);
