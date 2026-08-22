@@ -217,6 +217,83 @@ static void flush_default_sinks(VM &vm) {
 // The host-side object table. Lives on globalThis so the embedder (app.js,
 // a test harness, eventually the WebGPU bindings) can put objects in and
 // read them back out; the VM only ever sees the integer.
+// Shader diagnostics.
+//
+// createShaderModule DOES NOT THROW on a bad shader. WebGPU reports compile
+// and validation problems asynchronously — through getCompilationInfo, an
+// error scope, or the device's uncapturederror event. With none of the
+// three wired up, a shader that is not a WGSL program by any reading
+// produced: an apparently successful createShaderModule, an invalid
+// pipeline, a try/catch that never fired, a return code of 0, and a
+// dispatch that silently did nothing. Sixty frames a second of nothing,
+// with every indicator reading healthy and a black canvas.
+//
+// The cost is not the missing message, it is that the symptom is
+// INDISTINGUISHABLE from arithmetic that has gone wrong — values gone NaN,
+// off camera, or subpixel. Those are all real possibilities and there was
+// no evidence pointing anywhere else. The compile log, with a line and a
+// column, existed the whole time and was being thrown away.
+//
+// This is also the tidy failure that lib/gpu.scm's header argues against,
+// in the same system that removed the guards from the render loops for
+// exactly this reason. Same argument, opposite behaviour.
+//
+// Two halves, because the information is asynchronous and the call is not:
+//
+//   REPORT   getCompilationInfo, printed to the page terminal with line,
+//            column, message and the offending source line. Arrives a
+//            frame or two late, which is the difference between a
+//            diagnosis and nothing.
+//   POISON   record the failure against the source. The pipeline cache is
+//            already keyed by source, so every later call with that same
+//            shader fails loudly and specifically. First frame quiet,
+//            every frame after that fatal.
+EM_JS(void, js_install_gpu_diagnostics, (), {
+  if (globalThis.vxsShaderDiag) return;
+  globalThis.vxsShaderDiag = { errors: new Map() };
+
+  // Diagnostics go to the PAGE, not the devtools console. A failure only
+  // reaches someone working without a browser if it becomes text they can
+  // paste.
+  var term = function(text) {
+    if (typeof globalThis.vxsPrint === 'function') globalThis.vxsPrint(text);
+    else if (typeof console !== 'undefined') console.log(text);
+  };
+
+  globalThis.vxsCompileShader = function(device, code) {
+    var mod = device.createShaderModule({ code: code });
+    if (!mod.getCompilationInfo) return mod;
+    mod.getCompilationInfo().then(function(info) {
+      var lines = code.split('\n');
+      var firstError = null;
+      for (var i = 0; i < info.messages.length; i++) {
+        var m = info.messages[i];
+        if (m.type === 'info') continue;
+        var head = 'WGSL ' + m.type + ' at line ' + m.lineNum +
+                   ':' + m.linePos + ' — ' + m.message;
+        term(head);
+        var src = lines[m.lineNum - 1];
+        if (src !== undefined) term('    ' + m.lineNum + ' | ' + src);
+        // Only errors poison. A warning is worth printing and must not
+        // stop a shader that the driver was willing to compile.
+        if (m.type === 'error' && firstError === null) firstError = head;
+      }
+      if (firstError !== null) {
+        globalThis.vxsShaderDiag.errors.set(code, firstError);
+        term('  (this shader will now fail loudly on every subsequent frame)');
+      }
+    }, function(e) {
+      term('WGSL: could not read compilation info: ' + e);
+    });
+    return mod;
+  };
+
+  globalThis.vxsShaderError = function(code) {
+    var e = globalThis.vxsShaderDiag.errors.get(code);
+    return e === undefined ? null : e;
+  };
+});
+
 EM_JS(void, js_ensure_handle_table, (), {
   if (!globalThis.vxsHandles) {
     globalThis.vxsHandles = {
@@ -241,6 +318,7 @@ EM_JS(int, js_handle_count, (), {
   return globalThis.vxsHandles ? globalThis.vxsHandles.size() : 0;
 });
 #else
+static void js_install_gpu_diagnostics() {}
 static void js_ensure_handle_table() {}
 static void js_release_handle(int) {}
 static int js_handle_count() { return 0; }
@@ -325,6 +403,16 @@ EM_JS(void, js_request_device, (int token, int adapterId), {
   try {
     adapter.requestDevice().then(function(d) {
       try {
+        // Validation failures that are not compile errors surface here
+        // and nowhere else. Three lines, and without them a bad bind group
+        // or a buffer-size mismatch is as silent as a bad shader was.
+        if (d.addEventListener) {
+          d.addEventListener('uncapturederror', function(ev) {
+            var msg = '[gpu] ' + (ev.error && ev.error.message ? ev.error.message : ev.error);
+            if (typeof globalThis.vxsPrint === 'function') globalThis.vxsPrint(msg);
+            else console.error(msg);
+          });
+        }
         var id = globalThis.vxsHandles.put(d);
         var r = Module.ccall('vxs_settle_handle', 'number', ['number', 'number', 'string'],
                              [token, id, 'gpu-device']);
@@ -344,6 +432,11 @@ EM_JS(int, js_gpu_draw, (int deviceId, const char *wgslPtr, const char *canvasId
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var canvas = document.getElementById(canvasId);
@@ -354,7 +447,7 @@ EM_JS(int, js_gpu_draw, (int deviceId, const char *wgslPtr, const char *canvasId
     var format = navigator.gpu.getPreferredCanvasFormat();
     ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
 
-    var module = device.createShaderModule({ code: wgsl });
+    var module = globalThis.vxsCompileShader(device, wgsl);
 
     // EXPLICIT pipeline layout, never layout:"auto". With auto, bind group
     // layouts are derived per pipeline, so bind groups become
@@ -405,6 +498,11 @@ EM_JS(int, js_gpu_run_kernel, (int deviceId, const char *wgslPtr, const char *ca
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var canvas = document.getElementById(canvasId);
@@ -418,7 +516,7 @@ EM_JS(int, js_gpu_run_kernel, (int deviceId, const char *wgslPtr, const char *ca
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
       ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
-      var module = device.createShaderModule({ code: wgsl });
+      var module = globalThis.vxsCompileShader(device, wgsl);
       var bgl = device.createBindGroupLayout({
         entries: [{
           binding: 0,
@@ -487,6 +585,11 @@ EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var canvas = document.getElementById(canvasId);
@@ -500,7 +603,7 @@ EM_JS(int, js_gpu_draw_instances, (int deviceId, const char *wgslPtr, const char
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
       ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
-      var module = device.createShaderModule({ code: wgsl });
+      var module = globalThis.vxsCompileShader(device, wgsl);
       var bgl = device.createBindGroupLayout({
         entries: [
           { binding: 0,
@@ -622,6 +725,11 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, const char *wgslPtr, int co
   var wgsl = UTF8ToString(wgslPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var buf = globalThis.vxsHandles.get(bufId);
@@ -631,7 +739,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, const char *wgslPtr, int co
     var key = bufId + " " + wgsl;
     var entry = globalThis.vxsWrangleCache[key];
     if (!entry || entry.device !== device) {
-      var module = device.createShaderModule({ code: wgsl });
+      var module = globalThis.vxsCompileShader(device, wgsl);
       var bgl = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
@@ -683,6 +791,11 @@ EM_JS(int, js_gpu_draw_buffer, (int deviceId, int bufId, const char *wgslPtr, co
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var buf = globalThis.vxsHandles.get(bufId);
@@ -698,7 +811,7 @@ EM_JS(int, js_gpu_draw_buffer, (int deviceId, int bufId, const char *wgslPtr, co
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
       ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
-      var module = device.createShaderModule({ code: wgsl });
+      var module = globalThis.vxsCompileShader(device, wgsl);
       var bgl = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
@@ -803,6 +916,11 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, const char *wgslPtr, 
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
+    // A shader that failed to compile stays failed. The pipeline cache is
+    // keyed by source, so this is the same key, and the error text was
+    // recorded by getCompilationInfo a frame or two ago.
+    var priorError = globalThis.vxsShaderError ? globalThis.vxsShaderError(wgsl) : null;
+    if (priorError) { globalThis.vxsGpuError = priorError; return -6; }
     var device = globalThis.vxsHandles ? globalThis.vxsHandles.get(deviceId) : null;
     if (!device) { globalThis.vxsGpuError = "device handle is not live"; return -1; }
     var buf = globalThis.vxsHandles.get(bufId);
@@ -818,7 +936,7 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, const char *wgslPtr, 
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
       ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
-      var module = device.createShaderModule({ code: wgsl });
+      var module = globalThis.vxsCompileShader(device, wgsl);
       var bgl = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
@@ -1536,6 +1654,7 @@ int vxs_init() {
   g_vm->def_global("terminal-port", g_terminal_port);
   g_vm->def_global("console-port", g_console_port);
 
+  js_install_gpu_diagnostics();
   js_ensure_handle_table();
   // Teach the VM how to drop a host object when Scheme releases a handle.
   g_vm->host_handle_releaser = [](uint32_t id) {
