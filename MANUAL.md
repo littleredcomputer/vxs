@@ -425,43 +425,50 @@ answer what it costs on the benchmark suite before it is worth having.
 
 ### Planned
 
-Items §1, §2, §8, §9 are done. Remaining, in the priority order:
+Items §1, §2, §8, §9 are done. Order below is the, revised after
+seeing the compile-future work land — it is not the numbering order.
 
-#### §5 — named scratch attributes
+#### §7 — a live parameter block  ← **next**
 
-The report calls this the real ask, not `@P`. A wrangle can currently only
-touch what the renderer already reads; there is no way to carry a value the
-renderer ignores. Needed before anything stateful — velocity, age, target —
-can live on the GPU without being smuggled through a colour channel.
+Bigger than the `w.pad` it was first written as. Today a kernel constant is
+baked into the shader SOURCE, so dragging a slider recompiles on every
+change and the motion hitches. Making it a uniform is the difference
+between "a knob you demonstrate and a knob you play."
 
-#### §6 — a third binding for read-only data
+`w.pad` is one spare float and would fit exactly one parameter, which is
+why it was proposed — but the struct should grow to a few general-purpose
+slots instead. It costs nothing, and per the report it is "the last thing
+standing between a control panel and a real instrument."
 
-`@binding(2) var<storage, read>` so a kernel can read data it does not
-write. Also fixes pipeline accumulation as a side effect: constants
-currently get baked into the shader source, so changing one produces a new
-source string and therefore a new pipeline. (Partly mitigated now that
-pipelines are keyed by shader handle rather than source text, but the
-underlying cause is still there.)
+Also in §7, unrelated and small: `seed` should be a `u32` rather than a
+float, and `make` should degrade gracefully without emsdk.
 
 #### §4 — `gpu-wrangle!` repeat count
 
-Run the kernel N times per frame under one encoder and one submit. Not
-fixable from Scheme: looping in Scheme yields between dispatches and so
-costs a frame per step.
+Small, and it lifts steps-per-frame past the frame-budget warning. Run the
+kernel N times under one encoder and one submit. Not fixable from Scheme:
+looping there yields between dispatches and so costs a frame per step.
 
-#### §7 — assorted
+#### §5 — named scratch attributes
 
-- `w.pad` should be a live parameter rather than a constant.
-- `seed` should be a `u32`, not a float.
-- `make` should degrade gracefully without emsdk instead of failing — the
-  natural state for anyone who is not building the compiler.
+The genuine design item. A wrangle can only touch what the renderer already
+reads; there is no way to carry a value the renderer ignores. Needed before
+anything stateful — velocity, age, target — can live on the GPU without
+being smuggled through a colour channel.
 
-#### §3 — `define-once`
+#### §6 — a third binding for read-only data
 
-Nearly free; `defined?` already exists. Note the report's "leaked fiber"
-half does **not** apply to `web/app.js`, which clears fibers at line 179.
+`@binding(2) var<storage, read>`, wanted when the read-only case starts. Also
+addresses pipeline accumulation: constants baked into source mean changing
+one yields a new source string. (Partly mitigated now that pipelines key on
+the shader handle rather than source text, but the cause remains.)
 
----
+#### §3 — `define-once`  ← last
+
+Ranked last by the report: "the setter pattern turned out to be the
+better shape anyway." Nearly free if picked up; `defined?` exists. The
+report's "leaked fiber" half does **not** apply to `web/app.js`, which
+clears fibers at line 179.
 
 ### Infrastructure
 
