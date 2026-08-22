@@ -171,4 +171,19 @@
              (and (string-contains? points-wgsl "cos(u.yaw)")
                   (string-contains? points-wgsl "cos(u.pitch)")))
 
+;;--- the stride is one fact, not seven -----------------------------------
+;; It used to be a bare `7u` in six places across three files, plus a
+;; comment in a seventh saying "must match points-stride". A mismatch does
+;; not fail loudly: it reads the wrong floats and draws a plausible wrong
+;; picture. These assert that the SHADERS derive from the Scheme, so
+;; changing points-stride moves all of them together.
+
+(assert-equal "the WGSL spelling derives from the Scheme constant"
+              "7u" points-stride-wgsl)
+(assert-true "the points vertex shader indexes by it"
+             (string-contains? points-wgsl
+                               (string-append "let base = ii * " points-stride-wgsl ";")))
+(assert-true "and nothing in it is hardcoded to a different stride"
+             (not (string-contains? points-wgsl "ii * 8u")))
+
 (suite-summary)

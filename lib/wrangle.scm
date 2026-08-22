@@ -35,6 +35,11 @@
 ;; directly by layer 18 and by anything that wants only the wrangle.
 (load "lib/wgsl.scm")
 
+;; For points-stride: the accessors below index the point buffer, so they
+;; must agree with whatever fills it. Loading it here rather than trusting
+;; the caller means the two cannot be loaded out of order.
+(load "lib/points.scm")
+
 ;;--- what a Scheme kernel can call --------------------------------------
 ;; Signatures for the hand-written WGSL in lib/stat.wgsl and
 ;; lib/colour.wgsl. They are asserted rather than derived because nothing
@@ -132,7 +137,9 @@
 (define (param-set! v name value) (view-set! v (param-index name) value))
 (define (param-ref v name) (view-ref v (param-index name)))
 
-(define wrangle-stride 7)   ; must match points-stride in lib/points.scm
+;; Kept as a name because tests and callers use it, but it is no longer an
+;; independent number that could disagree — see points-stride-wgsl.
+(define wrangle-stride points-stride)
 
 (define wrangle-preamble
   (string-append
@@ -160,16 +167,16 @@
    "@group(0) @binding(1) var<storage, read_write> pts : array<f32>;\n"
    "\n"
    "fn pt_pos(i : u32) -> vec3<f32> {\n"
-   "  let b = i * 7u;\n"
+   "  let b = i * " points-stride-wgsl ";\n"
    "  return vec3<f32>(pts[b + 0u], pts[b + 1u], pts[b + 2u]);\n"
    "}\n"
-   "fn pt_size(i : u32) -> f32 { return pts[i * 7u + 3u]; }\n"
+   "fn pt_size(i : u32) -> f32 { return pts[i * " points-stride-wgsl " + 3u]; }\n"
    "fn pt_colour(i : u32) -> vec3<f32> {\n"
-   "  let b = i * 7u;\n"
+   "  let b = i * " points-stride-wgsl ";\n"
    "  return vec3<f32>(pts[b + 4u], pts[b + 5u], pts[b + 6u]);\n"
    "}\n"
    "fn pt_write(i : u32, p : vec3<f32>, size : f32, col : vec3<f32>) {\n"
-   "  let b = i * 7u;\n"
+   "  let b = i * " points-stride-wgsl ";\n"
    "  pts[b + 0u] = p.x;\n"
    "  pts[b + 1u] = p.y;\n"
    "  pts[b + 2u] = p.z;\n"

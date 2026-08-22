@@ -45,6 +45,17 @@
 
 (define points-stride 7)
 
+;; The same number, spelled for WGSL, so a shader cannot drift from the
+;; Scheme that fills the buffer it reads.
+;;
+;; It was written out as a bare `7u` in six places across three files, with
+;; a comment in a seventh saying "must match points-stride" — which is a
+;; comment doing a constant's job. That survived only because nothing ever
+;; changed it, and named scratch attributes are exactly the change that
+;; would. A mismatch here does not fail: it reads the wrong floats and
+;; renders a plausible wrong picture.
+(define points-stride-wgsl (string-append (number->string points-stride) "u"))
+
 ;; (make-points n) -> bytes, sized for n points and sealed.
 ;; Sealed rather than Building: a buffer you bind is fixed-size, which is
 ;; exactly the distinction ObjBytes::Residency draws.
@@ -117,7 +128,7 @@
    "    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),\n"
    "    vec2<f32>(-1.0,  1.0), vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0)\n"
    "  );\n"
-   "  let base = ii * 7u;\n"
+   "  let base = ii * " points-stride-wgsl ";\n"
    "  let px = pts[base + 0u];\n"
    "  let py = pts[base + 1u];\n"
    "  let pz = pts[base + 2u];\n"

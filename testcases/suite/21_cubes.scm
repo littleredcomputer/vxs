@@ -106,4 +106,8 @@
 (assert-true "size scales the offset, so size 0 is invisible"
              (string-contains? cubes-wgsl "verts[vi] * half"))
 
+(assert-true "the cube shader indexes by the shared stride"
+             (string-contains? cubes-wgsl
+                               (string-append "let base = ii * " points-stride-wgsl ";")))
+
 (suite-summary)
