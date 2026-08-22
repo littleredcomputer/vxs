@@ -89,9 +89,30 @@ fn rng_u32() -> u32 {
   return v;
 }
 
-// A float in [0,1) from the top 23 bits: build an f32 in [1,2) by pasting
+// A float in (0,1) from the top 23 bits: build an f32 in [1,2) by pasting
 // the mantissa under a fixed exponent, then subtract one. Exact, and it
 // avoids a division.
+//
+// NEVER EXACTLY ZERO, and the clamp is load bearing. The construction
+// yields 0.0 for the 512 smallest words out of 2^32 — probability 2^-23,
+// which sounds negligible and is about ten draws a second at 86 million
+// draws a second. It matters because of what sits downstream:
+//
+//   random_uniform(-1, 1) then returns exactly -1
+//   inv_erf(-1) is inv_erfc(2), whose pp is 0
+//   log(0) is -inf, so t is inf
+//   the rational term is inf/inf, which is NaN
+//   random_normal returns NaN
+//
+// An element that goes NaN is poisoned permanently and simply vanishes
+// from the render, with no diagnostic at all. A kernel with a rejection
+// step happens to survive it, because comparisons against NaN are false —
+// but that is luck, and it also leans on IEEE semantics a backend built
+// with fast-math relaxations is permitted to break.
+//
+// 2^-24 is half the smallest step this construction can otherwise
+// produce, so the clamp removes the endpoint without colliding with any
+// real output or perturbing any other value.
 fn rng_unit() -> f32 {
-  return bitcast<f32>((rng_u32() >> 9u) | 1065353216u) - 1.0;
+  return max(bitcast<f32>((rng_u32() >> 9u) | 1065353216u) - 1.0, 5.9604645e-8);
 }

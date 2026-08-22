@@ -65,6 +65,15 @@
               (string-contains? src "pcg3d("))
 (assert-false "and so is its mutable seed"
               (string-contains? src "seed = pcg3d(seed)"))
+;; rng_unit must never return exactly 0. It does so for the 512 smallest
+;; words out of 2^32 — probability 2^-23, about ten draws a second at the
+;; rates a real kernel runs at — and random_uniform(-1, 1) then returns
+;; exactly -1, whereupon inv_erf(-1) is inv_erfc(2), pp is 0, log(0) is
+;; -inf, and the rational term is inf/inf. random_normal returns NaN and
+;; the element is poisoned permanently with no diagnostic.
+(assert-true "rng_unit is clamped away from zero"
+             (string-contains? src "max(bitcast<f32>((rng_u32() >> 9u) | 1065353216u) - 1.0, 5.9604645e-8)"))
+
 (assert-true "draws are addressed by point index"
              (string-contains? src "rng_init(i, u32(w.seed), 0u);"))
 

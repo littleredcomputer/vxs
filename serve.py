@@ -38,8 +38,28 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
             super().log_message(fmt, *args)
 
 
-socketserver.TCPServer.allow_reuse_address = True
-with socketserver.TCPServer(("", PORT), NoCacheHandler) as httpd:
+class Server(socketserver.ThreadingTCPServer):
+    """Threaded, because watch mode fetches a dozen files at once.
+
+    Watch mode asks for the demo plus every lib/*.scm on each pass — about
+    a dozen requests, once a second. A plain TCPServer answers ONE at a
+    time behind a backlog of five. Locally that survives; across a
+    forwarded port each request lasts long enough for the queue to
+    overflow, connections are reset, and the browser reports it as
+
+        Fetch API cannot load http://localhost:8000/lib/prelude.scm
+        due to access control checks.
+
+    which reads like a CORS problem and is nothing of the kind. Twelve of
+    those in a row point at everything except the cause. Diagnosed from a
+    forwarded-port setup, where it is reproducible and obvious.
+    """
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 64
+
+
+with Server(("", PORT), NoCacheHandler) as httpd:
     print(f"vxs workbench:  http://localhost:{PORT}/web/index.html")
     print(f"gpu demo page:  http://localhost:{PORT}/web/gpu.html")
     print("caching disabled — no hard reload needed.  ctrl-C to stop.")
