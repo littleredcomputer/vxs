@@ -710,7 +710,7 @@ EM_JS(int, js_gpu_create_buffer, (int deviceId, const unsigned char *dataPtr, in
 // One compute dispatch over `count` points. The pipeline is cached by
 // source, as everything else here is; the bind group additionally depends
 // on WHICH buffer, so the buffer id is part of its key.
-EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, int seed, const unsigned char *paramsPtr, int paramsLen), {
+EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, double time, int seed, const unsigned char *paramsPtr, int paramsLen, int steps), {
   globalThis.vxsGpuError = "";
   try {
     var shader = globalThis.vxsHandles ? globalThis.vxsHandles.get(shaderId) : null;
@@ -722,12 +722,18 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
 
     globalThis.vxsWrangleCache = globalThis.vxsWrangleCache || {};
     var key = bufId + " " + shaderId;
+    if (steps < 1) steps = 1;
+    // Alignment is a device limit, not a constant. 256 is the guaranteed
+    // maximum and the near-universal value, but reading it is free.
+    var align = (device.limits && device.limits.minUniformBufferOffsetAlignment) || 256;
+    var ustride = Math.ceil(48 / align) * align;
     var entry = globalThis.vxsWrangleCache[key];
     if (!entry || entry.device !== device) {
       var module = shader.module;
       var bgl = device.createBindGroupLayout({
         entries: [
-          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+          { binding: 0, visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: 'uniform', hasDynamicOffset: true } },
           { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
         ]
       });
@@ -741,18 +747,48 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
         // source recompiles the shader every time it changes; in the
         // uniform it is free, and the uniform is rewritten before every
         // dispatch anyway.
-        size: 48,
+        //
+        // One such struct PER SUBSTEP, spaced by the device's dynamic
+        // offset alignment. Substeps run inside a single pass, so nothing
+        // can rewrite the uniform between them — the only way to give each
+        // its own step index is to write them all up front and point the
+        // bind group at a different slice per dispatch.
+        size: ustride * steps,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
       var bind = device.createBindGroup({
         layout: bgl,
         entries: [
-          { binding: 0, resource: { buffer: ubuf } },
+          // An explicit size is REQUIRED with a dynamic offset: without
+          // it the binding runs to the end of the buffer, and every offset
+          // past the first would overrun it.
+          { binding: 0, resource: { buffer: ubuf, offset: 0, size: 48 } },
           { binding: 1, resource: { buffer: buf } }
         ]
       });
-      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind };
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind,
+                bgl: bgl, ustride: ustride, cap: steps };
       globalThis.vxsWrangleCache[key] = entry;
+    }
+
+    // Built for fewer substeps than we now want: rebuild rather than
+    // clamp. Silently running fewer steps than asked is a wrong answer
+    // wearing the costume of a slow one.
+    if (entry.cap < steps) {
+      entry.ubuf.destroy();
+      entry.ubuf = device.createBuffer({
+        size: entry.ustride * steps,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      entry.bind = device.createBindGroup({
+        layout: entry.bgl,
+        entries: [
+          { binding: 0, resource: { buffer: entry.ubuf, offset: 0, size: 48 } },
+          { binding: 1, resource: { buffer: buf } }
+        ]
+      });
+      entry.cap = steps;
+      entry.uarr = null;
     }
 
     // MIXED f32/u32, so one typed array will not do: count and seed are
@@ -760,31 +796,50 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
     // u32() it aliased every value past 2^24 onto its neighbours, so
     // "a different seed" quietly meant "the same noise".
     if (!entry.uarr) {
-      entry.uarr = new ArrayBuffer(48);
+      entry.uarr = new ArrayBuffer(entry.ustride * entry.cap);
       entry.uf32 = new Float32Array(entry.uarr);
       entry.uu32 = new Uint32Array(entry.uarr);
     }
-    entry.uf32[0] = time;
-    entry.uu32[1] = count >>> 0;
-    entry.uu32[2] = seed >>> 0;
-    entry.uf32[3] = 0.0;
-    // Parameters are optional; absent means the slots stay zero. The
-    // caller owns the block and rewrites it in place, so this is a copy of
-    // at most 32 bytes and never an allocation.
-    for (var pi = 0; pi < 8; pi++) {
-      entry.uf32[4 + pi] = (paramsPtr && pi * 4 < paramsLen)
-        ? HEAPF32[(paramsPtr >> 2) + pi]
-        : 0.0;
+    // Every substep's header, in ONE write. They differ only in `step`,
+    // which the preamble hands to rng_init as the stream index — without
+    // it, N substeps would replay the identical draws N times.
+    var slot = entry.ustride >> 2;   // stride in 32-bit words
+    for (var k = 0; k < steps; k++) {
+      var o = k * slot;
+      entry.uf32[o + 0] = time;
+      entry.uu32[o + 1] = count >>> 0;
+      entry.uu32[o + 2] = seed >>> 0;
+      entry.uu32[o + 3] = k >>> 0;
+      // Parameters are optional; absent means the slots stay zero. The
+      // caller owns the block and rewrites it in place, so this is a copy
+      // of at most 32 bytes per substep and never an allocation.
+      for (var pi = 0; pi < 8; pi++) {
+        entry.uf32[o + 4 + pi] = (paramsPtr && pi * 4 < paramsLen)
+          ? HEAPF32[(paramsPtr >> 2) + pi]
+          : 0.0;
+      }
     }
-    device.queue.writeBuffer(entry.ubuf, 0, entry.uf32);
+    device.queue.writeBuffer(entry.ubuf, 0, entry.uf32, 0, steps * slot);
 
     var encoder = device.createCommandEncoder();
     var pass = encoder.beginComputePass();
     pass.setPipeline(entry.pipeline);
-    pass.setBindGroup(0, entry.bind);
+    // N substeps in ONE pass, ONE encoder, ONE submit. WebGPU tracks the
+    // read-write hazard on the storage buffer itself, so dispatch k+1 sees
+    // what dispatch k wrote without any explicit barrier — there are no
+    // manual barriers in the API at all.
+    //
+    // Doing this from Scheme instead is not merely slower, it is not the
+    // same thing: the loop would have to yield between dispatches, so N
+    // steps would cost N frames rather than one.
+    //
     // Workgroup size is 64 in the shader; round up so the tail is covered,
     // and the shader early-returns for indices past the count.
-    pass.dispatchWorkgroups(Math.ceil(count / 64));
+    var groups = Math.ceil(count / 64);
+    for (var k = 0; k < steps; k++) {
+      pass.setBindGroup(0, entry.bind, [k * entry.ustride]);
+      pass.dispatchWorkgroups(groups);
+    }
     pass.end();
     device.queue.submit([encoder.finish()]);
     return 0;
@@ -1114,7 +1169,7 @@ static int js_gpu_draw(int, int, const char *) { return -1; }
 static int js_gpu_run_kernel(int, int, const char *, double) { return -1; }
 static int js_gpu_draw_instances(int, int, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
-static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int) { return -1; }
+static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int, int) { return -1; }
 static int js_gpu_draw_buffer(int, int, int, const char *, int, double, double, double, double, double) { return -1; }
 static int js_gpu_draw_geometry(int, int, int, const char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
@@ -1390,9 +1445,20 @@ static void register_wasm_primitives(VM &vm) {
       params_len = static_cast<int>(pb->data.size());
       if (params_len > 32) params_len = 32;
     }
+    // Substeps: run the kernel N times inside one encoder and one submit.
+    // Looping in Scheme instead yields between dispatches, so N steps cost
+    // N frames — which is why this cannot be done from the caller's side.
+    int steps = 1;
+    if (argc > 7) {
+      if (!args[7].is_int() || args[7].as_int() < 1) {
+        vm.raise_contract("gpu-wrangle!: expected a positive substep count, got " +
+                          vm.format_value(args[7]));
+      }
+      steps = args[7].as_int();
+    }
     int rc = js_gpu_wrangle(static_cast<int>(d->id), static_cast<int>(b->id),
                             static_cast<int>(sh->id), args[3].as_int(), t, seed,
-                            params, params_len);
+                            params, params_len, steps);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -1400,7 +1466,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-wrangle!: " + detail);
     }
     return Value::boolean_true();
-  }, 5, 7));
+  }, 5, 8));
 
   // (gpu-draw-buffer! device buffer wgsl count time camera [canvas-id]) -> #t
   vm.def_global("gpu-draw-buffer!", vm.heap.make_subr("gpu-draw-buffer!", [](VM &vm, uint32_t argc, Value *args) -> Value {

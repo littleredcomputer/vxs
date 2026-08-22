@@ -157,7 +157,7 @@
 (define orbit-camera! (make-orbiter))
 
 ;; (run-wrangle-loop seed-bytes count wrangle-src frame! camera
-;;                    [canvas-id [params]])
+;;                    [canvas-id [params [steps]]])
 ;;
 ;; The GPU-resident counterpart of run-points-loop. The point data lives in
 ;; a GPU buffer, a compute dispatch rewrites it, and the draw reads it — the
@@ -172,9 +172,16 @@
 ;; frame! and the kernel sees the new values on the very next dispatch,
 ;; with no recompile: that is what makes a slider playable rather than
 ;; merely demonstrable. Pass #f (or omit it) and the slots read zero.
+;;
+;; `steps` runs the kernel N times per frame, inside one encoder and one
+;; submit, each substep with its own RNG stream. Looping here instead would
+;; yield between dispatches and cost a frame per step, so this is the only
+;; place it can be done.
 (define (run-wrangle-loop seed-bytes count wrangle-src frame! camera . opts)
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts)))
-        (params (if (or (null? opts) (null? (cdr opts))) #f (cadr opts))))
+        (params (if (or (null? opts) (null? (cdr opts))) #f (cadr opts)))
+        (steps  (if (or (null? opts) (null? (cdr opts)) (null? (cddr opts)))
+                    1 (caddr opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
@@ -192,7 +199,7 @@
             ;; of (index, time), so re-running it with a frozen clock
             ;; reproduces the identical cloud — the counter-based RNG is
             ;; what makes a paused frame stable rather than shimmering.
-            (gpu-wrangle! device buf kernel count t2 1 params)
+            (gpu-wrangle! device buf kernel count t2 1 params steps)
             (gpu-draw-buffer! device buf draw count t2 camera canvas)
             (yield)
             (loop t2 now)))))))

@@ -343,6 +343,30 @@ otherwise run at zero objects per frame.
 `run-wrangle-loop` takes it as an optional argument after the canvas id.
 Omit it and the slots read zero.
 
+### Substeps
+
+Run the kernel N times per frame, inside one encoder and one submit:
+
+```scheme
+(gpu-wrangle! device buf shader n t seed params 8)
+(run-wrangle-loop seed-bytes n src frame! camera "gpu-canvas" params 8)
+```
+
+This cannot be done from Scheme. A loop there has to `yield` between
+dispatches, so N steps cost N *frames* rather than one — the difference
+between a simulation that outruns the frame budget and one pinned to it.
+
+Each substep gets its own slice of the uniform and its own value of
+`step`, which the preamble hands to `rng_init` as the stream index. That
+matters more than it sounds: with a single stream, N substeps replay the
+*identical* random draws N times. Positions still move, because each step
+reads what the last one wrote, so it looks like it is working — but every
+random decision repeats. `step` is also readable from a kernel.
+
+WebGPU tracks the read-write hazard on the storage buffer itself, so
+dispatch k+1 sees what dispatch k wrote with no explicit barrier; there are
+no manual barriers in the API at all.
+
 ⚠️ Eight slots is the limit, and it is `p0 : f32, p1 : f32, …` in the
 struct rather than `array<f32, 8>` on purpose: in the uniform address space
 an array's stride is padded to 16 bytes, so the array spelling would cost
@@ -454,19 +478,14 @@ answer what it costs on the benchmark suite before it is worth having.
 
 ### Planned
 
-Items §1, §2, §7, §8, §9 are done — §7 as a live parameter block (see
-[§4](#4-the-gpu-pipeline)), together with the `seed`-as-`u32` fix it
-carried. Still outstanding from §7: `make` should degrade gracefully
-without emsdk. Order below is the, revised after
-seeing the compile-future work land — it is not the numbering order.
+Items §1, §2, §4, §7, §8, §9 are done — §7 as a live parameter block and
+§4 as substeps, both in [§4 of this manual](#4-the-gpu-pipeline), together
+with the `seed`-as-`u32` fix §7 carried. Still outstanding from §7: `make`
+should degrade gracefully without emsdk. Order below is the,
+revised after seeing the compile-future work land — it is not the numbering
+order.
 
-#### §4 — `gpu-wrangle!` repeat count  ← **next**
-
-Small, and it lifts steps-per-frame past the frame-budget warning. Run the
-kernel N times under one encoder and one submit. Not fixable from Scheme:
-looping there yields between dispatches and so costs a frame per step.
-
-#### §5 — named scratch attributes
+#### §5 — named scratch attributes  ← **next**
 
 The genuine design item. A wrangle can only touch what the renderer already
 reads; there is no way to carry a value the renderer ignores. Needed before

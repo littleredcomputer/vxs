@@ -54,6 +54,10 @@ function makeBuffer(size, usage) {
 function makeDevice(opts) {
   const listeners = [];
   return {
+    // Real devices report this; the wrangle path spaces its per-substep
+    // uniform slices by it. 256 is the guaranteed maximum and the value
+    // essentially every implementation uses.
+    limits: { minUniformBufferOffsetAlignment: 256 },
     _listeners: listeners,
     addEventListener(kind, fn) { listeners.push([kind, fn]); },
     createBuffer({ size, usage }) { return makeBuffer(size, usage); },
@@ -68,7 +72,13 @@ function makeDevice(opts) {
       };
     },
     createBindGroupLayout() { return { _kind: 'bgl' }; },
-    createBindGroup() { return { _kind: 'bindgroup' }; },
+    createBindGroup(desc) {
+      // Keep the entries: with a dynamic offset the uniform binding MUST
+      // declare an explicit size, or it runs to the end of the buffer and
+      // every offset past the first overruns it.
+      this._lastBindGroup = desc;
+      return { _kind: 'bindgroup' };
+    },
     createPipelineLayout() { return { _kind: 'layout' }; },
     createComputePipeline() {
       this._computePipelines = (this._computePipelines || 0) + 1;
@@ -78,12 +88,25 @@ function makeDevice(opts) {
     createTexture() { return { createView: () => ({}), destroy() {} }; },
     createCommandEncoder() {
       const cmds = [];
+      const self = this;
+      self._encoders = (self._encoders || 0) + 1;
       return {
         copyBufferToBuffer(src, srcOff, dst, dstOff, n) {
           cmds.push(() => dst._bytes.set(src._bytes.subarray(srcOff, srcOff + n), dstOff));
         },
         beginComputePass() {
-          return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} };
+          // Record what the pass was told to do. Substeps are invisible
+          // otherwise: N dispatches at N distinct dynamic offsets inside
+          // one pass look exactly like one dispatch unless someone counts.
+          const log = (self._passLog = { offsets: [], dispatches: 0 });
+          return {
+            setPipeline() {},
+            setBindGroup(_i, _bg, dyn) {
+              if (dyn) log.offsets.push(dyn[0]);
+            },
+            dispatchWorkgroups() { log.dispatches++; },
+            end() {},
+          };
         },
         beginRenderPass() {
           return { setPipeline() {}, setBindGroup() {}, draw() {}, end() {} };
@@ -102,7 +125,10 @@ function makeDevice(opts) {
         buf._bytes.set(src, offset);
         this._lastWrite.bytes = buf._bytes.slice(0, buf.size);
       },
-      submit(list) { for (const c of list) for (const f of c._cmds) f(); },
+      submit(list) {
+        this._submits = (this._submits || 0) + 1;
+        for (const c of list) for (const f of c._cmds) f();
+      },
     },
   };
 }
