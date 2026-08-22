@@ -24,12 +24,6 @@
 ;; Substring search, since the assertions below are about structure rather
 ;; than an exact rendering of the whole shader — pinning the entire text
 ;; would make every cosmetic change to the preamble a test failure.
-(define (string-contains? haystack needle)
-  (let ((hn (string-length haystack)) (nn (string-length needle)))
-    (let loop ((i 0))
-      (cond ((> (+ i nn) hn) #f)
-            ((string=? (substring haystack i (+ i nn)) needle) #t)
-            (else (loop (+ i 1)))))))
 
 (define plasma
   '(let ((c (- uv 0.5))

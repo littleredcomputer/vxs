@@ -23,12 +23,6 @@
 
 (test-suite "17_points: instanced point buffers")
 
-(define (string-contains? haystack needle)
-  (let ((hn (string-length haystack)) (nn (string-length needle)))
-    (let loop ((i 0))
-      (cond ((> (+ i nn) hn) #f)
-            ((string=? (substring haystack i (+ i nn)) needle) #t)
-            (else (loop (+ i 1)))))))
 
 ;;--- the buffer ---------------------------------------------------------
 

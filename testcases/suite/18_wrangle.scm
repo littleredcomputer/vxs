@@ -24,12 +24,6 @@
 
 (test-suite "18_wrangle: GPU compute over the point buffer")
 
-(define (string-contains? haystack needle)
-  (let ((hn (string-length haystack)) (nn (string-length needle)))
-    (let loop ((i 0))
-      (cond ((> (+ i nn) hn) #f)
-            ((string=? (substring haystack i (+ i nn)) needle) #t)
-            (else (loop (+ i 1)))))))
 
 (define src (wrangle-wgsl "  pt_write(i, pt_pos(i), 0.01, vec3<f32>(1.0, 1.0, 1.0));"))
 
@@ -419,6 +413,59 @@
 (assert-equal "and neither declarator clears the other"
               "attr_age(i)" (wgsl-code 'age wrangle-env))
 
+;;--- shared read-only data ----------------------------------------------
+;; Data every element READS, as against scratch, which each element OWNS.
+;; Scratch cannot hold it: scratch is addressed scratch[i * stride + off],
+;; so it is per-element by construction. The parameter block is eight
+;; floats. And anything changing per frame cannot be baked into source.
+
+(assert-equal "with nothing declared, no binding 3 appears"
+              "" (begin (shared-layout! '()) (shared-preamble)))
+
+(assert-equal "the layout totals its regions"
+              89 (shared-layout! '((walls 48) (obs 41))))
+(assert-equal "regions are laid out in order" 0 (shared-offset 'walls))
+(assert-equal "the next follows the first" 48 (shared-offset 'obs))
+(assert-equal "and each keeps its length" 41 (shared-size 'obs))
+(assert-equal "a malformed region is refused"
+              'raised (guard (e (#t 'raised)) (shared-layout! '((walls)))))
+(assert-equal "so is a zero-length one"
+              'raised (guard (e (#t 'raised)) (shared-layout! '((walls 0)))))
+(shared-layout! '((walls 48) (obs 41)))
+
+(define shpre (shared-preamble))
+;; READ-ONLY, and named sdata rather than `shared` — `shared` is a reserved
+;; word in WGSL and a binding using it will not compile.
+(assert-true "it binds at 3, read-only"
+             (string-contains? shpre
+               "@group(0) @binding(3) var<storage, read> sdata : array<f32>;"))
+(assert-false "and does not use the reserved word `shared`"
+              (string-contains? shpre "> shared :"))
+;; Accessors carry the offset, so no kernel ever writes one by hand — an
+;; offset computed in two places is one that eventually disagrees.
+(assert-true "each region gets an accessor carrying its offset"
+             (string-contains? shpre
+               "fn shared_obs(k : u32) -> f32 { return sdata[48u + k]; }"))
+(assert-true "the first region starts at zero"
+             (string-contains? shpre
+               "fn shared_walls(k : u32) -> f32 { return sdata[0u + k]; }"))
+;; And the signature is registered, so the kernel language can call it.
+(assert-equal "a kernel may call a region accessor"
+              :f32 (wgsl-type '(shared-obs k) (list (cons 'k :u32))))
+
+(define SHB (make-shared))
+(define SHV (shared-view SHB))
+(assert-equal "the block is the declared length" (* 89 4) (bytes-length SHB))
+(shared-set! SHV 'obs 0 2.5)
+(shared-set! SHV 'walls 0 1.5)
+(assert-equal "a region round-trips by name" 2.5 (shared-ref SHV 'obs 0))
+(assert-equal "and regions do not overlap" 1.5 (shared-ref SHV 'walls 0))
+(assert-equal "an index past a region's end is refused, not silently next door"
+              'raised (guard (e (#t 'raised)) (shared-ref SHV 'obs 41)))
+(assert-equal "and an undeclared region is an error"
+              'raised (guard (e (#t 'raised)) (shared-ref SHV 'nonesuch 0)))
+
+(shared-layout! '())
 (scratch-attributes! '())        ; leave the world as we found it
 (wrangle-params! '(sigma radius gain))
 

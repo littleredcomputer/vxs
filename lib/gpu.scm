@@ -186,6 +186,11 @@
 ;; the kernel declared with scratch-attributes!. The renderer never sees
 ;; it, which is the entire point: state the simulation needs and the
 ;; picture does not.
+;;
+;; `:shared` is a block from make-shared, bound at 3, READ-ONLY and indexed
+;; freely rather than per element — a map every particle measures against,
+;; a scan every particle scores. It is re-uploaded before every dispatch,
+;; because the case it exists for is data that changes each frame.
 (define (opt-ref opts key default)
   (let loop ((o opts))
     (cond ((or (null? o) (null? (cdr o))) default)
@@ -196,7 +201,8 @@
   (let ((canvas  (opt-ref opts :canvas "gpu-canvas"))
         (params  (opt-ref opts :params #f))
         (steps   (opt-ref opts :steps 1))
-        (scratch-bytes (opt-ref opts :scratch #f)))
+        (scratch-bytes (opt-ref opts :scratch #f))
+        (shared-bytes  (opt-ref opts :shared #f)))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
@@ -209,7 +215,13 @@
              ;; on the device. Nothing reads it back per frame — that is
              ;; what gpu-buffer-read is for, when a program wants a number
              ;; out rather than a picture.
-             (scratch (if scratch-bytes (gpu-buffer device scratch-bytes) #f)))
+             (scratch (if scratch-bytes (gpu-buffer device scratch-bytes) #f))
+             ;; Shared data is uploaded EVERY frame, unlike scratch. That
+             ;; is what it is for: observations that change per frame and
+             ;; therefore cannot be baked into the shader source. Static
+             ;; contents simply cost a small write nobody notices — 89
+             ;; floats is 356 bytes.
+             (shared  (if shared-bytes (gpu-buffer device shared-bytes) #f)))
         (display "wrangle: shaders compiled, buffer uploaded, dispatching.") (newline)
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
@@ -219,7 +231,8 @@
             ;; of (index, time), so re-running it with a frozen clock
             ;; reproduces the identical cloud — the counter-based RNG is
             ;; what makes a paused frame stable rather than shimmering.
-            (gpu-wrangle! device buf kernel count t2 1 params steps scratch)
+            (if shared (gpu-buffer-write! device shared shared-bytes))
+            (gpu-wrangle! device buf kernel count t2 1 params steps scratch shared)
             (gpu-draw-buffer! device buf draw count t2 camera canvas)
             (yield)
             (loop t2 now)))))))

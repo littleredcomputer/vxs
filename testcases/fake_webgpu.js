@@ -71,7 +71,15 @@ function makeDevice(opts) {
         },
       };
     },
-    createBindGroupLayout() { return { _kind: 'bgl' }; },
+    createBindGroupLayout(desc) {
+      // Kept so a test can check the ACCESS MODE, not merely that a
+      // binding exists. A 'storage' entry against a var<storage, read>
+      // declaration is a validation failure, and one that surfaces through
+      // uncapturederror rather than as a compile error — which is to say,
+      // silently, unless someone is listening.
+      this._lastBGL = desc;
+      return { _kind: 'bgl' };
+    },
     createBindGroup(desc) {
       // Keep the entries: with a dynamic offset the uniform binding MUST
       // declare an explicit size, or it runs to the end of the buffer and

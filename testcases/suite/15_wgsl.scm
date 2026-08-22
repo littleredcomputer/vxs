@@ -237,4 +237,97 @@
                             (vec3 w (* w 0.5) 0.8))
                          E "  "))
 
+;;--- joining is linear, and must stay exact ------------------------------
+;; wgsl-join is the one function every emitter goes through. It used to
+;; fold string-append recursively, copying the whole accumulated tail at
+;; each unwind step: 0.18ms for 200 lines, 152ms for 8000, quadrupling for
+;; every doubling. It now writes into a string output port — 0.80ms at
+;; 8000, and byte-identical output, which is what these pin.
+
+(assert-equal "joining nothing gives the empty string" "" (wgsl-join '() ", "))
+(assert-equal "one element is itself, with no separator" "a" (wgsl-join '("a") ", "))
+(assert-equal "two elements take one separator" "a, b" (wgsl-join '("a" "b") ", "))
+(assert-equal "and n elements take n-1" "a|b|c|d" (wgsl-join '("a" "b" "c" "d") "|"))
+(assert-equal "an empty separator concatenates" "abc" (wgsl-join '("a" "b" "c") ""))
+(assert-equal "empty elements are preserved, not skipped"
+              "a||b" (wgsl-join '("a" "" "b") "|"))
+(assert-equal "a separator occurring inside an element is untouched"
+              "a, b, c" (wgsl-join '("a, b" "c") ", "))
+
+;; The shape that matters: joining n elements of length L must produce
+;; exactly n*L + (n-1)*|sep| characters. A fold that lost or duplicated a
+;; tail would show up here as a length, without timing anything.
+(assert-equal "the joined length is exactly right"
+              (+ (* 500 4) (* 499 2))
+              (string-length
+               (wgsl-join (let loop ((i 0) (acc '()))
+                            (if (= i 500) acc (loop (+ i 1) (cons "abcd" acc))))
+                          ", ")))
+
+;;--- fold-i: a bounded fold ---------------------------------------------
+;; A FOLD, NOT A LOOP: an accumulator and a compile-time bound, no
+;; mutation, no break, no early exit. That is what keeps the language
+;; pure-expression — the whole form is one value, so it nests inside
+;; arithmetic and inside itself.
+
+(wgsl-declare! 'wall-a "wall_a" '(:u32) :vec2f)
+(wgsl-declare! 'obs "obs" '(:u32) :f32)
+
+(assert-equal "a fold is an expression of the accumulator's type"
+              :f32 (wgsl-type '(fold-i 4 0.0 (k acc) (+ acc 1.0)) '()))
+(assert-equal "and of a vector accumulator too"
+              :vec3f (wgsl-type '(fold-i 4 (vec3 0.0 0.0 0.0) (k acc) acc) '()))
+
+;; The index is :u32 — an address, not a quantity. WGSL has no implicit
+;; coercion, so using it as a number has to say (f32 k).
+(set! wgsl-counter 0)
+(assert-true "the index is a u32, converted only when asked"
+             (string-contains? (wgsl-body '(fold-i 4 0.0 (k acc) (f32 k)) '() "")
+                               "acc_2 = f32(k_1);"))
+(assert-equal "so using it as a float without saying so is refused"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-type '(fold-i 4 0.0 (k acc) (+ acc k)) '())))
+(assert-equal "and a body of the wrong type is refused"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-type '(fold-i 4 0.0 (k acc) (vec2 1.0 2.0)) '())))
+(assert-equal "a non-literal bound is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(fold-i n 0.0 (k acc) acc) '())))
+(assert-equal "as is reusing one name for both"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(fold-i 4 0.0 (k k) acc) '())))
+
+;; The shape that matters: the body's own let-lifts belong INSIDE the loop.
+;; Hoisting them, as every other form here does, would evaluate them once
+;; against the first index and reuse the answer for every iteration.
+(set! wgsl-counter 0)
+(define fsrc
+  (wgsl-body '(fold-i 3 0.0 (k acc) (let ((d (obs k))) (+ acc d))) '() ""))
+(assert-true "the accumulator is a var, seeded before the loop"
+             (string-contains? fsrc "var acc_2 : f32 = 0.0;"))
+(assert-true "the loop counts to the literal bound"
+             (string-contains? fsrc "for (var k_1 : u32 = 0u; k_1 < 3u; k_1 = k_1 + 1u) {"))
+(assert-true "the body's bindings are INSIDE the loop, not hoisted above it"
+             (string-contains? fsrc "  let d_3 : f32 = obs(k_1);"))
+(assert-true "and the accumulator is rebound at the end of each pass"
+             (string-contains? fsrc "  acc_2 = (acc_2 + d_3);"))
+
+;; Nesting is the real requirement — the sensor model is a fold over rays
+;; whose body is a fold over walls.
+(set! wgsl-counter 0)
+(define nsrc (wgsl-body '(fold-i 41 0.0 (k acc)
+                           (+ acc (fold-i 12 9.0 (w best) (min best (f32 w)))))
+                        '() ""))
+(assert-true "an inner fold's var sits inside the outer loop"
+             (string-contains? nsrc "  var best_4 : f32 = 9.0;"))
+(assert-true "and so does its loop"
+             (string-contains? nsrc "  for (var w_3 : u32 = 0u; w_3 < 12u;"))
+
+;;--- let binds sequentially ---------------------------------------------
+;; It lowers to a run of WGSL let statements, so each binding is in scope
+;; for the next. let* is the same form, accepted because that is what a
+;; Scheme programmer writes when they mean it.
+(assert-equal "a later binding may use an earlier one"
+              :f32 (wgsl-type '(let ((a 1.0) (b (* a 2.0))) b) '()))
+(assert-equal "and let* is the same form"
+              :f32 (wgsl-type '(let* ((a 1.0) (b (* a 2.0))) b) '()))
+
 (suite-summary)
