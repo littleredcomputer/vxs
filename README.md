@@ -38,7 +38,8 @@ no CMake or Meson here; just compile it and go.
 [MANUAL.md](MANUAL.md) covers the parts of vxs you cannot infer from the
 source: where a fiber may suspend and where it may not, what `guard` does
 and does not catch, and how the GPU pipeline fits together. If something
-died and you are not sure why, start there.
+died and you are not sure why, start there. It ends with the known gaps and
+the open work, so a rule and its exceptions stay next to each other.
 
 ## features
 
