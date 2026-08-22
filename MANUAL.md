@@ -12,6 +12,7 @@ implementation. Where a rule has an edge, the edge is stated.
 - [3. Errors: what is catchable](#3-errors-what-is-catchable)
 - [4. The GPU pipeline](#4-the-gpu-pipeline)
 - [5. Testing without a browser](#5-testing-without-a-browser)
+- [6. Known gaps and open work](#6-known-gaps-and-open-work)
 
 ---
 
@@ -357,6 +358,149 @@ for (let i = 0; i < n; i++) {
 `make test` runs this as `test-gpu`, covering the host paths and all six
 GPU presets. **Do not report a GPU change as working on the strength of
 reading the diff** — that is what these are for.
+
+---
+
+## 6. Known gaps and open work
+
+What is wrong, what is missing, and what was decided about each. Kept here
+rather than in a separate file so that a rule and its known exceptions stay
+next to each other.
+
+Nothing here is scheduled. Items marked **agreed** have been explicitly
+decided on; the rest are candidates.
+
+
+### Correctness gaps
+
+#### `guard` cannot catch native VM errors — **agreed, worth fixing**
+
+Symptom in [§3](#3-errors-what-is-catchable). The cause is two error
+mechanisms that grew apart, not a design decision:
+
+| | behaviour | catchable | sites |
+|---|---|---|---|
+| `raise_contract` (`vx_vm.h:686`) | error object → `in_flight_raises` → `throw RaiseEscape` | ✅ | 8 |
+| legacy | sets `current_fiber->state = Error`, writes `error_message`, returns unspecified | ❌ | 42 |
+
+`subr_guard` catches `RaiseEscape`; the legacy path never throws, so `guard`
+is never involved and the fiber is simply marked dead underneath it.
+
+Evidence it is drift rather than intent: `raise_contract` is used only by
+the most recently written primitives (bytes, views, GPU); the two print in
+different formats (`[VM Error] car: …` vs `bytes-view: …`); and the 42
+legacy sites are the same five-line block copy-pasted, which is a template,
+not per-primitive judgement about what should be recoverable.
+
+**The work.** Each site collapses to `vm.raise_contract("car: …")`. Blast
+radius checked: no golden file and no test asserts on the `[VM Error]`
+prefix, and an uncaught `RaiseEscape` already reaches `step_fiber` and
+becomes `StepResult::Error`, so top-level reporting keeps working. One
+judgement call — add the `[VM Error]` prefix at the *reporting* site rather
+than in the message, so top-level output stays recognisable while
+`error-object-message` hands `guard` clean text.
+
+**Why the cost is acceptable (Colin).** Throwing is more expensive than
+setting a field, but the exception path here is not performance sensitive,
+and none of the exceptions we throw have a control-flow application the way
+something like `StopIteration` would. One caveat, which sharpens the argument
+rather than weakening it: `ContinuationEscape` (escape-only `call/cc`) *is*
+a control-flow use of a C++ exception. But it is a single throw site, and
+if a program ever put one in a hot loop the remedy would be to redesign
+that program, not to make throwing cheaper — so the exception path stays
+outside the performance envelope by construction. `RaiseEscape`, the one
+this change would multiply, has no control-flow use at all.
+
+#### Arithmetic does not type-check
+
+Symptom in [§3](#3-errors-what-is-catchable): non-numbers are treated as
+zero, so a typo'd name yields a plausible wrong number rather than a
+complaint.
+
+Entangled with keeping `+` first-class and un-opcoded for speed, which is a
+deliberate trade — so this is **undecided**, not agreed. Any fix has to
+answer what it costs on the benchmark suite before it is worth having.
+
+---
+
+### Planned
+
+Items §1, §2, §8, §9 are done. Remaining, in the priority order:
+
+#### §5 — named scratch attributes
+
+The report calls this the real ask, not `@P`. A wrangle can currently only
+touch what the renderer already reads; there is no way to carry a value the
+renderer ignores. Needed before anything stateful — velocity, age, target —
+can live on the GPU without being smuggled through a colour channel.
+
+#### §6 — a third binding for read-only data
+
+`@binding(2) var<storage, read>` so a kernel can read data it does not
+write. Also fixes pipeline accumulation as a side effect: constants
+currently get baked into the shader source, so changing one produces a new
+source string and therefore a new pipeline. (Partly mitigated now that
+pipelines are keyed by shader handle rather than source text, but the
+underlying cause is still there.)
+
+#### §4 — `gpu-wrangle!` repeat count
+
+Run the kernel N times per frame under one encoder and one submit. Not
+fixable from Scheme: looping in Scheme yields between dispatches and so
+costs a frame per step.
+
+#### §7 — assorted
+
+- `w.pad` should be a live parameter rather than a constant.
+- `seed` should be a `u32`, not a float.
+- `make` should degrade gracefully without emsdk instead of failing — the
+  natural state for anyone who is not building the compiler.
+
+#### §3 — `define-once`
+
+Nearly free; `defined?` already exists. Note the report's "leaked fiber"
+half does **not** apply to `web/app.js`, which clears fibers at line 179.
+
+---
+
+### Infrastructure
+
+#### A staleness guard for `web/vxs.wasm`
+
+The artifact is committed deliberately — clone-and-serve is the deployment
+model, and `.git` is only 26 MB for 65 revisions of it, so size is not the
+argument. The real risk is a committed `.wasm` drifting from the source it
+claims to be, which is a silent wrong-version bug of exactly the class this
+project keeps hunting.
+
+Cheapest version: a test that fails if any source under `src/` is newer
+than `web/vxs.wasm`.
+
+#### Migrate the classic testcases into the ground-up suite
+
+Colin's own idea, explicitly not urgent. The 13 `vx-test.scm` cases move
+from I/O-diff-against-golden-file to `assert-equal`-on-return-value —
+except `r4rstest.scm`, which is fundamentally a printing conformance suite
+and has to stay on the I/O path. Keep `dynamic.scm` whatever happens: its
+value is the stress profile (self-parsing 2300 lines), not the answer.
+
+---
+
+### Parked ideas
+
+Not scheduled, kept so they are not rediscovered from scratch.
+
+- **Per-cube orientation** in the cubes renderer.
+- **Overcooked-shaped actors** — goal-directed agents for the outside demo,
+  as opposed to the planning/goal work that stays inside the org.
+- **`gpu.html`'s "Scheme it runs" pane** still shows the triangle program
+  regardless of which demo is running.
+- **`define-record-type`** — parked when WebGPU work took priority.
+- **`OP_LOOP`** — named-let entry costs one closure plus one box per
+  captured variable, per entry. The "thread, don't capture" idiom works
+  around it; an opcode would remove it.
+- **`amb`/Church via fibers** — reimplement probabilistic choice points on
+  fibers instead of `call/cc`, once the VM foundation settles.
 
 ---
 
