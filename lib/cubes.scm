@@ -80,7 +80,7 @@
    "    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0)\n"
    "  );\n"
    "\n"
-   "  let base = ii * 7u;\n"
+   "  let base = ii * " points-stride-wgsl ";\n"
    "  let centre = vec3<f32>(pts[base + 0u], pts[base + 1u], pts[base + 2u]);\n"
    "  let half = pts[base + 3u];\n"
    "\n"

@@ -485,19 +485,76 @@ should degrade gracefully without emsdk. Order below is the,
 revised after seeing the compile-future work land — it is not the numbering
 order.
 
-#### §5 — named scratch attributes  ← **next**
+#### §5 + §6 — scratch attributes and a third binding  ← **next**
 
-The genuine design item. A wrangle can only touch what the renderer already
-reads; there is no way to carry a value the renderer ignores. Needed before
-anything stateful — velocity, age, target — can live on the GPU without
-being smuggled through a colour channel.
+**Design settled; not yet built.** These are one mechanism, not two: both
+are "a buffer the wrangle addresses that the renderer does not read",
+differing only in read-write versus read-only. Binding 2 is free in every
+pipeline.
 
-#### §6 — a third binding for read-only data
+A wrangle can currently only touch what the renderer already reads, so
+anything stateful — velocity, age, charge — has to be smuggled through a
+colour channel or not exist.
 
-`@binding(2) var<storage, read>`, wanted when the read-only case starts. Also
-addresses pipeline accumulation: constants baked into source mean changing
-one yields a new source string. (Partly mitigated now that pipelines key on
-the shader handle rather than source text, but the cause remains.)
+**A second buffer, not a wider point stride.** The renderer is the hot
+path and the kernel is not: widening the stride makes the vertex shader
+fetch fifteen floats to use seven, for every point every frame, for data it
+never reads. Two further arguments point the same way:
+
+- A second buffer need not have the same element count. A widened stride
+  forces every scratch quantity to be per-point, which rules out a
+  histogram, per-workgroup partials, or a cumulative array.
+- Selection needs only one column. Reading 60k floats back is 240 KB; a
+  widened stride would mean dragging the whole 1.7 MB point buffer across
+  to get one column of it.
+
+**Declared, not dynamic.** VEX creates attributes on the fly; a GPU buffer
+cannot, because allocation precedes dispatch. So attributes are declared
+once and the library computes offsets and accessors for both sides — the
+`wrangle-params!` pattern.
+
+**Typed, including `:u32`.** Charge and age are floats, but an source
+index is an integer, and storing it as a float aliases past 2²⁴ — the same
+class as the `seed` bug. `:vec3f` should be three flat floats with the
+accessor building the vector, as `pt_pos` already does, because
+`vec3<f32>` carries 16-byte alignment inside a storage array.
+
+#### Gathering, and why the wrangle does not change
+
+The question that shaped the above: some algorithms need `new[i] =
+old[a[i]]`, and it is the defining operation, not an exotic one.
+
+It does **not** break the diagonal write model. `new[i] = old[a[i]]` still
+writes only point `i`, so the "return, not clamp" invariant is untouched.
+What it breaks is in-place safety: within one dispatch, `i` may read a slot
+`j` has already overwritten.
+
+So the copy is **a primitive, not a wrangle**:
+
+```scheme
+(gpu-gather! device dst src indices count)
+```
+
+with a fixed shader vxs ships, compiled once, no user WGSL. The wrangle
+then stays strictly diagonal permanently, and the double-buffering becomes
+an internal detail of the primitive — a `copyBufferToBuffer` into a cached
+temp, then one gather pass. At 1.7 MB the extra copy is nothing.
+
+`indices` is a **buffer handle, not host bytes**. Today it is filled from
+the host; when a GPU-side cumulative sum exists it writes the same buffer
+and the primitive does not change.
+
+**Host-side selection is practical, not a fallback.** Systematic
+selection — one uniform, then N evenly spaced strata against the
+cumulative values — is a single O(N) pass with no per-element search, and
+lower variance than multinomial. For 60k points that is ~120k simple VM
+operations: a few milliseconds, fine at 10 Hz, and nothing needs it
+every frame anyway.
+
+So the whole pass is: values come home by readback, Scheme picks
+indices, indices go out through binding 2, one primitive does the take.
+Neither step is a wrangle. A GPU prefix sum becomes an optimisation for
+later rather than a prerequisite.
 
 #### §3 — `define-once`  ← last
 

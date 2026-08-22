@@ -329,4 +329,10 @@
                         (wrangle-params! '(a b c d e f g h i))))
 (wrangle-params! '(sigma radius gain))   ; leave the env as we found it
 
+;;--- the accessors derive their stride from lib/points.scm ---------------
+(assert-true "pt_pos indexes by the shared stride"
+             (string-contains? src (string-append "let b = i * " points-stride-wgsl ";")))
+(assert-true "and so does pt_size"
+             (string-contains? src (string-append "pts[i * " points-stride-wgsl " + 3u]")))
+
 (suite-summary)
