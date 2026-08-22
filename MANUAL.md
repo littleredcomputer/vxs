@@ -343,6 +343,45 @@ otherwise run at zero objects per frame.
 `run-wrangle-loop` takes it as an optional argument after the canvas id.
 Omit it and the slots read zero.
 
+### Scratch attributes
+
+State the simulation needs and the renderer must not see — weight, age,
+velocity, an index into another element. Declared once; the library computes offsets
+and generates accessors for both sides:
+
+```scheme
+(scratch-attributes! '((weight :f32) (age :f32) (source :u32)))
+
+(define SB (make-scratch n))       ; a second buffer, bound at 2
+(define SV (scratch-view SB))
+(scratch-set! SV 0 'charge 0.5)
+(scratch-ref  SV 0 'charge)
+
+(run-wrangle-loop seed n src frame! cam :canvas "gpu-canvas" :scratch SB)
+```
+
+In a kernel, an attribute name means **this point's** value, the way VEX
+means `@Cd` — every invocation owns exactly one index:
+
+```wgsl
+attr_charge_set(i, weight * 0.99);      // read `charge`, write via the setter
+```
+
+Types are `:f32`, `:u32` and `:vec3f`. `:u32` is not decoration — an
+index into another element stored as a float aliases past 2²⁴, the same failure the
+seed had. Integer attributes are `bitcast` in the shader and read through a
+second view on the host, so the round trip is exact in both directions.
+
+A `:vec3f` is three flat floats with the accessor building the vector,
+because `vec3<f32>` carries 16-byte alignment inside a storage array.
+
+Declaring nothing emits nothing: a kernel with no attributes compiles to
+exactly the text and the two-binding layout it always did.
+
+⚠️ Both `scratch-attributes!` and `wrangle-params!` **replace** rather than
+extend, and the kernel environment is rebuilt from both. They do not clear
+each other.
+
 ### Substeps
 
 Run the kernel N times per frame, inside one encoder and one submit:
@@ -485,16 +524,14 @@ should degrade gracefully without emsdk. Order below is the,
 revised after seeing the compile-future work land — it is not the numbering
 order.
 
-#### §5 + §6 — scratch attributes and a third binding  ← **next**
+#### §5 + §6 — scratch attributes and a third binding
 
-**Design settled; not yet built.** These are one mechanism, not two: both
-are "a buffer the wrangle addresses that the renderer does not read",
-differing only in read-write versus read-only. Binding 2 is free in every
-pipeline.
+**§5 is built** — see [Scratch attributes](#4-the-gpu-pipeline).
 
-A wrangle can currently only touch what the renderer already reads, so
-anything stateful — velocity, age, charge — has to be smuggled through a
-colour channel or not exist.
+**§6 remains**: the same declaration machinery instantiated once more as a
+READ-ONLY buffer, for data a kernel reads but never writes — the gather
+indices being the immediate case. Everything below still applies; only the
+access mode differs.
 
 **A second buffer, not a wider point stride.** The renderer is the hot
 path and the kernel is not: widening the stride makes the vertex shader

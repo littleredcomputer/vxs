@@ -84,6 +84,15 @@
     (count . (:f32 . "f32(w.count)"))
     (step . (:f32 . "f32(w.step)"))))
 
+;; THREE SOURCES, ONE RESULT, REBUILT. The environment is derived from the
+;; built-ins plus whatever wrangle-params! and scratch-attributes! were
+;; last given — never appended to. Appending looks fine because the newest
+;; binding shadows the old one, and leaves every previous name still
+;; resolving to a slot nobody writes any more.
+(define (wrangle-rebuild-env!)
+  (set! wrangle-env
+        (append (wrangle-attr-env) (wrangle-param-env) wrangle-builtin-env)))
+
 (define wrangle-env wrangle-builtin-env)
 
 ;;--- live parameters ----------------------------------------------------
@@ -101,19 +110,17 @@
   (if (> (length names) wrangle-param-slots)
       (error "wrangle-params!: at most 8 parameters" (length names)))
   (set! wrangle-param-names names)
-  ;; Rebuild rather than append: calling this twice should REPLACE the
-  ;; declaration, not leave the previous names shadowing the new ones.
-  (set! wrangle-env
-        (append wrangle-builtin-env
-                (let loop ((ns names) (i 0) (acc '()))
-                  (if (null? ns)
-                      (reverse acc)
-                      (loop (cdr ns) (+ i 1)
-                            (cons (cons (car ns)
-                                        (cons :f32
-                                              (string-append "w.p" (number->string i))))
-                                  acc))))))
+  (wrangle-rebuild-env!)
   wrangle-param-names)
+
+(define (wrangle-param-env)
+  (let loop ((ns wrangle-param-names) (i 0) (acc '()))
+    (if (null? ns)
+        (reverse acc)
+        (loop (cdr ns) (+ i 1)
+              (cons (cons (car ns)
+                          (cons :f32 (string-append "w.p" (number->string i))))
+                    acc)))))
 
 ;; The parameter block: eight floats the host owns and rewrites in place.
 ;;
@@ -140,6 +147,156 @@
 ;; Kept as a name because tests and callers use it, but it is no longer an
 ;; independent number that could disagree — see points-stride-wgsl.
 (define wrangle-stride points-stride)
+
+;;--- named scratch attributes -------------------------------------------
+;; State a wrangle needs that the renderer must not see: weight, age,
+;; velocity, an ancestor index. Until now a kernel could only touch what
+;; the renderer already reads, so anything stateful had to be smuggled
+;; through a colour channel or not exist at all.
+;;
+;; A SECOND BUFFER, not a wider point stride. The renderer is the hot path
+;; and the kernel is not: widening the stride would make the vertex shader
+;; fetch every scratch float for every point of every frame to use none of
+;; them. Two further reasons point the same way — a second buffer need not
+;; hold one element per point (a histogram, per-workgroup partials, a
+;; cumulative array), and reading one column back costs one column rather
+;; than the whole 1.7MB point buffer.
+;;
+;; DECLARED, not dynamic. VEX makes attributes up as it goes; a GPU buffer
+;; cannot, because allocation has to precede dispatch. So the declaration
+;; is the single source of truth, exactly as wrangle-params! is, and it
+;; generates the accessors for both sides rather than asking anyone to
+;; agree with anything by hand.
+;;
+;;   (scratch-attributes! '((weight :f32) (age :f32) (ancestor :u32)))
+;;
+;; TYPES MATTER, and :u32 is not decoration. An ancestor index is an
+;; integer; stored as a float it aliases past 2^24, which is the same bug
+;; the seed carried. The buffer is array<f32> and integer attributes are
+;; bitcast in and out — free, and exact in both directions. On the host the
+;; same trick is two views over the same bytes.
+;;
+;; :vec3f is three flat floats with the accessor building the vector, as
+;; pt_pos already does, because vec3<f32> carries 16-byte alignment inside
+;; a storage array and that is a trap better sidestepped than documented.
+
+(define scratch-attrs '())     ; ((name type offset) ...)
+(define scratch-stride 0)      ; floats per element
+
+(define (attr-width type)
+  (cond ((eq? type :f32) 1)
+        ((eq? type :u32) 1)
+        ((eq? type :vec3f) 3)
+        (else (error "scratch-attributes!: unknown type" type))))
+
+(define (scratch-attributes! specs)
+  (let loop ((ss specs) (off 0) (acc '()))
+    (if (null? ss)
+        (begin
+          (set! scratch-attrs (reverse acc))
+          (set! scratch-stride off)
+          (wrangle-rebuild-env!)
+          scratch-stride)
+        (let ((spec (car ss)))
+          (if (or (not (pair? spec)) (not (pair? (cdr spec))))
+              (error "scratch-attributes!: expected (name type)" spec))
+          (loop (cdr ss)
+                (+ off (attr-width (cadr spec)))
+                (cons (list (car spec) (cadr spec) off) acc))))))
+
+(define (scratch-attr name)
+  (let loop ((as scratch-attrs))
+    (cond ((null? as) (error "scratch: undeclared attribute" name))
+          ((eq? (caar as) name) (car as))
+          (else (loop (cdr as))))))
+
+(define (scratch-offset name) (caddr (scratch-attr name)))
+(define (scratch-type name) (cadr (scratch-attr name)))
+
+;; A kernel says `weight` and means THIS point's weight, the way VEX means
+;; @weight. Every wrangle invocation owns exactly one index, so binding the
+;; name to the call is both correct and the shorter thing to write.
+(define (wrangle-attr-env)
+  (map (lambda (a)
+         (cons (car a)
+               (cons (if (eq? (cadr a) :u32) :f32 (cadr a))
+                     (string-append (if (eq? (cadr a) :u32) "f32(attr_" "attr_")
+                                    (wgsl-fn-name (car a)) "(i)"
+                                    (if (eq? (cadr a) :u32) ")" "")))))
+       scratch-attrs))
+
+(define (scratch-stride-wgsl) (string-append (number->string scratch-stride) "u"))
+
+;; The binding and its accessors. Emitted only when something is declared —
+;; a shader that declares a storage buffer it never reads is still a
+;; different pipeline layout, and every kernel written before today should
+;; compile to exactly the text it did before.
+(define (scratch-preamble)
+  (if (null? scratch-attrs)
+      ""
+      (apply string-append
+             "@group(0) @binding(2) var<storage, read_write> scratch : array<f32>;\n"
+             (map (lambda (a) (scratch-accessors (car a) (cadr a) (caddr a)))
+                  scratch-attrs))))
+
+(define (scratch-accessors name type off)
+  (let ((n (wgsl-fn-name name))
+        (base (string-append "i * " (scratch-stride-wgsl)
+                             " + " (number->string off) "u")))
+    (cond
+     ((eq? type :f32)
+      (string-append
+       "fn attr_" n "(i : u32) -> f32 { return scratch[" base "]; }\n"
+       "fn attr_" n "_set(i : u32, v : f32) { scratch[" base "] = v; }\n"))
+     ((eq? type :u32)
+      ;; bitcast, not a numeric conversion: an ancestor index must survive
+      ;; the round trip exactly, and f32 cannot hold every u32.
+      (string-append
+       "fn attr_" n "(i : u32) -> u32 { return bitcast<u32>(scratch[" base "]); }\n"
+       "fn attr_" n "_set(i : u32, v : u32) { scratch[" base "] = bitcast<f32>(v); }\n"))
+     ((eq? type :vec3f)
+      (string-append
+       "fn attr_" n "(i : u32) -> vec3<f32> {\n"
+       "  let b = " base ";\n"
+       "  return vec3<f32>(scratch[b], scratch[b + 1u], scratch[b + 2u]);\n"
+       "}\n"
+       "fn attr_" n "_set(i : u32, v : vec3<f32>) {\n"
+       "  let b = " base ";\n"
+       "  scratch[b] = v.x; scratch[b + 1u] = v.y; scratch[b + 2u] = v.z;\n"
+       "}\n"))
+     (else (error "scratch-accessors: unknown type" type)))))
+
+;;--- the host side ------------------------------------------------------
+;; Two views over the same bytes give the host the same bitcast the shader
+;; does, for nothing.
+(define (make-scratch n)
+  (let ((b (make-bytes (* n scratch-stride 4))))
+    (bytes-seal! b)
+    b))
+
+(define (scratch-view b) (cons (bytes-view b :f32) (bytes-view b :u32)))
+
+(define (scratch-set! sv i name . vals)
+  (let* ((a (scratch-attr name))
+         (k (+ (* i scratch-stride) (caddr a)))
+         (type (cadr a)))
+    (cond ((eq? type :u32) (view-set! (cdr sv) k (car vals)))
+          ((eq? type :vec3f)
+           (view-set! (car sv) k (car vals))
+           (view-set! (car sv) (+ k 1) (cadr vals))
+           (view-set! (car sv) (+ k 2) (caddr vals)))
+          (else (view-set! (car sv) k (car vals))))))
+
+(define (scratch-ref sv i name)
+  (let* ((a (scratch-attr name))
+         (k (+ (* i scratch-stride) (caddr a)))
+         (type (cadr a)))
+    (cond ((eq? type :u32) (view-ref (cdr sv) k))
+          ((eq? type :vec3f)
+           (list (view-ref (car sv) k)
+                 (view-ref (car sv) (+ k 1))
+                 (view-ref (car sv) (+ k 2))))
+          (else (view-ref (car sv) k)))))
 
 (define wrangle-preamble
   (string-append
@@ -185,6 +342,13 @@
    "  pts[b + 5u] = col.y;\n"
    "  pts[b + 6u] = col.z;\n"
    "}\n"
+   ))
+
+;; Everything from here down is the entry point. Split from the block above
+;; so generated bindings and accessors can be spliced BETWEEN them: WGSL
+;; wants a function declared before the code that calls it.
+(define wrangle-main-preamble
+  (string-append
    "\n"
    "@compute @workgroup_size(64)\n"
    "fn main(@builtin(global_invocation_id) gid : vec3<u32>) {\n"
@@ -215,4 +379,6 @@
     ;; order a reader expects.
     (string-append rng "\n" stat "\n" col "\n"
                    (wgsl-definitions-source) "\n"
-                   wrangle-preamble body "\n}\n")))
+                   wrangle-preamble
+                   (scratch-preamble)
+                   wrangle-main-preamble body "\n}\n")))

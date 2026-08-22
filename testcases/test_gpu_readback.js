@@ -190,8 +190,8 @@ function check(name, cond, detail) {
   check('the uniform buffer is one aligned slice per substep',
         seen.every((r) => r.size === 256), JSON.stringify(seen[0]));
   check('and the binding declares an explicit 48-byte size',
-        fakeDevice._lastBindGroup.entries[0].resource.size === 48,
-        JSON.stringify(fakeDevice._lastBindGroup.entries[0].resource));
+        fakeDevice._boundGroup.entries[0].resource.size === 48,
+        JSON.stringify(fakeDevice._boundGroup.entries[0].resource));
   check('parameters reach the kernel by declared slot',
         seen[0].p0 === 0.25 && seen[0].p1 === 1 &&
         seen[2].p0 === 0.75 && seen[2].p1 === 3, JSON.stringify(seen));
@@ -268,6 +268,57 @@ function check(name, cond, detail) {
   await pump(4);
   check('a substep count below one is refused',
         ev('bad-steps') === 'raised', ev('bad-steps'));
+
+  //--- scratch attributes reach the device -----------------------------
+  // No shader runs here, so this asserts the PLUMBING, not the arithmetic:
+  // that binding 2 appears only when a scratch buffer is supplied, that
+  // the layout is otherwise untouched, and that what the host writes is
+  // what comes back off the device.
+  ev(`(scratch-attributes! '((weight :f32) (ancestor :u32)))`);
+  ev(`(define SB (make-scratch 4))
+      (define SV (scratch-view SB))
+      (scratch-set! SV 0 'weight 0.5)
+      (scratch-set! SV 0 'ancestor 16777217)
+      (scratch-set! SV 3 'weight 0.25)`);
+  ev('(define sbuf #f) (define ssh #f) (define back #f)');
+  ev(`(future (let* ((sb (gpu-buffer dev SB))
+                     (s  (touch (gpu-compile dev
+                          (wrangle-wgsl "attr_weight_set(i, weight * 2.0);")))))
+                (set! sbuf sb) (set! ssh s)
+                (gpu-wrangle! dev handle s 3 0.0 1 #f 1 sb)
+                (set! back (touch (gpu-buffer-read dev sb)))))`);
+  await pump(20);
+
+  check('a kernel using scratch compiles', ev('(handle? ssh)') === '#t', ev('ssh'));
+  check('and binds three buffers',
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)) ===
+          JSON.stringify([0, 1, 2]),
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)));
+
+  ev('(define RV (scratch-view (cdr back)))');
+  check('the scratch buffer round-trips off the device',
+        ev(`(scratch-ref RV 0 'weight)`) === '0.5', ev(`(scratch-ref RV 0 'weight)`));
+  check('a u32 attribute survives the trip past 2^24',
+        ev(`(scratch-ref RV 0 'ancestor)`) === '16777217',
+        ev(`(scratch-ref RV 0 'ancestor)`));
+  check('and a later element is undisturbed',
+        ev(`(scratch-ref RV 3 'weight)`) === '0.25', ev(`(scratch-ref RV 3 'weight)`));
+
+  // A kernel that declares nothing must keep the two-entry layout it has
+  // always had: an unused storage binding is still a different pipeline.
+  ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB 1)`);
+  check('a wrangle without scratch still binds only two',
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)) ===
+          JSON.stringify([0, 1]),
+        JSON.stringify(fakeDevice._boundGroup.entries.map((e) => e.binding)));
+
+  ev('(define bad-scratch #f)');
+  ev(`(future (set! bad-scratch (guard (e (#t 'raised))
+                (gpu-wrangle! dev handle wsh 3 0.0 7 PB 1 42))))`);
+  await pump(4);
+  check('a non-handle scratch argument raises',
+        ev('bad-scratch') === 'raised', ev('bad-scratch'));
+  ev(`(scratch-attributes! '())`);
 
   ev('(define after-release #f)');
   ev(`(future (set! after-release

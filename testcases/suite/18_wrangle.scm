@@ -335,4 +335,91 @@
 (assert-true "and so does pt_size"
              (string-contains? src (string-append "pts[i * " points-stride-wgsl " + 3u]")))
 
+;;--- named scratch attributes -------------------------------------------
+;; State the simulation needs and the renderer must not see. A SECOND
+;; buffer rather than a wider point stride: the renderer is the hot path,
+;; and widening the stride would make the vertex shader fetch every scratch
+;; float of every point of every frame to use none of them.
+
+(assert-equal "with nothing declared, the shader is unchanged"
+              "" (begin (scratch-attributes! '()) (scratch-preamble)))
+(assert-equal "and no binding 2 appears" #f
+              (string-contains? (wrangle-wgsl "") "@binding(2)"))
+
+(assert-equal "the stride is the sum of the component widths"
+              5 (scratch-attributes! '((weight :f32) (ancestor :u32) (velocity :vec3f))))
+(assert-equal "offsets follow declaration order" 0 (scratch-offset 'weight))
+(assert-equal "one float for a u32" 1 (scratch-offset 'ancestor))
+(assert-equal "three for a vec3f" 2 (scratch-offset 'velocity))
+(assert-equal "an unknown type is refused"
+              'raised (guard (e (#t 'raised)) (scratch-attributes! '((x :mat4)))))
+(assert-equal "so is a malformed spec"
+              'raised (guard (e (#t 'raised)) (scratch-attributes! '(weight))))
+
+;; A kernel says `weight` and means THIS point's weight, the way VEX means
+;; @weight. Every invocation owns exactly one index, so the name can bind
+;; straight to the call.
+(scratch-attributes! '((weight :f32) (ancestor :u32) (velocity :vec3f)))
+(assert-equal "a kernel reads an attribute by name"
+              "attr_weight(i)" (wgsl-code 'weight wrangle-env))
+(assert-equal "a vec3f attribute keeps its type"
+              :vec3f (wgsl-type 'velocity wrangle-env))
+;; A u32 attribute reads as :f32 in the kernel language for the same reason
+;; seed does: WGSL has no implicit coercion and kernel use is arithmetic.
+(assert-equal "a u32 attribute is converted for arithmetic"
+              "f32(attr_ancestor(i))" (wgsl-code 'ancestor wrangle-env))
+
+(define spre (scratch-preamble))
+(assert-true "the scratch buffer binds at 2, read_write"
+             (string-contains? spre
+               "@group(0) @binding(2) var<storage, read_write> scratch : array<f32>;"))
+(assert-true "an f32 accessor indexes by the scratch stride"
+             (string-contains? spre "fn attr_weight(i : u32) -> f32 { return scratch[i * 5u + 0u]; }"))
+(assert-true "and has a setter"
+             (string-contains? spre "fn attr_weight_set(i : u32, v : f32) { scratch[i * 5u + 0u] = v; }"))
+;; BITCAST, not a numeric conversion. An ancestor index must survive the
+;; round trip exactly, and f32 cannot hold every u32 — the same failure the
+;; seed had before it became an integer.
+(assert-true "a u32 attribute bitcasts rather than converts"
+             (string-contains? spre "return bitcast<u32>(scratch[i * 5u + 1u]);"))
+(assert-true "in both directions"
+             (string-contains? spre "scratch[i * 5u + 1u] = bitcast<f32>(v);"))
+(assert-true "a vec3f is three flat floats, not a vec3 in the array"
+             (string-contains? spre "vec3<f32>(scratch[b], scratch[b + 1u], scratch[b + 2u])"))
+
+;;--- the host side ------------------------------------------------------
+(define SB (make-scratch 4))
+(define SV (scratch-view SB))
+(assert-equal "the block is stride * count floats" 80 (bytes-length SB))
+(scratch-set! SV 0 'weight 0.25)
+(scratch-set! SV 0 'velocity 1.0 2.0 3.0)
+(scratch-set! SV 3 'weight 0.5)
+(assert-equal "an attribute round-trips by name" 0.25 (scratch-ref SV 0 'weight))
+(assert-equal "a vec3f round-trips" '(1.0 2.0 3.0) (scratch-ref SV 0 'velocity))
+(assert-equal "elements do not disturb each other" 0.5 (scratch-ref SV 3 'weight))
+(assert-equal "unset reads zero" 0.0 (scratch-ref SV 1 'weight))
+
+;; The reason :u32 exists at all. 2^24+1 is the first integer an f32 cannot
+;; represent; stored as a float it comes back as its neighbour.
+(scratch-set! SV 2 'ancestor 16777217)
+(assert-equal "a u32 attribute survives past 2^24 exactly"
+              16777217 (scratch-ref SV 2 'ancestor))
+
+(assert-equal "an undeclared attribute is an error, not offset zero"
+              'raised (guard (e (#t 'raised)) (scratch-ref SV 0 'nonesuch)))
+
+;; Declaring again REPLACES. Appending would leave every previous name
+;; resolving to a slot nobody writes any more.
+(scratch-attributes! '((age :f32)))
+(assert-equal "redeclaring rebinds from zero" 0 (scratch-offset 'age))
+(assert-equal "and drops the previous names" #f (assq 'weight wrangle-env))
+(wrangle-params! '(sigma))
+(assert-equal "parameters and attributes coexist"
+              "w.p0" (wgsl-code 'sigma wrangle-env))
+(assert-equal "and neither declarator clears the other"
+              "attr_age(i)" (wgsl-code 'age wrangle-env))
+
+(scratch-attributes! '())        ; leave the world as we found it
+(wrangle-params! '(sigma radius gain))
+
 (suite-summary)

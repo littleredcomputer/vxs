@@ -157,7 +157,11 @@
 (define orbit-camera! (make-orbiter))
 
 ;; (run-wrangle-loop seed-bytes count wrangle-src frame! camera
-;;                    [canvas-id [params [steps]]])
+;;                    :canvas "gpu-canvas" :params P :steps 8 :scratch S)
+;;
+;; KEYWORD OPTIONS, because there are now four of them and a call site
+;; reading (run-wrangle-loop b n src f! cam "c" #f 8 S) tells a reader
+;; nothing about which #f was skipped.
 ;;
 ;; The GPU-resident counterpart of run-points-loop. The point data lives in
 ;; a GPU buffer, a compute dispatch rewrites it, and the draw reads it — the
@@ -173,15 +177,26 @@
 ;; with no recompile: that is what makes a slider playable rather than
 ;; merely demonstrable. Pass #f (or omit it) and the slots read zero.
 ;;
-;; `steps` runs the kernel N times per frame, inside one encoder and one
+;; `:steps` runs the kernel N times per frame, inside one encoder and one
 ;; submit, each substep with its own RNG stream. Looping here instead would
 ;; yield between dispatches and cost a frame per step, so this is the only
 ;; place it can be done.
+;;
+;; `:scratch` is a block from make-scratch, bound at 2, holding whatever
+;; the kernel declared with scratch-attributes!. The renderer never sees
+;; it, which is the entire point: state the simulation needs and the
+;; picture does not.
+(define (opt-ref opts key default)
+  (let loop ((o opts))
+    (cond ((or (null? o) (null? (cdr o))) default)
+          ((eq? (car o) key) (cadr o))
+          (else (loop (cddr o))))))
+
 (define (run-wrangle-loop seed-bytes count wrangle-src frame! camera . opts)
-  (let ((canvas (if (null? opts) "gpu-canvas" (car opts)))
-        (params (if (or (null? opts) (null? (cdr opts))) #f (cadr opts)))
-        (steps  (if (or (null? opts) (null? (cdr opts)) (null? (cddr opts)))
-                    1 (caddr opts))))
+  (let ((canvas  (opt-ref opts :canvas "gpu-canvas"))
+        (params  (opt-ref opts :params #f))
+        (steps   (opt-ref opts :steps 1))
+        (scratch-bytes (opt-ref opts :scratch #f)))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
@@ -189,7 +204,12 @@
              ;; a typo in either one costs a message and no frames.
              (kernel  (touch (gpu-compile device wrangle-src)))
              (draw    (touch (gpu-compile device points-wgsl)))
-             (buf     (gpu-buffer device seed-bytes)))
+             (buf     (gpu-buffer device seed-bytes))
+             ;; Scratch is uploaded once, like the points, and then lives
+             ;; on the device. Nothing reads it back per frame — that is
+             ;; what gpu-buffer-read is for, when a program wants a number
+             ;; out rather than a picture.
+             (scratch (if scratch-bytes (gpu-buffer device scratch-bytes) #f)))
         (display "wrangle: shaders compiled, buffer uploaded, dispatching.") (newline)
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
@@ -199,7 +219,7 @@
             ;; of (index, time), so re-running it with a frozen clock
             ;; reproduces the identical cloud — the counter-based RNG is
             ;; what makes a paused frame stable rather than shimmering.
-            (gpu-wrangle! device buf kernel count t2 1 params steps)
+            (gpu-wrangle! device buf kernel count t2 1 params steps scratch)
             (gpu-draw-buffer! device buf draw count t2 camera canvas)
             (yield)
             (loop t2 now)))))))
