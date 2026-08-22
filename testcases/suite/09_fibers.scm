@@ -143,4 +143,40 @@
 (run-fibers)
 (assert-equal "shared state after cooperative updates" 6 shared)
 
+;; --- the scheduler is RE-ENTRANT, and must survive being so -------------
+;;
+;; A fiber that touches a fiber-backed future from somewhere it cannot
+;; suspend — inside guard, map, apply — cannot block, so the VM rescues it
+;; by pumping the whole scheduler from inside that fiber's own step. The
+;; nested round appends fibers, retires others, and moves the round cursor.
+;;
+;; Both scheduler call sites used to retire a finished fiber by a POSITION
+;; recorded before it ran, and after a nested round that position meant
+;; nothing. erase() past the end computes a negative move size: SIGBUS
+;; natively, out-of-bounds in wasm. Not a raise anyone could catch — the
+;; whole VM went down, from four lines of ordinary Scheme.
+;;
+;; These assertions are cheap; what they are really testing is that the
+;; process is still alive to make them.
+
+(define g (future (guard (e (#t 'caught)) (touch (future 42)))))
+(assert-equal "guard + touch of a fiber-backed future survives" 42 (touch g))
+
+(define g2 (future (guard (e (#t (quote x)))
+                    (touch (future (guard (e (#t (quote y)))
+                                     (touch (future 7))))))))
+(assert-equal "and nests" 7 (touch g2))
+
+(define g3 (future (car (map (lambda (x) (touch (future x))) (list 1 2 3)))))
+(assert-equal "so does touch inside map" 1 (touch g3))
+
+;; With enough siblings that the fiber vector genuinely reallocates and
+;; genuinely shifts under the nested round, rather than happening to sit
+;; still because it was small.
+(do ((i 0 (+ i 1))) ((= i 20))
+  (future (let lp ((n 0)) (if (< n 3) (begin (yield) (lp (+ n 1)))))))
+(define g4 (future (guard (e (#t 'c)) (touch (future 99)))))
+(assert-equal "with twenty siblings churning underneath" 99 (touch g4))
+(run-fibers)
+
 (suite-summary)
