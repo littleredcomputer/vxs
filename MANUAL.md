@@ -503,6 +503,12 @@ that program, not to make throwing cheaper — so the exception path stays
 outside the performance envelope by construction. `RaiseEscape`, the one
 this change would multiply, has no control-flow use at all.
 
+#### The reader has no `#x` / `#b` / `#o` literals
+
+`(string->number "FF" 16)` works; `#xFF` is read as a symbol and fails as
+an unbound variable. Small, self-contained, and the error message points
+nowhere useful.
+
 #### Arithmetic does not type-check
 
 Symptom in [§3](#3-errors-what-is-catchable): non-numbers are treated as
