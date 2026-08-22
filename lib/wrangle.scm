@@ -73,10 +73,13 @@
 ;; seed past 2^24 onto its neighbours — "a different seed" quietly meaning
 ;; "the same noise". A counter-based RNG addressed by a float is not
 ;; addressed at all.
-(define wrangle-env
+(define wrangle-builtin-env
   '((time . (:f32 . "w.time"))
     (seed . (:f32 . "f32(w.seed)"))
-    (count . (:f32 . "f32(w.count)"))))
+    (count . (:f32 . "f32(w.count)"))
+    (step . (:f32 . "f32(w.step)"))))
+
+(define wrangle-env wrangle-builtin-env)
 
 ;;--- live parameters ----------------------------------------------------
 ;; (wrangle-params! '(sigma radius gain)) names the spare uniform slots.
@@ -96,9 +99,7 @@
   ;; Rebuild rather than append: calling this twice should REPLACE the
   ;; declaration, not leave the previous names shadowing the new ones.
   (set! wrangle-env
-        (append '((time . (:f32 . "w.time"))
-                  (seed . (:f32 . "f32(w.seed)"))
-                  (count . (:f32 . "f32(w.count)")))
+        (append wrangle-builtin-env
                 (let loop ((ns names) (i 0) (acc '()))
                   (if (null? ns)
                       (reverse acc)
@@ -140,7 +141,7 @@
    "  time : f32,\n"
    "  count : u32,\n"
    "  seed : u32,\n"
-   "  pad : f32,\n"
+   "  step : u32,\n"
    ;; Eight general-purpose slots. A kernel constant baked into the SOURCE
    ;; means changing it recompiles the shader, so dragging a slider hitches
    ;; on every frame it moves. These live in the uniform, which is already
@@ -185,7 +186,12 @@
    "  // indices past the end. They must return, not clamp: clamping would\n"
    "  // have several invocations write the same point.\n"
    "  if (i >= w.count) { return; }\n"
-   "  rng_init(i, w.seed, 0u);\n"))
+   ;; THE SUBSTEP IS THE RNG STREAM. Running the kernel N times a frame
+   ;; with one stream would replay the identical draws N times — the
+   ;; positions move, because each step reads what the last one wrote, but
+   ;; every random decision is the same one over and over. That is a
+   ;; sampler that looks like it is working and is not.
+   "  rng_init(i, w.seed, w.step);\n"))
 
 ;; (wrangle-wgsl body) -> complete compute shader source.
 ;; `body` is WGSL statements; see the header for what is in scope.

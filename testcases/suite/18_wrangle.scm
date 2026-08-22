@@ -79,7 +79,14 @@
 ;; past 2^24 onto its neighbours — "a different seed" quietly meaning "the
 ;; same noise". A counter-based RNG addressed by a float is not addressed.
 (assert-true "draws are addressed by point index, from an integer seed"
-             (string-contains? src "rng_init(i, w.seed, 0u);"))
+             (string-contains? src "rng_init(i, w.seed, w.step);"))
+
+;; THE SUBSTEP IS THE STREAM. Running the kernel N times a frame with one
+;; stream replays the identical draws N times: the positions still move,
+;; because each step reads what the last one wrote, but every random
+;; decision repeats. That is a sampler that looks like it works.
+(assert-equal "the substep index is readable from a kernel"
+              "f32(w.step)" (wgsl-code 'step wrangle-env))
 
 ;; The rotation constants are the ones the host uses. If these ever
 ;; disagreed, GPU and host randomness would silently diverge — and the
@@ -130,7 +137,7 @@
 (assert-true "colour accessor"    (string-contains? src "fn pt_colour(i : u32)"))
 (assert-true "writer"             (string-contains? src "fn pt_write(i : u32,"))
 (assert-true "the uniform carries time, count and seed"
-             (string-contains? src "struct WU {\n  time : f32,\n  count : u32,\n  seed : u32,"))
+             (string-contains? src "struct WU {\n  time : f32,\n  count : u32,\n  seed : u32,\n  step : u32,"))
 
 ;; Eight spare slots, and named scalars rather than array<f32, 8>: in the
 ;; uniform address space an array's stride is padded to 16 bytes, so the

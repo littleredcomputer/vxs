@@ -184,8 +184,14 @@ function check(name, cond, detail) {
     const u = new Uint32Array(w.bytes.buffer, 0, 12);
     seen.push({ size: w.size, seed: u[2], p0: f[4], p1: f[5] });
   }
-  check('the uniform block is 48 bytes',
-        seen.every((r) => r.size === 48), JSON.stringify(seen[0]));
+  // The STRUCT is 48 bytes (pinned against the WGSL text in layer 18);
+  // the BUFFER is one dynamic-offset-aligned slice per substep, so a
+  // single-step dispatch still allocates a full 256-byte slice.
+  check('the uniform buffer is one aligned slice per substep',
+        seen.every((r) => r.size === 256), JSON.stringify(seen[0]));
+  check('and the binding declares an explicit 48-byte size',
+        fakeDevice._lastBindGroup.entries[0].resource.size === 48,
+        JSON.stringify(fakeDevice._lastBindGroup.entries[0].resource));
   check('parameters reach the kernel by declared slot',
         seen[0].p0 === 0.25 && seen[0].p1 === 1 &&
         seen[2].p0 === 0.75 && seen[2].p1 === 3, JSON.stringify(seen));
@@ -206,6 +212,62 @@ function check(name, cond, detail) {
   check('and omitting the block leaves the slots zero',
         new Float32Array(tail, 0, 12)[4] === 0,
         String(new Float32Array(tail, 0, 12)[4]));
+
+  //--- substeps: N kernel runs, one submit -----------------------------
+  // Looping in Scheme cannot do this. The loop would have to yield between
+  // dispatches, so N steps would cost N FRAMES rather than one — which is
+  // the difference between a simulation that can outrun the frame budget
+  // and one that is pinned to it.
+  //
+  // Each substep gets its own slice of the uniform, because nothing can
+  // rewrite a uniform inside a pass. They differ in `step`, which the
+  // preamble hands to rng_init as the stream index: without it, N substeps
+  // replay the identical draws N times, which is a sampler that looks like
+  // it works and does not.
+  const enc0 = fakeDevice._encoders || 0;
+  const sub0 = fakeDevice.queue._submits || 0;
+  ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB 5)`);
+  const log = fakeDevice._passLog;
+
+  check('five substeps mean five dispatches',
+        log.dispatches === 5, JSON.stringify(log));
+  check('in ONE encoder', (fakeDevice._encoders || 0) - enc0 === 1,
+        String((fakeDevice._encoders || 0) - enc0));
+  check('and ONE submit', (fakeDevice.queue._submits || 0) - sub0 === 1,
+        String((fakeDevice.queue._submits || 0) - sub0));
+  check('each at its own aligned uniform offset',
+        JSON.stringify(log.offsets) === JSON.stringify([0, 256, 512, 768, 1024]),
+        JSON.stringify(log.offsets));
+
+  // The bytes each substep will actually read.
+  const ub = fakeDevice.queue._lastWrite.bytes.buffer;
+  const steps = [0, 1, 2, 3, 4].map((k) => ({
+    step: new Uint32Array(ub, k * 256, 12)[3],
+    seed: new Uint32Array(ub, k * 256, 12)[2],
+    p0: new Float32Array(ub, k * 256, 12)[4],
+  }));
+  check('every substep carries a distinct RNG stream',
+        JSON.stringify(steps.map((r) => r.step)) === JSON.stringify([0, 1, 2, 3, 4]),
+        JSON.stringify(steps.map((r) => r.step)));
+  check('while sharing the seed',
+        steps.every((r) => r.seed === 7), JSON.stringify(steps.map((r) => r.seed)));
+  check('and the same live parameters',
+        steps.every((r) => r.p0 === 0.75), JSON.stringify(steps.map((r) => r.p0)));
+
+  // Asking for more substeps than the buffer was built for must grow it,
+  // not silently run fewer — a wrong answer wearing the costume of a slow
+  // one.
+  ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB 9)`);
+  check('a larger substep count grows the buffer rather than clamping',
+        fakeDevice._passLog.dispatches === 9,
+        JSON.stringify(fakeDevice._passLog));
+
+  ev('(define bad-steps #f)');
+  ev(`(future (set! bad-steps (guard (e (#t 'raised))
+                (gpu-wrangle! dev handle wsh 3 0.0 7 PB 0))))`);
+  await pump(4);
+  check('a substep count below one is refused',
+        ev('bad-steps') === 'raised', ev('bad-steps'));
 
   ev('(define after-release #f)');
   ev(`(future (set! after-release
