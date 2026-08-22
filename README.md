@@ -33,6 +33,13 @@ memory; tail calls and named lets are optimized for this. C++ turned
 out to allow easy generation of WASM with zero dependencies: there's
 no CMake or Meson here; just compile it and go.
 
+## the manual
+
+[MANUAL.md](MANUAL.md) covers the parts of vxs you cannot infer from the
+source: where a fiber may suspend and where it may not, what `guard` does
+and does not catch, and how the GPU pipeline fits together. If something
+died and you are not sure why, start there.
+
 ## features
 
 - **NaN-boxed values** — every Scheme value (fixnums, flonums, pairs,
