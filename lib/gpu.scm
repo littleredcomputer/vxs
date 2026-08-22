@@ -32,6 +32,15 @@
 ;; Acquires the device and animates the kernel, one frame per yield, off
 ;; whatever driver is pumping the scheduler.
 ;;
+;; COMPILE FIRST, THEN LOOP. Every loop below touches (gpu-compile device
+;; src) once, up front, and passes the resulting shader handle to the draw.
+;; That ordering is not a convenience: the draw primitives take a handle
+;; and nothing else, so a shader physically cannot reach a pipeline without
+;; someone having waited for its compile to succeed. A bad shader now stops
+;; the fiber at the `touch`, before the first frame, with the line, the
+;; column and the offending source — instead of running at sixty frames a
+;; second against a black canvas.
+;;
 ;; NOTHING HERE CATCHES. These loops used to wrap the draw in a guard that
 ;; printed a message and stopped — and it was worse than useless, because
 ;; `error-object-message` returns the error's TAG, not its text. A shader
@@ -50,11 +59,12 @@
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
-             (device  (touch (request-device adapter))))
+             (device  (touch (request-device adapter)))
+             (shader  (touch (gpu-compile device wgsl))))
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
                  (t2 (if (paused?) t (+ t (- now last)))))
-            (gpu-run-kernel! device wgsl t2 canvas)
+            (gpu-run-kernel! device shader t2 canvas)
             (yield)
             (loop t2 now)))))))
 
@@ -73,14 +83,15 @@
   (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
     (future
       (let* ((adapter (touch (request-adapter)))
-             (device  (touch (request-device adapter))))
+             (device  (touch (request-device adapter)))
+             (shader  (touch (gpu-compile device points-wgsl))))
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
                  (t2 (if (paused?) t (+ t (- now last)))))
             ;; update! runs even when paused, because that is where the
             ;; camera is orbited.
             (update! t2)
-            (gpu-draw-instances! device points-wgsl bytes count t2 camera canvas)
+            (gpu-draw-instances! device shader bytes count t2 camera canvas)
             (yield)
             (loop t2 now)))))))
 
@@ -160,8 +171,12 @@
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
+             ;; Both shaders compile before the buffer is even uploaded, so
+             ;; a typo in either one costs a message and no frames.
+             (kernel  (touch (gpu-compile device wrangle-src)))
+             (draw    (touch (gpu-compile device points-wgsl)))
              (buf     (gpu-buffer device seed-bytes)))
-        (display "wrangle: buffer uploaded, dispatching.") (newline)
+        (display "wrangle: shaders compiled, buffer uploaded, dispatching.") (newline)
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
                  (t2 (if (paused?) t (+ t (- now last)))))
@@ -170,8 +185,8 @@
             ;; of (index, time), so re-running it with a frozen clock
             ;; reproduces the identical cloud — the counter-based RNG is
             ;; what makes a paused frame stable rather than shimmering.
-            (gpu-wrangle! device buf wrangle-src count t2 1)
-            (gpu-draw-buffer! device buf points-wgsl count t2 camera canvas)
+            (gpu-wrangle! device buf kernel count t2 1)
+            (gpu-draw-buffer! device buf draw count t2 camera canvas)
             (yield)
             (loop t2 now)))))))
 
@@ -186,6 +201,7 @@
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
+             (shader  (touch (gpu-compile device cubes-wgsl)))
              (buf     (gpu-buffer device bytes)))
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
@@ -194,7 +210,7 @@
             ;; The buffer lives on the GPU, so a host-side writer has to
             ;; push its changes each frame. gpu-buffer-write! is that push.
             (gpu-buffer-write! device buf bytes)
-            (gpu-draw-geometry! device buf cubes-wgsl cube-vertex-count
+            (gpu-draw-geometry! device buf shader cube-vertex-count
                                 count t2 camera canvas)
             (yield)
             (loop t2 now)))))))

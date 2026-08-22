@@ -77,7 +77,9 @@
   // does not work. Errors from an await still surface: a dying fiber now
   // reports itself to the console.
   //
-  // gpu-draw-triangle! is synchronous, so it CAN be guarded.
+  // gpu-draw-triangle! is synchronous, so it CAN be guarded. gpu-compile
+  // is NOT — it returns a future — so its `touch` sits with the other
+  // awaits in the let*, above the guard, for exactly the reason above.
   var SCHEME = [
     '(define wgsl *wgsl*)',
     '',
@@ -86,12 +88,14 @@
     '  (let ((adapter (touch (request-adapter))))',
     '    (display "  got ") (display (handle-kind adapter)) (newline)',
     '    (display "requesting device...") (newline)',
-    '    (let ((device (touch (request-device adapter))))',
+    '    (let* ((device (touch (request-device adapter)))',
+    '           (shader (touch (gpu-compile device wgsl))))',
     '      (display "  got ") (display (handle-kind device)) (newline)',
+    '      (display "  shader compiled") (newline)',
     '      (guard (e (#t (display "draw failed: ")',
     '                    (display (if (error-object? e) (error-object-message e) e))',
     '                    (newline)))',
-    '        (gpu-draw-triangle! device wgsl)',
+    '        (gpu-draw-triangle! device shader)',
     '        (display "submitted. triangle should be visible.") (newline)))))'
   ].join('\n');
 
@@ -150,14 +154,15 @@
     '',
     '(future',
     '  (let* ((adapter (touch (request-adapter)))',
-    '         (device (touch (request-device adapter))))',
-    '    (display "device acquired; animating.") (newline)',
+    '         (device (touch (request-device adapter)))',
+    '         (shader (touch (gpu-compile device wgsl))))',
+    '    (display "device acquired, shader compiled; animating.") (newline)',
     '    (let loop ()',
     '      (if (guard (e (#t (display "kernel failed: ")',
     '                        (display (if (error-object? e) (error-object-message e) e))',
     '                        (newline)',
     '                        #f))',
-    '            (gpu-run-kernel! device wgsl (/ (current-time) 1000.0))',
+    '            (gpu-run-kernel! device shader (/ (current-time) 1000.0))',
     '            #t)',
     '          (begin (yield) (loop))',
     '          (begin (display "stopped.") (newline))))))'
