@@ -425,10 +425,15 @@
   // Size from magnitude, with a floor so nothing vanishes: an
   // empty cell reads as a lull rather than a hole.
   //
-  // The 0.1 is what SEPARATES the cubes. At half the spacing they touch
-  // and the grid reads as one solid block; well under it, each cube is
-  // its own sample and the field's variation becomes legible as
-  // variation rather than as a surface.
+  // THIS COEFFICIENT HAS TWO REGIMES, and the crossover is the grid
+  // spacing. Well under it (0.1, here) every cube stands alone and the
+  // field reads as texture — each cube is its own sample of it.
+  //
+  // Well over it (try 0.5) each cube reaches several spacings and swallows
+  // its neighbours, so all that survives to be seen is the local MAXIMA of
+  // the magnitude field. That is a morphological dilation, and it looks
+  // like architecture: flat slabs, hard occlusion edges, and structure at
+  // a far coarser scale than the lattice. Same field, same seed.
   let half = (w.p3 + w.p2 * mag) * 0.1;
 
   // Colour from DIRECTION, not magnitude. The two carry different
