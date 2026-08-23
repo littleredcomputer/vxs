@@ -131,6 +131,17 @@
 ;; The accessor's stride and offset come from the SAME declaration the
 ;; kernel compiles against, so the two cannot disagree about where a pose
 ;; lives — the failure that would otherwise read as cubes turning wrongly.
+;; GETTER ONLY. The renderer binds scratch var<storage, read>, so a setter
+;; is not merely unused there — it does not compile:
+;;   cannot store into a read-only type 'ref<storage, f32, read>'
+;; The kernel, which binds the same buffer read_write, gets both.
+(assert-true "the renderer can read a pose"
+             (string-contains? psrc "fn attr_pose(i : u32) -> vec4<f32>"))
+(assert-false "and cannot write one, because its binding is read-only"
+              (string-contains? psrc "attr_pose_set"))
+(assert-true "while the kernel gets both halves"
+             (string-contains? (wrangle-wgsl "") "fn attr_pose_set(i : u32, v : vec4<f32>)"))
+
 (assert-true "the accessor derives its offset from the declaration"
              (string-contains? psrc "let b = i * 5u + 1u;"))
 ;; Rotate the corner about the cube's OWN centre, then place it. The other

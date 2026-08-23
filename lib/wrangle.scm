@@ -380,42 +380,62 @@
              (map (lambda (a) (scratch-accessors (car a) (cadr a) (caddr a)))
                   scratch-attrs))))
 
-(define (scratch-accessors name type off)
+;; (scratch-accessors name type off [read-only?])
+;;
+;; The optional flag emits the GETTER ONLY. A renderer binds the scratch
+;; buffer var<storage, read>, so emitting a setter there is not merely
+;; unused — it does not compile:
+;;
+;;   cannot store into a read-only type 'ref<storage, f32, read>'
+;;
+;; Which is the right failure, and it is the reason the flag exists rather
+;; than the renderer quietly getting a writable binding it has no business
+;; holding.
+(define (scratch-accessors name type off . opts)
   (let ((n (wgsl-fn-name name))
+        (read-only? (and (pair? opts) (car opts)))
         (base (string-append "i * " (scratch-stride-wgsl)
                              " + " (number->string off) "u")))
     (cond
      ((eq? type :f32)
       (string-append
        "fn attr_" n "(i : u32) -> f32 { return scratch[" base "]; }\n"
-       "fn attr_" n "_set(i : u32, v : f32) { scratch[" base "] = v; }\n"))
+       (if read-only? ""
+           (string-append
+            "fn attr_" n "_set(i : u32, v : f32) { scratch[" base "] = v; }\n"))))
      ((eq? type :u32)
       ;; bitcast, not a numeric conversion: an ancestor index must survive
       ;; the round trip exactly, and f32 cannot hold every u32.
       (string-append
        "fn attr_" n "(i : u32) -> u32 { return bitcast<u32>(scratch[" base "]); }\n"
-       "fn attr_" n "_set(i : u32, v : u32) { scratch[" base "] = bitcast<f32>(v); }\n"))
+       (if read-only? ""
+           (string-append
+            "fn attr_" n "_set(i : u32, v : u32) { scratch[" base "] = bitcast<f32>(v); }\n"))))
      ((eq? type :quat)
       (string-append
        "fn attr_" n "(i : u32) -> vec4<f32> {\n"
        "  let b = " base ";\n"
        "  return vec4<f32>(scratch[b], scratch[b + 1u], scratch[b + 2u], scratch[b + 3u]);\n"
        "}\n"
-       "fn attr_" n "_set(i : u32, v : vec4<f32>) {\n"
-       "  let b = " base ";\n"
-       "  scratch[b] = v.x; scratch[b + 1u] = v.y;\n"
-       "  scratch[b + 2u] = v.z; scratch[b + 3u] = v.w;\n"
-       "}\n"))
+       (if read-only? ""
+           (string-append
+            "fn attr_" n "_set(i : u32, v : vec4<f32>) {\n"
+            "  let b = " base ";\n"
+            "  scratch[b] = v.x; scratch[b + 1u] = v.y;\n"
+            "  scratch[b + 2u] = v.z; scratch[b + 3u] = v.w;\n"
+            "}\n"))))
      ((eq? type :vec3f)
       (string-append
        "fn attr_" n "(i : u32) -> vec3<f32> {\n"
        "  let b = " base ";\n"
        "  return vec3<f32>(scratch[b], scratch[b + 1u], scratch[b + 2u]);\n"
        "}\n"
-       "fn attr_" n "_set(i : u32, v : vec3<f32>) {\n"
-       "  let b = " base ";\n"
-       "  scratch[b] = v.x; scratch[b + 1u] = v.y; scratch[b + 2u] = v.z;\n"
-       "}\n"))
+       (if read-only? ""
+           (string-append
+            "fn attr_" n "_set(i : u32, v : vec3<f32>) {\n"
+            "  let b = " base ";\n"
+            "  scratch[b] = v.x; scratch[b + 1u] = v.y; scratch[b + 2u] = v.z;\n"
+            "}\n"))))
      (else (error "scratch-accessors: unknown type" type)))))
 
 ;;--- shared read-only data ----------------------------------------------

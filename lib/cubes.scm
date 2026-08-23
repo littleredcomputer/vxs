@@ -72,7 +72,7 @@
    (if (cubes-posed?)
        (string-append
         "@group(0) @binding(2) var<storage, read> scratch : array<f32>;\n"
-        (scratch-accessors 'pose :quat (scratch-offset 'pose))
+        (scratch-accessors 'pose :quat (scratch-offset 'pose) #t)
         (embedded-source "quat.wgsl") "\n")
        "")
    "\n"
