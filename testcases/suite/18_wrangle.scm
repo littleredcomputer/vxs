@@ -549,6 +549,55 @@
 (assert-equal "and an undeclared region is an error"
               'raised (guard (e (#t 'raised)) (shared-ref SHV 'nonesuch 0)))
 
+;;--- gradient noise ------------------------------------------------------
+;; Perlin needs a pseudo-random gradient at every integer lattice point,
+;; and the classical route is a permutation table or a hand-rolled integer
+;; hash — both invented, neither checkable, and a bad one shows up as
+;; visible lattice structure. A counter-based RNG is addressed BY INDEX,
+;; and a lattice point IS an index, so the gradient is one Threefry block
+;; with the coordinates as its counter.
+
+(assert-true "the noise library is embedded"
+             (if (embedded-source "noise.wgsl") #t #f))
+(assert-equal "perlin3 is callable from a kernel and returns a scalar"
+              :f32 (wgsl-type '(perlin3 p s) (list (cons 'p :vec3f) (cons 's :u32))))
+(assert-equal "perlin3v gives a vector field"
+              :vec3f (wgsl-type '(perlin3v p s) (list (cons 'p :vec3f) (cons 's :u32))))
+(assert-equal "and the seed must be a u32, not a float"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-type '(perlin3 p s)
+                                   (list (cons 'p :vec3f) (cons 's :f32)))))
+(define nsrc (embedded-source "noise.wgsl"))
+;; It must not touch the streaming RNG state: a noise call that went
+;; through rng_init would silently consume a kernel's draws and shift every
+;; random decision downstream of it.
+;; Checks for a CALL and for the state itself, not for the bare name —
+;; noise.wgsl's own comment explains why it avoids rng_init, and an earlier
+;; version of this assertion matched that prose and failed.
+(assert-false "noise never calls into the streaming generator"
+              (string-contains? nsrc "rng_init("))
+(assert-false "nor touches its private state"
+              (or (string-contains? nsrc "rng_ctr")
+                  (string-contains? nsrc "rng_key")))
+(assert-true "it addresses the lattice point as a Threefry counter"
+             (string-contains? nsrc
+               "threefry4x32(vec4u(bitcast<u32>(ix), bitcast<u32>(iy), bitcast<u32>(iz), 0u)"))
+;; The quintic fade, not smoothstep: its first AND second derivatives
+;; vanish at both ends, which is what stops the lattice showing as creases.
+(assert-true "the fade curve is quintic"
+             (string-contains? nsrc "t * t * t * (t * (t * 6.0 - 15.0) + 10.0)"))
+
+;;--- a declared name may not shadow a built-in ---------------------------
+;; The rebuilt environment puts declarations first, so a parameter called
+;; `seed` would quietly resolve to a parameter slot instead of the
+;; uniform's seed — a wrong answer that still renders.
+(assert-equal "a parameter may not take a built-in's name"
+              'raised (guard (e (#t 'raised)) (wrangle-params! '((seed :u32)))))
+(assert-equal "nor may an attribute"
+              'raised (guard (e (#t 'raised)) (scratch-attributes! '((time :f32)))))
+(assert-equal "ordinary names are still fine"
+              'ok (guard (e (#t 'raised)) (begin (wrangle-params! '(sigma)) 'ok)))
+
 (shared-layout! '())
 (scratch-attributes! '())        ; leave the world as we found it
 (wrangle-params! '(sigma radius gain))

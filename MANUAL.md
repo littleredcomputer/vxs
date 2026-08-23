@@ -370,6 +370,12 @@ otherwise run at zero objects per frame.
 `run-wrangle-loop` takes it as an optional argument after the canvas id.
 Omit it and the slots read zero.
 
+⚠️ A declared parameter or attribute may not take a built-in's name
+(`time`, `count`, `seed`, `step`). Declarations shadow built-ins in the
+kernel environment, so a parameter called `seed` would quietly resolve to a
+parameter slot instead of the uniform's seed. Refused rather than
+documented.
+
 ### Scratch attributes
 
 State the simulation needs and the renderer must not see — weight, age,
@@ -497,6 +503,31 @@ against the first index and reuse the answer for every iteration.
 statements, so each binding is in scope for the next. `let*` is accepted as
 the same form. This differs from R7RS `let`, which is parallel.
 
+### Gradient noise
+
+`lib/noise.wgsl` provides `perlin3`, `perlin3v` (three fields as a vector)
+and `fbm3` (octaves).
+
+```scheme
+(perlin3v (* position scale) field-seed)    ; -> :vec3f
+```
+
+The seed is a `:u32` and a Threefry **key**, so neighbouring seeds give
+unrelated fields — which is how `perlin3v` builds a vector field out of
+three scalar ones.
+
+Perlin needs a pseudo-random gradient at every integer lattice point, and
+the usual route is a permutation table or a hand-rolled integer hash — both
+invented, neither checkable, and a poor one shows as visible lattice
+structure. A counter-based RNG is addressed **by index**, and a lattice
+point *is* an index, so the gradient is one Threefry block with the
+coordinates as its counter. No table, and the generator underneath is the
+one already checked against published vectors.
+
+⚠️ It deliberately does **not** go through `rng_init`. Those helpers keep
+per-invocation state in `var<private>`, so noise routed through them would
+silently consume a kernel's draws and shift every random decision after it.
+
 ### Substeps
 
 Run the kernel N times per frame, inside one encoder and one submit:
@@ -505,6 +536,11 @@ Run the kernel N times per frame, inside one encoder and one submit:
 (gpu-wrangle! device buf shader n t seed params 8)
 (run-wrangle-loop seed-bytes n src frame! camera "gpu-canvas" params 8)
 ```
+
+`:draw` picks the renderer — `:points` (default) draws each element as a
+sprite, `:cubes` as solid geometry. The buffer is the same seven floats
+either way, so it is a choice at the call site rather than a different
+program.
 
 This cannot be done from Scheme. A loop there has to `yield` between
 dispatches, so N steps cost N *frames* rather than one — the difference

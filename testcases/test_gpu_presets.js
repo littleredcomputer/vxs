@@ -28,7 +28,7 @@ installFakeWebGPU({ compileMessages: () => [] });
 
 const createVxsModule = require(path.join(__dirname, '..', 'web', 'vxs.js'));
 
-const GPU_PRESETS = ['plasma', 'rings', 'points', 'wrangle', 'actors', 'cubes'];
+const GPU_PRESETS = ['plasma', 'rings', 'points', 'wrangle', 'actors', 'cubes', 'field'];
 
 function extractPresets(names) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');

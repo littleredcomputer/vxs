@@ -187,6 +187,11 @@
 ;; it, which is the entire point: state the simulation needs and the
 ;; picture does not.
 ;;
+;; `:draw` picks the renderer: :points (default) draws each element as a
+;; sprite, :cubes as solid geometry. The buffer is the same seven floats
+;; either way, so this is a choice at the call site rather than a different
+;; program.
+;;
 ;; `:shared` is a block from make-shared, bound at 3, READ-ONLY and indexed
 ;; freely rather than per element — a map every particle measures against,
 ;; a scan every particle scores. It is re-uploaded before every dispatch,
@@ -202,14 +207,20 @@
         (params  (opt-ref opts :params #f))
         (steps   (opt-ref opts :steps 1))
         (scratch-bytes (opt-ref opts :scratch #f))
-        (shared-bytes  (opt-ref opts :shared #f)))
+        (shared-bytes  (opt-ref opts :shared #f))
+        ;; :points (default) or :cubes. The buffer is the same seven floats
+        ;; either way, so which renderer reads it is a choice at the call
+        ;; site rather than a different program.
+        (draw-as (opt-ref opts :draw :points)))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
              ;; Both shaders compile before the buffer is even uploaded, so
              ;; a typo in either one costs a message and no frames.
              (kernel  (touch (gpu-compile device wrangle-src)))
-             (draw    (touch (gpu-compile device points-wgsl)))
+             (draw    (touch (gpu-compile device (if (eq? draw-as :cubes)
+                                                    cubes-wgsl
+                                                    points-wgsl))))
              (buf     (gpu-buffer device seed-bytes))
              ;; Scratch is uploaded once, like the points, and then lives
              ;; on the device. Nothing reads it back per frame — that is
@@ -233,7 +244,10 @@
             ;; what makes a paused frame stable rather than shimmering.
             (if shared (gpu-buffer-write! device shared shared-bytes))
             (gpu-wrangle! device buf kernel count t2 1 params steps scratch shared)
-            (gpu-draw-buffer! device buf draw count t2 camera canvas)
+            (if (eq? draw-as :cubes)
+                (gpu-draw-geometry! device buf draw cube-vertex-count
+                                    count t2 camera canvas)
+                (gpu-draw-buffer! device buf draw count t2 camera canvas))
             (yield)
             (loop t2 now)))))))
 

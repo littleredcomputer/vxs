@@ -64,6 +64,13 @@
 (wgsl-declare! 'heat-colour        "heat_colour"        '(:f32)         :vec3f)
 (wgsl-declare! 'cool-colour        "cool_colour"        '(:f32)         :vec3f)
 
+;; Gradient noise (lib/noise.wgsl). The seed is a Threefry KEY, so
+;; neighbouring seeds give unrelated fields — which is what lets perlin3v
+;; build a vector field from three scalar ones.
+(wgsl-declare! 'perlin3            "perlin3"            '(:vec3f :u32)  :f32)
+(wgsl-declare! 'perlin3v           "perlin3v"           '(:vec3f :u32)  :vec3f)
+(wgsl-declare! 'fbm3               "fbm3"               '(:vec3f :u32 :u32) :f32)
+
 ;; What a wrangle kernel written in Scheme sees. `time` and `seed` are
 ;; struct fields on the uniform, which the environment handles directly:
 ;; a binding may carry the name to EMIT alongside the type, so the Scheme
@@ -89,6 +96,16 @@
 ;; last given — never appended to. Appending looks fine because the newest
 ;; binding shadows the old one, and leaves every previous name still
 ;; resolving to a slot nobody writes any more.
+;; A declared name that matches a built-in would SHADOW it, because the
+;; rebuilt environment puts declarations first. Nothing would complain: a
+;; kernel writing `seed` would quietly get a parameter slot instead of the
+;; uniform's seed, which is a wrong answer that still renders. Refuse it.
+(define (wrangle-check-name name where)
+  (if (assq name wrangle-builtin-env)
+      (error (string-append where ": that name is already a built-in")
+             name))
+  name)
+
 (define (wrangle-rebuild-env!)
   (set! wrangle-env
         (append (wrangle-attr-env) (wrangle-param-env) wrangle-builtin-env)))
@@ -154,6 +171,7 @@
                          :f32)))
           (if (not (symbol? name))
               (error "wrangle-params!: parameter names must be symbols" spec))
+          (wrangle-check-name name "wrangle-params!")
           (cond
            ((eq? type :f32)
             (if (>= nf wrangle-param-slots)
@@ -299,6 +317,7 @@
         (let ((spec (car ss)))
           (if (or (not (pair? spec)) (not (pair? (cdr spec))))
               (error "scratch-attributes!: expected (name type)" spec))
+          (wrangle-check-name (car spec) "scratch-attributes!")
           (loop (cdr ss)
                 (+ off (attr-width (cadr spec)))
                 (cons (list (car spec) (cadr spec) off) acc))))))
