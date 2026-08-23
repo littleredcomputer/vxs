@@ -1358,7 +1358,22 @@
   });
 
   // Wasm Initializer (createVxsModule Promise)
-  createVxsModule().then((Module) => {
+  // CACHE-BUST THE WASM. vxs.wasm is rebuilt on every make, and a browser
+  // that reuses a cached copy produces the most confusing failure this
+  // project can generate: a fix that provably landed appearing not to have
+  // — the old shader compiling, the old error printing, with the file on
+  // disk already correct.
+  //
+  // serve.py sends no-store, but nothing makes anyone use serve.py, and
+  // `python3 -m http.server` does not. So the page asks for a URL the
+  // cache has never seen instead of asking politely not to be cached.
+  //
+  // locateFile is emscripten's hook for where the .wasm lives, which is
+  // the fetch that actually matters — vxs.js being fresh is no help if the
+  // binary beside it is stale.
+  createVxsModule({
+    locateFile: (path) => (path.endsWith('.wasm') ? path + '?t=' + Date.now() : path),
+  }).then((Module) => {
     try {
       Module._vxs_init();
       vxsEval = Module.cwrap('vxs_eval', 'string', ['string']);
