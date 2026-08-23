@@ -524,6 +524,19 @@ point *is* an index, so the gradient is one Threefry block with the
 coordinates as its counter. No table, and the generator underneath is the
 one already checked against published vectors.
 
+**Range.** `perlin3` returns roughly **[−0.6, 0.6]**, not [−1, 1] —
+measured as [−0.59, 0.62] with mean 0.001 over 64k samples. Mapping it as
+though it were unit-range wastes about 40% of a colour or size budget.
+It is **exactly zero at every integer lattice point**, which is the
+defining property of gradient noise and a useful thing to test against.
+
+**Sampling rate is the parameter that matters.** Perlin varies over one
+lattice cell, so what a picture looks like depends on how many samples fall
+inside a cell. Sampling at 3–4 per cell gives visible speckle and moiré —
+honest structure, but aliased. Around 8–10 per cell reads as flowing
+regions. For a grid of `n` elements spanning `w` world units at a given
+`scale`, that ratio is `n / (w * scale)`.
+
 ⚠️ `wgsl-declare!` **asserts** a signature for hand-written WGSL; it does
 not check that the WGSL exists. Declare a function whose source is not in
 the assembled shader and the kernel language will type-check calls to it
