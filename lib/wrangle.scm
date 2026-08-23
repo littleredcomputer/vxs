@@ -71,6 +71,18 @@
 (wgsl-declare! 'perlin3v           "perlin3v"           '(:vec3f :u32)  :vec3f)
 (wgsl-declare! 'fbm3               "fbm3"               '(:vec3f :u32 :u32) :f32)
 
+;; Quaternions (lib/quat.wgsl). Orientation is four floats, (x y z w) with
+;; the scalar last. A :quat attribute reads as :vec4f in the kernel
+;; language — the storage type carries the intent, the type system carries
+;; the shape.
+(wgsl-declare! 'q-identity         "q_identity"         '()             :vec4f)
+(wgsl-declare! 'q-rot              "q_rot"              '(:vec4f :vec3f) :vec3f)
+(wgsl-declare! 'q-from-rotvec      "q_from_rotvec"      '(:vec3f)       :vec4f)
+(wgsl-declare! 'q-from-axis-angle  "q_from_axis_angle"  '(:vec3f :f32)  :vec4f)
+(wgsl-declare! 'q-mul              "q_mul"              '(:vec4f :vec4f) :vec4f)
+(wgsl-declare! 'q-conj             "q_conj"             '(:vec4f)       :vec4f)
+(wgsl-declare! 'q-normalize        "q_normalize"        '(:vec4f)       :vec4f)
+
 ;; What a wrangle kernel written in Scheme sees. `time` and `seed` are
 ;; struct fields on the uniform, which the environment handles directly:
 ;; a binding may carry the name to EMIT alongside the type, so the Scheme
@@ -300,10 +312,19 @@
 (define scratch-attrs '())     ; ((name type offset) ...)
 (define scratch-stride 0)      ; floats per element
 
+;; :quat is STOCK. Orientation turns up in enough programs that it should
+;; not have to be spelled out as four loose floats each time, and naming it
+;; is what lets a renderer recognise it — an attribute called `pose` of
+;; type :quat is the convention the cube shader looks for.
+;;
+;; Four floats, (x y z w) with the scalar last, reading as :vec4f in the
+;; kernel language: the storage type carries the intent, the type system
+;; carries the shape.
 (define (attr-width type)
   (cond ((eq? type :f32) 1)
         ((eq? type :u32) 1)
         ((eq? type :vec3f) 3)
+        ((eq? type :quat) 4)
         (else (error "scratch-attributes!: unknown type" type))))
 
 (define (scratch-attributes! specs)
@@ -337,7 +358,9 @@
 (define (wrangle-attr-env)
   (map (lambda (a)
          (cons (car a)
-               (cons (if (eq? (cadr a) :u32) :f32 (cadr a))
+               (cons (cond ((eq? (cadr a) :u32) :f32)
+                           ((eq? (cadr a) :quat) :vec4f)
+                           (else (cadr a)))
                      (string-append (if (eq? (cadr a) :u32) "f32(attr_" "attr_")
                                     (wgsl-fn-name (car a)) "(i)"
                                     (if (eq? (cadr a) :u32) ")" "")))))
@@ -372,6 +395,17 @@
       (string-append
        "fn attr_" n "(i : u32) -> u32 { return bitcast<u32>(scratch[" base "]); }\n"
        "fn attr_" n "_set(i : u32, v : u32) { scratch[" base "] = bitcast<f32>(v); }\n"))
+     ((eq? type :quat)
+      (string-append
+       "fn attr_" n "(i : u32) -> vec4<f32> {\n"
+       "  let b = " base ";\n"
+       "  return vec4<f32>(scratch[b], scratch[b + 1u], scratch[b + 2u], scratch[b + 3u]);\n"
+       "}\n"
+       "fn attr_" n "_set(i : u32, v : vec4<f32>) {\n"
+       "  let b = " base ";\n"
+       "  scratch[b] = v.x; scratch[b + 1u] = v.y;\n"
+       "  scratch[b + 2u] = v.z; scratch[b + 3u] = v.w;\n"
+       "}\n"))
      ((eq? type :vec3f)
       (string-append
        "fn attr_" n "(i : u32) -> vec3<f32> {\n"
@@ -492,6 +526,11 @@
            (view-set! (car sv) k (car vals))
            (view-set! (car sv) (+ k 1) (cadr vals))
            (view-set! (car sv) (+ k 2) (caddr vals)))
+          ((eq? type :quat)
+           (view-set! (car sv) k (car vals))
+           (view-set! (car sv) (+ k 1) (cadr vals))
+           (view-set! (car sv) (+ k 2) (caddr vals))
+           (view-set! (car sv) (+ k 3) (cadddr vals)))
           (else (view-set! (car sv) k (car vals))))))
 
 (define (scratch-ref sv i name)
@@ -503,6 +542,11 @@
            (list (view-ref (car sv) k)
                  (view-ref (car sv) (+ k 1))
                  (view-ref (car sv) (+ k 2))))
+          ((eq? type :quat)
+           (list (view-ref (car sv) k)
+                 (view-ref (car sv) (+ k 1))
+                 (view-ref (car sv) (+ k 2))
+                 (view-ref (car sv) (+ k 3))))
           (else (view-ref (car sv) k)))))
 
 (define wrangle-preamble
@@ -585,17 +629,17 @@
   (let ((rng (embedded-source "rng.wgsl"))
         (stat (embedded-source "stat.wgsl"))
         (col (embedded-source "colour.wgsl"))
-        (noi (embedded-source "noise.wgsl")))
-    (if (not (and rng stat col noi))
-        (error 'wrangle
-               "rng.wgsl, stat.wgsl, colour.wgsl or noise.wgsl is missing"))
+        (noi (embedded-source "noise.wgsl"))
+        (qua (embedded-source "quat.wgsl")))
+    (if (not (and rng stat col noi qua))
+        (error 'wrangle "a lib/*.wgsl file is missing from the binary"))
     ;; Order matters: the libraries first, then anything define-gpu has
     ;; emitted (which may call them), then the kernel. WGSL wants a
     ;; function to appear before the code that calls it, which is also the
     ;; order a reader expects.
     ;; noise.wgsl after rng.wgsl: it calls threefry4x32 directly rather
     ;; than through the streaming helpers, so that is its only dependency.
-    (string-append rng "\n" noi "\n" stat "\n" col "\n"
+    (string-append rng "\n" noi "\n" qua "\n" stat "\n" col "\n"
                    (wgsl-definitions-source) "\n"
                    wrangle-preamble
                    (wrangle-flag-preamble)

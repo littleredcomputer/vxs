@@ -1009,7 +1009,7 @@ EM_JS(int, js_gpu_buffer_write, (int deviceId, int bufId, const unsigned char *d
 // The depth texture is cached with the pipeline and rebuilt when the
 // canvas resizes — a stale one would silently reject every fragment once
 // the window grew.
-EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, int shaderId, const char *canvasIdPtr, int vertsPerInstance, int instances, double time, double yaw, double pitch, double dist, double fov), {
+EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, int shaderId, const char *canvasIdPtr, int vertsPerInstance, int instances, double time, double yaw, double pitch, double dist, double fov, int scratchId), {
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
@@ -1025,7 +1025,18 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, int shaderId, const c
     if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -4; }
 
     globalThis.vxsGeomCache = globalThis.vxsGeomCache || {};
-    var key = canvasId + " " + bufId + " " + shaderId;
+    var key = canvasId + " " + bufId + " " + shaderId + " " + scratchId;
+    // Per-element orientation, read from the SAME buffer the compute pass
+    // writes — bound read-only here. No second copy and no upload: the
+    // kernel sets a pose and the renderer reads it from the slot it went
+    // into.
+    var scratch = scratchId
+      ? (globalThis.vxsHandles ? globalThis.vxsHandles.get(scratchId) : null)
+      : null;
+    if (scratchId && !scratch) {
+      globalThis.vxsGpuError = "scratch buffer handle is not live";
+      return -7;
+    }
     var entry = globalThis.vxsGeomCache[key];
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
@@ -1037,7 +1048,12 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, int shaderId, const c
             buffer: { type: 'uniform' } },
           { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
             buffer: { type: 'read-only-storage' } }
-        ]
+        ].concat(scratch ? [
+          // VERTEX only: the pose is consumed placing corners and turning
+          // normals, and never reaches the fragment stage.
+          { binding: 2, visibility: GPUShaderStage.VERTEX,
+            buffer: { type: 'read-only-storage' } }
+        ] : [])
       });
       var pipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
@@ -1063,7 +1079,7 @@ EM_JS(int, js_gpu_draw_geometry, (int deviceId, int bufId, int shaderId, const c
         entries: [
           { binding: 0, resource: { buffer: ubuf } },
           { binding: 1, resource: { buffer: buf } }
-        ]
+        ].concat(scratch ? [{ binding: 2, resource: { buffer: scratch } }] : [])
       });
       entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind,
                 depth: null, depthW: 0, depthH: 0 };
@@ -1208,7 +1224,7 @@ static int js_gpu_draw_instances(int, int, const char *, const unsigned char *, 
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
 static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int, int, int, int) { return -1; }
 static int js_gpu_draw_buffer(int, int, int, const char *, int, double, double, double, double, double) { return -1; }
-static int js_gpu_draw_geometry(int, int, int, const char *, int, int, double, double, double, double, double) { return -1; }
+static int js_gpu_draw_geometry(int, int, int, const char *, int, int, double, double, double, double, double, int) { return -1; }
 static int js_gpu_buffer_write(int, int, const unsigned char *, int) { return -1; }
 static void js_gpu_buffer_read(int, int, int, int, int) {}
 static char *js_gpu_last_error() { return nullptr; }
@@ -1650,10 +1666,22 @@ static void register_wasm_primitives(VM &vm) {
     std::string canvas_id = (argc > 7 && Heap::is_string(args[7]))
         ? std::string(args[7].as_ptr<ObjString>()->view())
         : std::string("gpu-canvas");
+    // Optional scratch buffer at binding 2, carrying per-element
+    // orientation. The same handle the compute pass writes through.
+    int scratch_id = 0;
+    if (argc > 8 && !args[8].is_false()) {
+      if (!Heap::is_handle(args[8])) {
+        vm.raise_contract("gpu-draw-geometry!: expected a scratch buffer handle, got " +
+                          vm.format_value(args[8]));
+      }
+      ObjHandle *sc = args[8].as_ptr<ObjHandle>();
+      if (sc->released) vm.raise_contract("gpu-draw-geometry!: scratch handle was released");
+      scratch_id = static_cast<int>(sc->id);
+    }
     int rc = js_gpu_draw_geometry(static_cast<int>(d->id), static_cast<int>(b->id),
                                   static_cast<int>(sh->id), canvas_id.c_str(),
                                   args[3].as_int(), args[4].as_int(), t,
-                                  camv[0], camv[1], camv[2], camv[3]);
+                                  camv[0], camv[1], camv[2], camv[3], scratch_id);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -1661,7 +1689,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-draw-geometry!: " + detail);
     }
     return Value::boolean_true();
-  }, 7, 8));
+  }, 7, 9));
 
   // (gpu-buffer-read device buffer [byte-length]) -> future
   //

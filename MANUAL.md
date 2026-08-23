@@ -415,6 +415,62 @@ exactly the text and the two-binding layout it always did.
 extend, and the kernel environment is rebuilt from both. They do not clear
 each other.
 
+### Pose
+
+Orientation is a **stock attribute**. Declare one and the cube renderer
+turns:
+
+```scheme
+(scratch-attributes! '((pose :quat)))       ; the convention: name and type
+```
+
+```wgsl
+attr_pose_set(i, q_from_rotvec(f * twist));  // in the kernel, once per element
+```
+
+`:quat` is four floats, **(x y z w) with the scalar last**, matching the
+posquat order `px py pz qx qy qz qw`. Position stays in the point buffer
+and orientation in the scratch buffer — the same information, split, which
+also means the sprite renderer never strides past four floats it does not
+read.
+
+An attribute **named `pose`, of type `:quat`** is what the cube shader
+looks for. Declaring nothing leaves the shader byte-for-byte unchanged, and
+the accessor's stride and offset come from the same declaration the kernel
+compiles against, so the two cannot disagree about where a pose lives.
+
+**One buffer, two pipelines** — read-write at binding 2 for the compute
+pass, read-only at binding 2 for the draw. No second copy, no upload, no
+synchronisation to get wrong.
+
+⚠️ **Generate from a rotation vector, store a quaternion.** The two forms
+are good at different jobs:
+
+- A **rotation vector** (`axis · angle`) is what a field hands you, and it
+  is continuous everywhere *including* zero — precisely where the axis
+  stops meaning anything, the angle vanishes. Aiming an axis at a direction
+  cannot manage that: there is no continuous way to choose the remaining
+  roll, so it snaps somewhere, and on a slow field the snap is what the eye
+  finds.
+- A **quaternion** is what to store, because the renderer applies the
+  rotation **36 times per cube** — once per vertex, and nothing amortises
+  across them. `q_rot` is two cross products and *no* transcendental.
+  Storing the rotation vector instead would put a `sin`, a `cos` and a
+  `normalize` in all 36.
+
+So `q_from_rotvec` runs once per element in the kernel, and `q_rot` runs
+per vertex. One trig call instead of thirty-six.
+
+Against a `mat4x4`: sixteen floats to four, read per-vertex where bandwidth
+is the cost, and a matrix admits shear and scale nothing here wants. It is
+marginally cheaper to apply — about 15 flops to 20 — and that is the least
+important number in the comparison.
+
+`lib/quat.wgsl` also has `q_mul`, `q_conj`, `q_from_axis_angle`,
+`q_identity` and `q_normalize`. Normalising only matters if a program
+*integrates* orientation over time; a quaternion recomputed from a field
+each frame cannot drift.
+
 ### Shared read-only data
 
 Data every element **reads**, as against scratch, which each element

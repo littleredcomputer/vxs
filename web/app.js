@@ -399,7 +399,13 @@
 ;;; Live knobs. Every one of these is a uniform slot, so
 ;;; turning any of them costs nothing — no recompile, no
 ;;; second kernel, no 'if (mode > 0.5)'.
-(wrangle-params! '(scale drift gain floor (field-seed :u32) (warm :flag)))
+;;; Orientation is a STOCK attribute: an attribute named 'pose of type
+;;; :quat is the convention the cube renderer looks for, so declaring it
+;;; is the whole of turning the cubes on.
+(scratch-attributes! '((pose :quat)))
+(define SCRATCH (make-scratch N))
+
+(wrangle-params! '(scale drift gain floor twist (field-seed :u32) (warm :flag)))
 
 (define P (make-wrangle-params))
 (define PV (wrangle-params-view P))
@@ -408,6 +414,7 @@
 (param-set! PV 'gain  0.55)            ; field magnitude -> cube size
 (param-set! PV 'floor 0.12)            ; smallest cube, as a fraction
 (param-set! PV 'field-seed 20260822)
+(param-set! PV 'twist 1.7)             ; field magnitude -> radians
 (param-set! PV 'warm  #f)
 
 (define kernel (wrangle-wgsl "
@@ -443,6 +450,17 @@
   var col = 0.5 + 0.5 * dir;
   if (flag_warm()) { col = heat_colour(clamp(mag, 0.0, 1.0)); }
 
+  // POSE. The field vector IS a rotation vector — axis f/|f|, angle
+  // |f| * twist — which is continuous everywhere including f = 0, where
+  // the axis stops meaning anything exactly as the angle reaches zero.
+  // Aiming an axis at the field instead would have to choose a roll, and
+  // no continuous choice exists on a sphere, so it would snap somewhere.
+  //
+  // Converted to a quaternion HERE, once per cube. The renderer applies it
+  // 36 times, once per vertex, and q_rot is two cross products with no
+  // trigonometry — so the sin and cos happen once rather than 36 times.
+  attr_pose_set(i, q_from_rotvec(f * w.p4));
+
   pt_write(i, p, half, col * (0.35 + 0.65 * clamp(mag, 0.0, 1.0)));
 "))
 
@@ -453,6 +471,7 @@
 (run-wrangle-loop grid N kernel frame! cam
                   :canvas "vxs-gpu-canvas"
                   :params P
+                  :scratch SCRATCH
                   :draw :cubes)
 `,
 

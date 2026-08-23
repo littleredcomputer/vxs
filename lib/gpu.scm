@@ -219,7 +219,7 @@
              ;; a typo in either one costs a message and no frames.
              (kernel  (touch (gpu-compile device wrangle-src)))
              (draw    (touch (gpu-compile device (if (eq? draw-as :cubes)
-                                                    cubes-wgsl
+                                                    (cubes-wgsl)
                                                     points-wgsl))))
              (buf     (gpu-buffer device seed-bytes))
              ;; Scratch is uploaded once, like the points, and then lives
@@ -245,8 +245,11 @@
             (if shared (gpu-buffer-write! device shared shared-bytes))
             (gpu-wrangle! device buf kernel count t2 1 params steps scratch shared)
             (if (eq? draw-as :cubes)
+                ;; The scratch buffer goes to the DRAW as well as the
+                ;; dispatch when a pose is declared — same buffer, written
+                ;; by the kernel and read by the renderer.
                 (gpu-draw-geometry! device buf draw cube-vertex-count
-                                    count t2 camera canvas)
+                                    count t2 camera canvas scratch)
                 (gpu-draw-buffer! device buf draw count t2 camera canvas))
             (yield)
             (loop t2 now)))))))
@@ -262,7 +265,7 @@
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
-             (shader  (touch (gpu-compile device cubes-wgsl)))
+             (shader  (touch (gpu-compile device (cubes-wgsl))))
              (buf     (gpu-buffer device bytes)))
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))

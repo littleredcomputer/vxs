@@ -34,12 +34,25 @@
 ;;----------------------------------------------------------------------
 
 (load "lib/points.scm")
+;; For scratch-attrs: the renderer recognises a declared `pose` attribute
+;; and reads it from the same buffer the kernel writes.
+(load "lib/wrangle.scm")
 
 ;; Vertices per instance. The draw call and this constant must agree, and
 ;; layer 21 asserts the shader against it.
 (define cube-vertex-count 36)
 
-(define cubes-wgsl
+;; Is there a stock `pose` to honour? An attribute named pose, of type
+;; :quat, is the convention — declare one and the cubes turn.
+(define (cubes-posed?)
+  (let ((a (assq 'pose scratch-attrs)))
+    (and a (eq? (cadr a) :quat))))
+
+;; A PROCEDURE, not a constant, because the shader depends on whether a
+;; pose was declared. Emitting the binding unconditionally would give every
+;; cube program a storage buffer it never reads, and a different pipeline
+;; layout to go with it.
+(define (cubes-wgsl)
   (string-append
    "struct U {\n"
    "  time : f32,\n"
@@ -53,6 +66,15 @@
    "};\n"
    "@group(0) @binding(0) var<uniform> u : U;\n"
    "@group(0) @binding(1) var<storage, read> pts : array<f32>;\n"
+   ;; The SAME buffer the compute pass writes, bound here read-only. No
+   ;; second copy, no upload, no synchronisation to get wrong — the kernel
+   ;; sets a pose and the renderer reads it out of the slot it was put in.
+   (if (cubes-posed?)
+       (string-append
+        "@group(0) @binding(2) var<storage, read> scratch : array<f32>;\n"
+        (scratch-accessors 'pose :quat (scratch-offset 'pose))
+        (embedded-source "quat.wgsl") "\n")
+       "")
    "\n"
    "struct VSOut {\n"
    "  @builtin(position) pos : vec4<f32>,\n"
@@ -89,7 +111,11 @@
    "  // always faces the camera; a cube adds it here, before, so it rotates\n"
    "  // with the scene and can show you a different face as you orbit. That\n"
    "  // is also why a cube needs an orientation and a sprite does not.\n"
-   "  let world = centre + verts[vi] * half;\n"
+   ;; Rotate the corner about the cube's own centre, then place it. The
+   ;; other order would swing the cube around the origin instead.
+   (if (cubes-posed?)
+       "  let world = centre + q_rot(attr_pose(ii), verts[vi] * half);\n"
+       "  let world = centre + verts[vi] * half;\n")
    "\n"
    "  let cy = cos(u.yaw);\n"
    "  let sy = sin(u.yaw);\n"
@@ -105,7 +131,12 @@
    "  // in the fragment stage because all three vertices of a face share a\n"
    "  // normal, so the interpolated result would be constant anyway. Without\n"
    "  // any shading a cube is a flat silhouette and reads as a hexagon.\n"
-   "  let n = norms[vi / 6u];\n"
+   ;; The NORMAL turns too. Rotating the geometry and not the normal
+   ;; leaves the shading fixed to the world while the faces move under it,
+   ;; which reads as a lighting bug rather than as a pose.
+   (if (cubes-posed?)
+       "  let n = q_rot(attr_pose(ii), norms[vi / 6u]);\n"
+       "  let n = norms[vi / 6u];\n")
    "  let lambert = max(dot(n, normalize(vec3<f32>(0.45, 0.80, 0.40))), 0.0);\n"
    "  let shade = 0.28 + 0.72 * lambert;\n"
    "\n"

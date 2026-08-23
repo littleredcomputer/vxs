@@ -497,6 +497,44 @@
 (assert-equal "and neither declarator clears the other"
               "attr_age(i)" (wgsl-code 'age wrangle-env))
 
+;;--- :quat, the stock orientation type -----------------------------------
+;; Orientation turns up often enough that it should not have to be spelled
+;; as four loose floats each time, and naming it is what lets a renderer
+;; recognise it: an attribute called `pose` of type :quat is the
+;; convention the cube shader looks for.
+
+(scratch-attributes! '((charge :f32) (pose :quat)))
+(assert-equal "a quaternion is four floats" 5 scratch-stride)
+(assert-equal "and follows what came before" 1 (scratch-offset 'pose))
+;; The storage type carries the intent; the type system carries the shape.
+(assert-equal "it reads as a vec4f in the kernel language"
+              :vec4f (wgsl-type 'pose wrangle-env))
+(assert-equal "so it goes straight into q-rot"
+              "q_rot(attr_pose(i), v)"
+              (wgsl-code '(q-rot pose v) (cons (cons 'v :vec3f) wrangle-env)))
+;; The rotation vector is the right form to GENERATE from — singularity
+;; free at zero, where the axis stops meaning anything exactly as the angle
+;; vanishes. It is the wrong form to STORE, because the renderer applies
+;; the rotation once per vertex and would pay a sin and a cos each time.
+(assert-equal "and a rotation vector converts to one"
+              :vec4f (wgsl-type '(q-from-rotvec f) (cons (cons 'f :vec3f) wrangle-env)))
+
+(define QB (make-scratch 2))
+(define QV (scratch-view QB))
+(scratch-set! QV 1 'pose 0.0 0.0 0.7071 0.7071)
+(assert-equal "a quaternion round-trips as four values"
+              4 (length (scratch-ref QV 1 'pose)))
+;; Compared with a tolerance: the value makes a round trip through an f32,
+;; and 0.7071 is not one of the doubles an f32 can hold exactly.
+(assert-true "scalar last, and in order"
+             (< (abs (- 0.7071 (list-ref (scratch-ref QV 1 'pose) 3))) 1e-6))
+(assert-true "and the vector part with it"
+             (< (abs (- 0.7071 (list-ref (scratch-ref QV 1 'pose) 2))) 1e-6))
+(assert-equal "without disturbing its neighbour"
+              '(0.0 0.0 0.0 0.0) (scratch-ref QV 0 'pose))
+(assert-equal "or the attribute beside it" 0.0 (scratch-ref QV 1 'charge))
+(scratch-attributes! '())
+
 ;;--- shared read-only data ----------------------------------------------
 ;; Data every element READS, as against scratch, which each element OWNS.
 ;; Scratch cannot hold it: scratch is addressed scratch[i * stride + off],
