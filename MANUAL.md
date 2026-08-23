@@ -524,6 +524,13 @@ point *is* an index, so the gradient is one Threefry block with the
 coordinates as its counter. No table, and the generator underneath is the
 one already checked against published vectors.
 
+⚠️ `wgsl-declare!` **asserts** a signature for hand-written WGSL; it does
+not check that the WGSL exists. Declare a function whose source is not in
+the assembled shader and the kernel language will type-check calls to it
+happily, then fail in the browser with `unresolved call target`. Layer 18
+now asserts that every declared name has a matching `fn` in the assembled
+source, which is the only place that can be checked without a GPU.
+
 ⚠️ It deliberately does **not** go through `rng_init`. Those helpers keep
 per-invocation state in `var<private>`, so noise routed through them would
 silently consume a kernel's draws and shift every random decision after it.

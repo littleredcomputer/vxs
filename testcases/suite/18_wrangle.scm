@@ -587,6 +587,26 @@
 (assert-true "the fade curve is quintic"
              (string-contains? nsrc "t * t * t * (t * (t * 6.0 - 15.0) + 10.0)"))
 
+;;--- every DECLARED function must actually exist --------------------------
+;; The hole in the two-tier design, found the hard way. wgsl-declare!
+;; ASSERTS a signature for hand-written WGSL, and nothing checked that the
+;; WGSL was there. perlin3v was declared while the edit that included
+;; noise.wgsl in the assembled source had silently failed to apply, so the
+;; kernel language type-checked the call happily and the shader compiled to
+;;
+;;   unresolved call target 'perlin3v'
+;;
+;; in the browser, which is the one place nothing here can see. A signature
+;; is a promise; this is the test that the promise is kept.
+
+(define asm (wrangle-wgsl ""))
+(for-each
+ (lambda (sig)
+   (assert-true (string-append "declared " (symbol->string (car sig))
+                               " has a definition in the assembled shader")
+                (string-contains? asm (string-append "fn " (cadr sig) "("))))
+ wgsl-signatures)
+
 ;;--- a declared name may not shadow a built-in ---------------------------
 ;; The rebuilt environment puts declarations first, so a parameter called
 ;; `seed` would quietly resolve to a parameter slot instead of the

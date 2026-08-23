@@ -584,15 +584,18 @@
 (define (wrangle-wgsl body)
   (let ((rng (embedded-source "rng.wgsl"))
         (stat (embedded-source "stat.wgsl"))
-        (col (embedded-source "colour.wgsl")))
-    (if (not (and rng stat col))
+        (col (embedded-source "colour.wgsl"))
+        (noi (embedded-source "noise.wgsl")))
+    (if (not (and rng stat col noi))
         (error 'wrangle
-               "rng.wgsl, stat.wgsl or colour.wgsl is missing from the binary"))
+               "rng.wgsl, stat.wgsl, colour.wgsl or noise.wgsl is missing"))
     ;; Order matters: the libraries first, then anything define-gpu has
     ;; emitted (which may call them), then the kernel. WGSL wants a
     ;; function to appear before the code that calls it, which is also the
     ;; order a reader expects.
-    (string-append rng "\n" stat "\n" col "\n"
+    ;; noise.wgsl after rng.wgsl: it calls threefry4x32 directly rather
+    ;; than through the streaming helpers, so that is its only dependency.
+    (string-append rng "\n" noi "\n" stat "\n" col "\n"
                    (wgsl-definitions-source) "\n"
                    wrangle-preamble
                    (wrangle-flag-preamble)
