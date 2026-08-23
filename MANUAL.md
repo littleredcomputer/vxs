@@ -881,6 +881,34 @@ Not scheduled, kept so they are not rediscovered from scratch.
   self-intersecting regime is where `a > R` and that minimum stops
   existing.
 
+- **An adaptive ODE solver as a coroutine, for use as an ORACLE.** A
+  high-order extrapolation solver with dense output has a control-flow
+  shape that keeps being written inside out: a callback invoked once per
+  accepted step, handed a closure valid over that step's interval. That is
+  `yield`, pushed rather than pulled.
+
+  The suspension lands at a tractable boundary. One accepted step runs
+  uninterrupted in native code and returns a dense segment, so nothing has
+  to suspend *inside* the integrator — only the outer driver loop needs
+  inverting, and C++20 `co_yield` does that without hand-rolling a state
+  machine or touching the numerics. Two coroutine layers, one C++ and one
+  Scheme, meeting at a handle.
+
+  **The role is oracle, not workhorse.** A derivative written in Scheme is
+  correct — it is pure arithmetic and never needs to suspend — but an
+  order-12 step spends hundreds of evaluations, and this VM is roughly
+  three orders of magnitude off V8 on tight arithmetic. So: many cheap
+  trajectories in a wrangle for the picture, a few at 1e-12 for the truth,
+  and then the cheap integrator's error becomes *measurable* rather than
+  assumed.
+
+  **Dense output is what makes that comparison possible at all.** The two
+  integrators take unrelated step sizes, so there are no matched samples to
+  compare; dense output evaluates the reference at exactly the times the
+  cheap one produced. This project has an RNG oracle (published
+  known-answer vectors) and would have a geometric invariant (Clairaut). It
+  has nothing trustworthy for trajectories, and that is the gap.
+
 - **Symbolic differentiation of the kernel language.** The WGSL compiler is
   a pure-expression compiler over a small closed set of forms, which is
   precisely the setting where symbolic differentiation is tractable —
