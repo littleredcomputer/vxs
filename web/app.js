@@ -359,6 +359,161 @@
 (run-kernel-loop rings "vxs-gpu-canvas")
 `,
 
+    ensemble: `;;; ==========================================================
+;;; Ensemble — stage 1: a few actors commanding many bodies
+;;; ==========================================================
+;;; Drag to orbit, scroll to zoom.
+;;;
+;;; The actors demo gives every agent one dot. That gets the
+;;; relationship backwards: a fiber costs about a thousand
+;;; times what a cube costs, so spending one per dot spends
+;;; the expensive thing on the cheap job.
+;;;
+;;; Here it is the other way round. NINETY-SIX fibers decide;
+;;; SIXTY-ONE THOUSAND cubes are decided upon. Each actor owns
+;;; a territory and a block of bodies, and every frame it makes
+;;; one decision — where its territory should be — which the
+;;; GPU expands into 640 placements.
+;;;
+;;; So the host does 96 decisions a frame and the device does
+;;; 61,440 placements, and neither could do the other's job.
+;;; That division is the whole architecture: an actor is not a
+;;; particle, it is something that COMMANDS particles.
+;;;
+;;; Stage 1 is deliberately dumb — the actors drift on fixed
+;;; orbits and sense nothing. What it proves is the expansion:
+;;; that a hundred decisions really can drive sixty thousand
+;;; bodies at frame rate. Sensing, roles and competition come
+;;; next, and they change only what an actor DECIDES, not how
+;;; the decision reaches the screen.
+;;; ==========================================================
+
+(define NACTORS 96)
+(define PER-ACTOR 640)
+(define N (* NACTORS PER-ACTOR))
+
+;;; Per-ACTOR state, in the read-only buffer every cube reads.
+;;; This is the channel the whole demo runs through: 96 actors
+;;; write 672 floats, and 61,440 cubes read them.
+;;; Sizes DERIVED, not written down twice. Three floats of centre and
+;;; three of tint per actor, one of radius. A layout that disagreed with
+;;; NACTORS would not fail — it would read a neighbour's numbers.
+(shared-layout! (list (list 'centres (* 3 NACTORS))
+                      (list 'radii NACTORS)
+                      (list 'tints (* 3 NACTORS))))
+(define W (make-shared))
+(define WV (shared-view W))
+
+;;; Orientation is a stock attribute; declaring it turns the cubes.
+(scratch-attributes! '((pose :quat)))
+(define SCRATCH (make-scratch N))
+
+(wrangle-params! '(spread size twist))
+(define P (make-wrangle-params))
+(define PV (wrangle-params-view P))
+(param-set! PV 'spread 1.0)
+(param-set! PV 'size   0.85)
+(param-set! PV 'twist  1.1)
+
+;;; The point buffer is never touched by the host after this —
+;;; the kernel writes every position from the actors' state.
+(define bodies (make-points N))
+
+;;; --- the actors -----------------------------------------------------
+;;; One fiber each. All it does this stage is move its territory and
+;;; write three numbers. That is the entire host-side cost of a frame.
+(define (actor-write! a cx cy cz r tr tg tb)
+  (let ((k (* a 3)))
+    (shared-set! WV 'centres k cx)
+    (shared-set! WV 'centres (+ k 1) cy)
+    (shared-set! WV 'centres (+ k 2) cz)
+    (shared-set! WV 'radii a r)
+    (shared-set! WV 'tints k tr)
+    (shared-set! WV 'tints (+ k 1) tg)
+    (shared-set! WV 'tints (+ k 2) tb)))
+
+(define (spawn-actor a)
+  ;; Each actor gets its own orbit: a different radius, tilt and rate,
+  ;; so the ensemble reads as ninety-six independent things rather than
+  ;; one rotating object.
+  (let* ((f (/ (exact->inexact a) NACTORS))
+         (orbit (+ 0.45 (* 0.55 f)))
+         (tilt  (* 3.1 f))
+         (rate  (+ 0.12 (* 0.5 (- 1.0 f))))
+         (phase (* 6.28 f))
+         (hue   f))
+    (future
+      (let loop ((t 0.0))
+        (let* ((ang (+ phase (* t rate)))
+               (cx (* orbit (cos ang)))
+               (cz (* orbit (sin ang)))
+               (cy (* 0.5 (sin (+ tilt (* t rate 0.7))))))
+          (actor-write! a cx cy cz (* 0.14 (+ 0.6 (* 0.4 (sin (* t 0.6)))))
+                        (+ 0.35 (* 0.65 hue))
+                        (+ 0.30 (* 0.50 (sin (* 6.28 hue))))
+                        (- 1.0 (* 0.7 hue)))
+          (yield)
+          (loop (+ t 0.016)))))))
+
+;;; --- the expansion --------------------------------------------------
+;;; One kernel, run once per cube per frame. Every cube works out who
+;;; owns it, reads that actor's three numbers, and places itself.
+;;; The block size reaches the shader as text rather than as a second
+;;; copy of the number. Getting it wrong would not fail either: cubes
+;;; would simply obey the wrong actor.
+(define (u32-text n) (string-append (number->string n) "u"))
+
+(define kernel (wrangle-wgsl (string-append "
+  // Who commands me. Integer division, so each block of consecutive cubes
+  // belongs to one actor — which also means an actor's bodies are
+  // contiguous in memory and its swarm is one coherent read.
+  let a = i / " (u32-text PER-ACTOR) ";
+
+  let c = vec3<f32>(shared_centres(a * 3u),
+                    shared_centres(a * 3u + 1u),
+                    shared_centres(a * 3u + 2u));
+  let r = shared_radii(a) * w.p0;
+  let tint = vec3<f32>(shared_tints(a * 3u),
+                       shared_tints(a * 3u + 1u),
+                       shared_tints(a * 3u + 2u));
+
+  // A stable place within the territory. The preamble has already seeded
+  // the generator from this cube's index, and the seed does not change
+  // between frames, so these draws are the SAME every frame — the cube
+  // keeps its position in the formation while the formation moves.
+  let dir = normalize(vec3<f32>(random_normal(0.0, 1.0),
+                                random_normal(0.0, 1.0),
+                                random_normal(0.0, 1.0)));
+  // Cube root of a uniform gives a uniform density in the ball; without
+  // it every swarm is a shell with nothing inside.
+  let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
+  let here = c + dir * (rad * r);
+
+  // Face along the radius, so a swarm reads as something with an
+  // orientation rather than a cloud of confetti.
+  attr_pose_set(i, q_from_rotvec(dir * w.p2));
+
+  pt_write(i, here, 0.006 * w.p1, tint * (0.45 + 0.55 * (1.0 - rad)));
+")))
+
+(define cam (make-camera))
+(camera-distance-set! cam 3.0)
+(define (frame! t) (orbit-camera! cam))
+
+(display "ensemble: ") (display NACTORS) (display " actors commanding ")
+(display N) (display " bodies — ") (display PER-ACTOR) (display " each")
+(newline)
+
+(do ((a 0 (+ a 1))) ((= a NACTORS)) (spawn-actor a))
+
+(run-wrangle-loop bodies N kernel frame! cam
+                  :canvas "vxs-gpu-canvas"
+                  :params P
+                  :shared W
+                  :scratch SCRATCH
+                  :draw :cubes)
+`,
+
     field: `;;; ==========================================================
 ;;; Cube grid over a sliding noise field
 ;;;
@@ -992,7 +1147,7 @@
   };
 
   // Which presets draw through WebGPU rather than the 2D context.
-  const GPU_PRESETS = { plasma: true, rings: true, points: true, wrangle: true, actors: true, cubes: true, field: true };
+  const GPU_PRESETS = { plasma: true, rings: true, points: true, wrangle: true, actors: true, cubes: true, field: true, ensemble: true };
 
   function showSurface(preset) {
     const wantsGpu = !!GPU_PRESETS[preset];
