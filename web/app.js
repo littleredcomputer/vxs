@@ -433,22 +433,30 @@
     (shared-set! WV 'tints (+ k 2) tb)))
 
 (define (spawn-actor a)
-  ;; Each actor gets its own orbit: a different radius, tilt and rate,
-  ;; so the ensemble reads as ninety-six independent things rather than
-  ;; one rotating object.
+  ;; SPACED BY THE GOLDEN ANGLE, not by index. Giving actor a a phase of
+  ;; 2*pi*a/N makes consecutive actors neighbours in position AND in
+  ;; radius AND in hue, so ninety-six separate commanders chain into one
+  ;; continuous tube with a gradient painted along it — which is precisely
+  ;; the claim this demo exists to make, rendered invisible.
+  ;;
+  ;; 2.39996 radians is the golden angle. Successive multiples of it never
+  ;; land near each other and never repeat, so actor a and actor a+1 are
+  ;; strangers and each swarm reads as its own body.
   (let* ((f (/ (exact->inexact a) NACTORS))
-         (orbit (+ 0.45 (* 0.55 f)))
-         (tilt  (* 3.1 f))
+         (orbit (+ 0.45 (* 0.55 (- 1.0 (* f f)))))
+         (tilt  (* 2.39996 a))
          (rate  (+ 0.12 (* 0.5 (- 1.0 f))))
-         (phase (* 6.28 f))
-         (hue   f))
+         (phase (* 2.39996 a))
+         (hue   (- (* 3.7 f) (floor (* 3.7 f)))))
     (future
       (let loop ((t 0.0))
         (let* ((ang (+ phase (* t rate)))
                (cx (* orbit (cos ang)))
                (cz (* orbit (sin ang)))
                (cy (* 0.5 (sin (+ tilt (* t rate 0.7))))))
-          (actor-write! a cx cy cz (* 0.14 (+ 0.6 (* 0.4 (sin (* t 0.6)))))
+          ;; Smaller territories than a continuous tube wants: a swarm has
+          ;; to be able to sit in its own space to be seen as one thing.
+          (actor-write! a cx cy cz (* 0.09 (+ 0.6 (* 0.4 (sin (+ (* 0.7 a) (* t 0.6))))))
                         (+ 0.35 (* 0.65 hue))
                         (+ 0.30 (* 0.50 (sin (* 6.28 hue))))
                         (- 1.0 (* 0.7 hue)))
