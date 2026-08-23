@@ -103,46 +103,145 @@
 ;; it lands at float 0 of the parameter block. A positional (param 0) would
 ;; work too and would let the two drift apart silently, which is the whole
 ;; class of bug this project keeps finding.
-(define wrangle-param-slots 8)
-(define wrangle-param-names '())
+;; Parameters are TYPED, and the type decides which slot they land in:
+;;
+;;   (wrangle-params! '(sigma radius gain))                  ; all :f32
+;;   (wrangle-params! '((sigma :f32) (mode :u32) (flat :flag)))
+;;
+;;   :f32   -> p0..p7, one of eight float slots
+;;   :u32   -> i0..i2, an honest integer slot
+;;   :flag  -> one bit of `flags`
+;;
+;; ONE declarator rather than three, because three would each do a third of
+;; the same job and each need its own setter. A bare symbol still means
+;; :f32, so nothing written before this needs changing.
+;;
+;; :u32 AND :flag ARE NOT TIDINESS. An f32 has 24 mantissa bits, so an
+;; integer or a bitfield carried in a float slot works perfectly up to bit
+;; 23 and then silently starts dropping — the worst possible failure curve,
+;; because it survives every test anyone writes early. The seed had exactly
+;; this bug and it cost real time to find.
+;;
+;; What this removes: recompiling a shader to toggle a mode, keeping two
+;; kernels because one of them has a flag set, and `if (mode > 0.5)` — a
+;; float comparison standing in for a bit test.
 
-(define (wrangle-params! names)
-  (if (> (length names) wrangle-param-slots)
-      (error "wrangle-params!: at most 8 parameters" (length names)))
-  (set! wrangle-param-names names)
-  (wrangle-rebuild-env!)
-  wrangle-param-names)
+(define wrangle-param-slots 8)    ; p0..p7
+(define wrangle-int-slots 3)      ; i0..i2
+(define wrangle-flag-bits 32)     ; bits of `flags`
 
+;; ((name type slot) ...) — slot is the index within that type's class.
+(define wrangle-params '())
+
+;; Block layout, in 32-bit words: eight floats, then flags, then i0..i2.
+;; It does NOT mirror the struct — the host maps one to the other — so the
+;; float slots keep the offsets they have always had.
+(define wrangle-param-words 12)
+(define wrangle-flags-word 8)
+(define wrangle-int-word0 9)
+
+(define (wrangle-params! specs)
+  (let loop ((ss specs) (nf 0) (ni 0) (nb 0) (acc '()))
+    (if (null? ss)
+        (begin (set! wrangle-params (reverse acc))
+               (wrangle-rebuild-env!)
+               wrangle-params)
+        (let* ((spec (car ss))
+               (name (if (pair? spec) (car spec) spec))
+               (type (if (pair? spec)
+                         (if (pair? (cdr spec)) (cadr spec)
+                             (error "wrangle-params!: expected (name type)" spec))
+                         :f32)))
+          (if (not (symbol? name))
+              (error "wrangle-params!: parameter names must be symbols" spec))
+          (cond
+           ((eq? type :f32)
+            (if (>= nf wrangle-param-slots)
+                (error "wrangle-params!: at most 8 :f32 parameters" name))
+            (loop (cdr ss) (+ nf 1) ni nb (cons (list name type nf) acc)))
+           ((eq? type :u32)
+            (if (>= ni wrangle-int-slots)
+                (error "wrangle-params!: at most 3 :u32 parameters" name))
+            (loop (cdr ss) nf (+ ni 1) nb (cons (list name type ni) acc)))
+           ((eq? type :flag)
+            (if (>= nb wrangle-flag-bits)
+                (error "wrangle-params!: at most 32 :flag parameters" name))
+            (loop (cdr ss) nf ni (+ nb 1) (cons (list name type nb) acc)))
+           (else (error "wrangle-params!: type must be :f32, :u32 or :flag" spec)))))))
+
+;; A kernel says the name and means the value. A flag reads as :bool, so it
+;; drops straight into (if flat a b) with no new machinery.
 (define (wrangle-param-env)
-  (let loop ((ns wrangle-param-names) (i 0) (acc '()))
-    (if (null? ns)
-        (reverse acc)
-        (loop (cdr ns) (+ i 1)
-              (cons (cons (car ns)
-                          (cons :f32 (string-append "w.p" (number->string i))))
-                    acc)))))
+  (map (lambda (p)
+         (let ((name (car p)) (type (cadr p)) (slot (caddr p)))
+           (cond
+            ((eq? type :f32)
+             (cons name (cons :f32 (string-append "w.p" (number->string slot)))))
+            ((eq? type :u32)
+             (cons name (cons :u32 (string-append "w.i" (number->string slot)))))
+            (else
+             (cons name
+                   (cons :bool
+                         (string-append "((w.flags & (1u << " (number->string slot)
+                                        "u)) != 0u)")))))))
+       wrangle-params))
 
-;; The parameter block: eight floats the host owns and rewrites in place.
+;; Wrangle bodies are still WGSL text, so flags also get a helper function
+;; — the same dual treatment scratch attributes get.
+(define (wrangle-flag-preamble)
+  (let ((flags (let loop ((ps wrangle-params) (acc '()))
+                 (cond ((null? ps) (reverse acc))
+                       ((eq? (cadr (car ps)) :flag) (loop (cdr ps) (cons (car ps) acc)))
+                       (else (loop (cdr ps) acc))))))
+    (if (null? flags)
+        ""
+        (apply string-append
+               (map (lambda (p)
+                      (string-append
+                       "fn flag_" (wgsl-fn-name (car p))
+                       "() -> bool { return (w.flags & (1u << "
+                       (number->string (caddr p)) "u)) != 0u; }\n"))
+                    flags)))))
+
+;; The parameter block: eight floats, a flag word and three integer slots,
+;; owned by the host and rewritten in place.
 ;;
 ;; A BYTES OBJECT, made once and mutated, rather than a fresh list per
 ;; frame. At sixty frames a second a list would allocate every frame, and
 ;; the demos this feeds run at zero objects per frame — which is the
 ;; property that lets them hold a frame budget at all.
 (define (make-wrangle-params)
-  (let ((b (make-bytes (* 4 wrangle-param-slots))))
+  (let ((b (make-bytes (* 4 wrangle-param-words))))
     (bytes-seal! b)   ; the GPU will read it; it must not move
     b))
-(define (wrangle-params-view p) (bytes-view p :f32))
 
-(define (param-index name)
-  (let loop ((ns wrangle-param-names) (i 0))
-    (cond ((null? ns)
+;; Two views over the same bytes, so the integer slots are written as
+;; integers rather than squeezed through a float.
+(define (wrangle-params-view p) (cons (bytes-view p :f32) (bytes-view p :u32)))
+
+(define (param-decl name)
+  (let loop ((ps wrangle-params))
+    (cond ((null? ps)
            (error "param: undeclared parameter — call wrangle-params! first" name))
-          ((eq? (car ns) name) i)
-          (else (loop (cdr ns) (+ i 1))))))
+          ((eq? (caar ps) name) (car ps))
+          (else (loop (cdr ps))))))
 
-(define (param-set! v name value) (view-set! v (param-index name) value))
-(define (param-ref v name) (view-ref v (param-index name)))
+(define (param-set! v name value)
+  (let* ((d (param-decl name)) (type (cadr d)) (slot (caddr d)))
+    (cond ((eq? type :f32) (view-set! (car v) slot value))
+          ((eq? type :u32) (view-set! (cdr v) (+ wrangle-int-word0 slot) value))
+          (else
+           (let ((bit (u32-shl 1 slot))
+                 (cur (view-ref (cdr v) wrangle-flags-word)))
+             (view-set! (cdr v) wrangle-flags-word
+                        (if value (u32-or cur bit) (u32-and cur (u32-not bit)))))))))
+
+(define (param-ref v name)
+  (let* ((d (param-decl name)) (type (cadr d)) (slot (caddr d)))
+    (cond ((eq? type :f32) (view-ref (car v) slot))
+          ((eq? type :u32) (view-ref (cdr v) (+ wrangle-int-word0 slot)))
+          (else (not (= 0 (u32-and (view-ref (cdr v) wrangle-flags-word)
+                                   (u32-shl 1 slot))))))))
 
 ;; Kept as a name because tests and callers use it, but it is no longer an
 ;; independent number that could disagree — see points-stride-wgsl.
@@ -395,6 +494,14 @@
    "  count : u32,\n"
    "  seed : u32,\n"
    "  step : u32,\n"
+   ;; Integers carried AS integers. An f32 has 24 mantissa bits, so a
+   ;; bitfield or a count in a float slot works perfectly to bit 23 and
+   ;; then silently drops the rest — which survives every test written
+   ;; early. The seed had exactly this bug.
+   "  flags : u32,\n"
+   "  i0 : u32,\n"
+   "  i1 : u32,\n"
+   "  i2 : u32,\n"
    ;; Eight general-purpose slots. A kernel constant baked into the SOURCE
    ;; means changing it recompiles the shader, so dragging a slider hitches
    ;; on every frame it moves. These live in the uniform, which is already
@@ -469,6 +576,7 @@
     (string-append rng "\n" stat "\n" col "\n"
                    (wgsl-definitions-source) "\n"
                    wrangle-preamble
+                   (wrangle-flag-preamble)
                    (scratch-preamble)
                    (shared-preamble)
                    wrangle-main-preamble body "\n}\n")))

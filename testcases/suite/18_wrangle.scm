@@ -306,21 +306,105 @@
 (wrangle-params! '(sigma radius gain))
 (define PB (make-wrangle-params))
 (define PV (wrangle-params-view PB))
-(assert-equal "the block is eight floats" 32 (bytes-length PB))
+(assert-equal "the block is eight floats, a flag word and three ints"
+              48 (bytes-length PB))
 (assert-equal "unset slots read zero" 0.0 (param-ref PV 'gain))
 (param-set! PV 'gain 2.5)
 (param-set! PV 'sigma 0.25)
 (assert-equal "a parameter round-trips by name" 2.5 (param-ref PV 'gain))
 (assert-equal "and does not disturb its neighbours" 0.25 (param-ref PV 'sigma))
 (assert-equal "or the ones between" 0.0 (param-ref PV 'radius))
-(assert-equal "writing by name lands in the declared slot" 0.25 (view-ref PV 0))
-(assert-equal "third name, third float" 2.5 (view-ref PV 2))
+(assert-equal "writing by name lands in the declared slot" 0.25 (view-ref (car PV) 0))
+(assert-equal "third name, third float" 2.5 (view-ref (car PV) 2))
 
 (assert-equal "an undeclared name is an error, not slot zero"
               'raised (guard (e (#t 'raised)) (param-set! PV 'nonesuch 1.0)))
-(assert-equal "more than eight parameters is an error"
+(assert-equal "more than eight float parameters is an error"
               'raised (guard (e (#t 'raised))
                         (wrangle-params! '(a b c d e f g h i))))
+
+;;--- typed parameters ---------------------------------------------------
+;; The type decides which slot a parameter lands in: :f32 takes one of
+;; eight float slots, :u32 an honest integer slot, :flag one bit of a word.
+;; ONE declarator rather than three, and a bare symbol still means :f32.
+;;
+;; :u32 and :flag are not tidiness. An f32 has 24 mantissa bits, so an
+;; integer or a bitfield carried in a float slot works perfectly to bit 23
+;; and then silently drops the rest — which survives every test written
+;; early. The seed had exactly this bug.
+
+(wrangle-params! '(sigma (mode :u32) (flat :flag) (trails :flag)))
+(assert-equal "a float parameter still takes a p slot"
+              "w.p0" (wgsl-code 'sigma wrangle-env))
+(assert-equal "an integer parameter takes an i slot"
+              "w.i0" (wgsl-code 'mode wrangle-env))
+(assert-equal "and keeps its type, so it cannot be used as a quantity by accident"
+              :u32 (wgsl-type 'mode wrangle-env))
+;; A flag reads as :bool, so it drops into (if flat a b) with no new
+;; machinery — and the mask is a shift, not a decimal, because bit 31 of a
+;; decimal literal would have to survive a flonum on the way out.
+(assert-equal "a flag reads as a bool"
+              :bool (wgsl-type 'flat wrangle-env))
+(assert-equal "and tests its bit by shifting"
+              "((w.flags & (1u << 0u)) != 0u)" (wgsl-code 'flat wrangle-env))
+(assert-equal "the second flag takes the second bit"
+              "((w.flags & (1u << 1u)) != 0u)" (wgsl-code 'trails wrangle-env))
+(assert-true "and flags also get a helper for WGSL-text bodies"
+             (string-contains? (wrangle-flag-preamble)
+               "fn flag_trails() -> bool { return (w.flags & (1u << 1u)) != 0u; }"))
+(assert-equal "an unknown parameter type is refused"
+              'raised (guard (e (#t 'raised)) (wrangle-params! '((x :vec3f)))))
+(assert-equal "at most three integer slots"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-params! '((a :u32) (b :u32) (c :u32) (d :u32)))))
+
+(wrangle-params! '(sigma (mode :u32) (flat :flag) (trails :flag)))
+(define TB (make-wrangle-params))
+(define TV (wrangle-params-view TB))
+(param-set! TV 'sigma 0.75)
+(param-set! TV 'mode 16777217)
+(param-set! TV 'trails #t)
+(assert-equal "a float round-trips" 0.75 (param-ref TV 'sigma))
+;; 2^24+1 is the first integer an f32 cannot represent. This is the whole
+;; reason :u32 exists rather than everything being a float.
+(assert-equal "an integer parameter survives past 2^24 exactly"
+              16777217 (param-ref TV 'mode))
+(assert-equal "a set flag reads true" #t (param-ref TV 'trails))
+(assert-equal "an unset flag reads false" #f (param-ref TV 'flat))
+(param-set! TV 'flat #t)
+(assert-equal "setting one flag does not disturb its neighbour"
+              '(#t #t) (list (param-ref TV 'flat) (param-ref TV 'trails)))
+(param-set! TV 'trails #f)
+(assert-equal "and clearing one leaves the other alone"
+              '(#t #f) (list (param-ref TV 'flat) (param-ref TV 'trails)))
+(assert-equal "the integer slot is untouched by flag writes"
+              16777217 (param-ref TV 'mode))
+
+;; 32 flags, so bit 31 is exercised — the bit a 24-bit mantissa could not
+;; have held, and the one a decimal mask would have emitted as a flonum.
+(wrangle-params! (let loop ((i 0) (acc '()))
+                   (if (= i 32) (reverse acc)
+                       (loop (+ i 1)
+                             (cons (list (string->symbol
+                                          (string-append "b" (number->string i)))
+                                         :flag)
+                                   acc)))))
+(define FB (make-wrangle-params))
+(define FV (wrangle-params-view FB))
+(param-set! FV 'b31 #t)
+(param-set! FV 'b0 #t)
+(assert-equal "the highest bit sets" #t (param-ref FV 'b31))
+(assert-equal "without disturbing the lowest" #t (param-ref FV 'b0))
+(param-set! FV 'b31 #f)
+(assert-equal "and clears again" '(#f #t) (list (param-ref FV 'b31) (param-ref FV 'b0)))
+(assert-equal "a 33rd flag is refused"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-params! (let loop ((i 0) (acc '()))
+                          (if (= i 33) (reverse acc)
+                              (loop (+ i 1)
+                                    (cons (list (string->symbol
+                                                 (string-append "c" (number->string i)))
+                                                :flag) acc)))))))
 (wrangle-params! '(sigma radius gain))   ; leave the env as we found it
 
 ;;--- the accessors derive their stride from lib/points.scm ---------------

@@ -166,7 +166,7 @@ function check(name, cond, detail) {
   // is the difference between a knob you demonstrate and a knob you play.
   // Here the values ride in the uniform, which is rewritten before every
   // dispatch anyway.
-  ev(`(wrangle-params! '(sigma gain))`);
+  ev(`(wrangle-params! '(sigma gain (mode :u32) (trails :flag)))`);
   ev('(define PB (make-wrangle-params)) (define PV (wrangle-params-view PB))');
   ev('(define wsh #f)');
   ev(`(future (set! wsh (touch (gpu-compile dev
@@ -180,18 +180,31 @@ function check(name, cond, detail) {
     ev(`(param-set! PV 'sigma ${sg}) (param-set! PV 'gain ${gn})`);
     ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB)`);
     const w = fakeDevice.queue._lastWrite;
-    const f = new Float32Array(w.bytes.buffer, 0, 12);
-    const u = new Uint32Array(w.bytes.buffer, 0, 12);
-    seen.push({ size: w.size, seed: u[2], p0: f[4], p1: f[5] });
+    const f = new Float32Array(w.bytes.buffer, 0, 16);
+    const u = new Uint32Array(w.bytes.buffer, 0, 16);
+    seen.push({ size: w.size, seed: u[2], p0: f[8], p1: f[9] });
   }
   // The STRUCT is 48 bytes (pinned against the WGSL text in layer 18);
   // the BUFFER is one dynamic-offset-aligned slice per substep, so a
   // single-step dispatch still allocates a full 256-byte slice.
   check('the uniform buffer is one aligned slice per substep',
         seen.every((r) => r.size === 256), JSON.stringify(seen[0]));
-  check('and the binding declares an explicit 48-byte size',
-        fakeDevice._boundGroup.entries[0].resource.size === 48,
+  check('and the binding declares an explicit 64-byte size',
+        fakeDevice._boundGroup.entries[0].resource.size === 64,
         JSON.stringify(fakeDevice._boundGroup.entries[0].resource));
+
+  // Integers and flags travel as integers. A bitfield in a float slot
+  // works to bit 23 and then silently drops the rest.
+  ev(`(param-set! PV 'mode 16777217) (param-set! PV 'trails #t)`);
+  ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB)`);
+  const tw = new Uint32Array(fakeDevice.queue._lastWrite.bytes.buffer, 0, 16);
+  check('an integer parameter reaches the device exactly past 2^24',
+        tw[5] === 16777217, String(tw[5]));
+  // `trails` is the first :flag declared, so bit 0.
+  check('and a flag arrives as a bit, not a float',
+        tw[4] === 1, '0x' + tw[4].toString(16));
+  check('while the substep index still occupies its own word',
+        tw[3] === 0, String(tw[3]));
   check('parameters reach the kernel by declared slot',
         seen[0].p0 === 0.25 && seen[0].p1 === 1 &&
         seen[2].p0 === 0.75 && seen[2].p1 === 3, JSON.stringify(seen));
@@ -242,9 +255,9 @@ function check(name, cond, detail) {
   // The bytes each substep will actually read.
   const ub = fakeDevice.queue._lastWrite.bytes.buffer;
   const steps = [0, 1, 2, 3, 4].map((k) => ({
-    step: new Uint32Array(ub, k * 256, 12)[3],
-    seed: new Uint32Array(ub, k * 256, 12)[2],
-    p0: new Float32Array(ub, k * 256, 12)[4],
+    step: new Uint32Array(ub, k * 256, 16)[3],
+    seed: new Uint32Array(ub, k * 256, 16)[2],
+    p0: new Float32Array(ub, k * 256, 16)[8],
   }));
   check('every substep carries a distinct RNG stream',
         JSON.stringify(steps.map((r) => r.step)) === JSON.stringify([0, 1, 2, 3, 4]),

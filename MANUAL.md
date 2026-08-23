@@ -331,13 +331,35 @@ it recompiles — dragging a slider hitches on every frame it moves. The
 wrangle uniform has eight spare slots for values that change per frame:
 
 ```scheme
-(wrangle-params! '(sigma radius gain))   ; kernel writes `sigma`, gets w.p0
+(wrangle-params! '(sigma radius gain))   ; bare symbol means :f32
+(wrangle-params! '((sigma :f32) (mode :u32) (flatten :flag)))
 
-(define PB (make-wrangle-params))        ; 8 floats, made ONCE
+(define PB (make-wrangle-params))        ; made ONCE
 (define PV (wrangle-params-view PB))
 (param-set! PV 'sigma 0.7)               ; no allocation
+(param-set! PV 'flatten #t)
 (gpu-wrangle! device buf shader n t seed PB)
 ```
+
+Parameters are **typed**, and the type decides which slot they occupy:
+
+| type | slots | in a kernel |
+|---|---|---|
+| `:f32` | 8 (`p0`…`p7`) | `sigma` → `w.p0` |
+| `:u32` | 3 (`i0`…`i2`) | `mode` → `w.i0` |
+| `:flag` | 32 bits of `flags` | `flatten` → a `:bool`, so `(if flatten a b)` works |
+
+Flags also get an emitted `fn flag_flatten() -> bool` for WGSL-text
+bodies, the same dual treatment attributes get.
+
+⚠️ `:u32` and `:flag` are not tidiness. An f32 carries 24 mantissa bits, so
+an integer or a bitfield in a float slot works perfectly up to bit 23 and
+then **silently drops the rest** — a failure curve that survives every test
+written early. Carry counts, indices and bitfields as integers.
+
+This is also what removes the recompile-to-toggle pattern: a mode baked
+into shader source means changing it rebuilds the shader, and a mode in a
+flag bit costs nothing.
 
 One declaration is the single source of truth for both sides, so a typo is
 an error rather than a silently wrong slot. The block is a bytes object
@@ -499,8 +521,8 @@ WebGPU tracks the read-write hazard on the storage buffer itself, so
 dispatch k+1 sees what dispatch k wrote with no explicit barrier; there are
 no manual barriers in the API at all.
 
-⚠️ Eight slots is the limit, and it is `p0 : f32, p1 : f32, …` in the
-struct rather than `array<f32, 8>` on purpose: in the uniform address space
+⚠️ The float slots are `p0 : f32, p1 : f32, …` in the struct rather than
+`array<f32, 8>` on purpose: in the uniform address space
 an array's stride is padded to 16 bytes, so the array spelling would cost
 128 bytes and index wrongly for anyone assuming the floats were packed.
 
