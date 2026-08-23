@@ -373,9 +373,9 @@
 ;;; same buffer is then drawn as solid geometry.
 ;;; ==========================================================
 
-(define SIDE 14)                       ; 14^3 = 2744 cubes
+(define SIDE 24)                       ; 24^3 = 13,824 cubes
 (define N (* SIDE SIDE SIDE))
-(define SPACING (/ 1.6 SIDE))
+(define SPACING (/ 2.6 SIDE))
 
 ;;; Seed the grid once. Positions are written here and never
 ;;; touched again — the wrangle rewrites size and colour and
@@ -404,7 +404,7 @@
 (define P (make-wrangle-params))
 (define PV (wrangle-params-view P))
 (param-set! PV 'scale 2.4)             ; noise cells per unit
-(param-set! PV 'drift 0.09)            ; how fast the field slides
+(param-set! PV 'drift 0.19)            ; how fast the field slides
 (param-set! PV 'gain  0.55)            ; field magnitude -> cube size
 (param-set! PV 'floor 0.12)            ; smallest cube, as a fraction
 (param-set! PV 'field-seed 20260822)
@@ -424,7 +424,12 @@
 
   // Size from magnitude, with a floor so nothing vanishes: an
   // empty cell reads as a lull rather than a hole.
-  let half = (w.p3 + w.p2 * mag) * 0.5;
+  //
+  // The 0.1 is what SEPARATES the cubes. At half the spacing they touch
+  // and the grid reads as one solid block; well under it, each cube is
+  // its own sample and the field's variation becomes legible as
+  // variation rather than as a surface.
+  let half = (w.p3 + w.p2 * mag) * 0.1;
 
   // Colour from DIRECTION, not magnitude. The two carry different
   // information and mapping both to one channel throws half of it
