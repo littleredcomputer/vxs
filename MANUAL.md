@@ -861,6 +861,41 @@ Not scheduled, kept so they are not rediscovered from scratch.
 - **`OP_LOOP`** — named-let entry costs one closure plus one box per
   captured variable, per entry. The "thread, don't capture" idiom works
   around it; an opcode would remove it.
+- **Geodesics on a torus.** A good fit for a reason that is not aesthetic:
+  a geodesic is an ODE, so where a particle is at time *t* is a function of
+  everywhere it has been, not of *t*. A shader structurally cannot do it,
+  and per-element scratch attributes are exactly the machinery it needs —
+  which makes it the sharpest available demonstration of what the compute
+  side is for.
+
+  It also comes with a **conserved quantity**, so correctness is
+  measurable rather than eyeballed. Clairaut's relation makes
+  `r(v)·sin ψ` invariant along a geodesic, with `r(v) = R + a·cos v`;
+  integrate a few thousand steps and assert it holds. That is the same
+  move as asserting gradient noise is exactly zero at lattice points.
+
+  The invariant also predicts the interesting behaviour instead of
+  discovering it: small angular momentum confines a geodesic to the outer
+  region, because `r(v)` has a minimum it cannot cross. Two populations —
+  some winding freely, some trapped — from one conserved number. The
+  self-intersecting regime is where `a > R` and that minimum stops
+  existing.
+
+- **Symbolic differentiation of the kernel language.** The WGSL compiler is
+  a pure-expression compiler over a small closed set of forms, which is
+  precisely the setting where symbolic differentiation is tractable —
+  `d/dx` of an expression is another expression in the same language. That
+  would turn a scalar field written once into its own gradient, with no
+  finite differences and no second version to keep in step. Related to the
+  geodesic entry above: equations of motion derived rather than
+  transcribed.
+
+- **A fibration mixer.** Stage 1 of the ensemble demo passes through
+  configurations resembling a Hopf fibration, because each actor traces a
+  closed curve on a torus and 96 of them at different radii foliate nested
+  tori. The resemblance is structural rather than coincidental, though
+  Hopf circles are genuinely linked and these merely share the tori.
+
 - **`amb`/Church via fibers** — reimplement probabilistic choice points on
   fibers instead of `call/cc`, once the VM foundation settles.
 
