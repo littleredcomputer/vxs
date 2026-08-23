@@ -1,6 +1,11 @@
 CXX             ?= clang++
 VERSION         = 0.8
-DEFVER          = -DVERSION=$(VERSION)
+# A stamp baked into the binary at compile time. web/vxs.wasm is a
+# COMMITTED artifact that a browser will happily cache, so "is this the
+# build I just made?" is a question that comes up — and guessing at it
+# costs far more than printing it.
+BUILDSTAMP      = $(shell date -u +%H:%M:%SZ)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)
+DEFVER          = -DVERSION=$(VERSION) -DVXS_BUILD='"$(BUILDSTAMP)"' 
 CXXFLAGS        = -std=c++20 -O3 -Wall -Wextra -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER)
 
 EMSDK_DIR       ?= $(HOME)/Work/me/emsdk/upstream/emscripten
@@ -50,6 +55,12 @@ wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler
 	@echo "=== BUILDING WASM (web/vxs.js, web/vxs.wasm) ==="
 	$(Q)mkdir -p ../web
 	$(Q)$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
+
+# What stamp would a build made right now carry? Compare against the line
+# the page prints at boot to settle whether a tab is running the binary on
+# disk, which a browser cache can otherwise make unanswerable.
+buildstamp:
+	@echo "$(BUILDSTAMP)"
 
 test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-ports test-async test-gpu test-aot test-r4rs
 	@echo ""

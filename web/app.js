@@ -1391,6 +1391,16 @@
       logToTerm('✓ WebAssembly NaN-Boxed Scheme Core initialized successfully (250 KB).', 'meta');
       logToTerm('✓ C++20 Fiber Coroutine Scheduler hooked into requestAnimationFrame (60 FPS).', 'meta');
 
+      // WHICH BINARY IS THIS. vxs.wasm is a committed artifact and browsers
+      // cache it eagerly, so a fix can be present on disk and absent in the
+      // tab — indistinguishable, from inside the tab, from a fix that did
+      // not work. Compare this against `make -s buildstamp` and the
+      // question stops being arguable.
+      try {
+        const stamp = Module.ccall('vxs_eval', 'string', ['string'], ['(vxs-build)']);
+        logToTerm('✓ engine build ' + String(stamp).replace(/^"|"$/g, '').trim(), 'meta');
+      } catch (e) { /* an older binary has no stamp, which is itself the answer */ }
+
       // Load whatever the dropdown is actually showing.
       loadPreset(selectPreset.value);
     } catch (e) {

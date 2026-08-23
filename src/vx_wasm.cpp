@@ -1271,6 +1271,20 @@ static void register_wasm_primitives(VM &vm) {
   // turn), it happens once per shader rather than once per frame, and the
   // handle it yields is the thing the pipeline cache should have been keyed
   // by all along.
+  // (vxs-build) -> the stamp compiled into THIS binary.
+  //
+  // web/vxs.wasm is committed and browsers cache it eagerly, so a fix can
+  // be present on disk and absent in the tab — which looks exactly like a
+  // fix that did not work, and costs a round trip to disprove. Printing
+  // the stamp turns that from an argument into a reading.
+  vm.def_global("vxs-build", vm.heap.make_subr("vxs-build", [](VM &vm, uint32_t, Value *) -> Value {
+#ifdef VXS_BUILD
+    return vm.heap.make_string(VXS_BUILD);
+#else
+    return vm.heap.make_string("unstamped");
+#endif
+  }, 0, 0));
+
   vm.def_global("gpu-compile", vm.heap.make_subr("gpu-compile", [](VM &vm, uint32_t argc, Value *args) -> Value {
     (void)argc;
     if (!Heap::is_handle(args[0])) {
