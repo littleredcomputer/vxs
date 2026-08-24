@@ -57,10 +57,22 @@
 ;; hand is a hundred and forty-four chances to transpose a sign, and the
 ;; failure would be one dark facet nobody notices.
 ;;
-;; Normals are CENTROID directions, not cross products. For a solid centred
-;; on the origin the centroid of a face already points out of it, so
-;; winding never has to be got right — which matters because a face wound
-;; the wrong way would light backwards rather than fail.
+;; Normals are the TRIANGLE's own normal, oriented outward.
+;;
+;; The centroid direction was tried first and is wrong for the cube. It is
+;; correct for a solid whose faces ARE triangles, but a square face is
+;; split into two, and each half-triangle's centroid points off-axis: the
+;; x = -1 face gave (-0.905, 0.302, -0.302) instead of (-1, 0, 0). Both
+;; halves of every square then shade differently and each face is creased
+;; along its diagonal, which makes a cube look faceted — visible
+;; immediately, and passing a test that only asked whether the normal
+;; pointed outward.
+;;
+;; The cross product gives the true face normal but depends on winding.
+;; Rather than get winding right in three vertex lists, the centroid is
+;; kept as the ORIENTATION reference: flip the cross product if it
+;; disagrees. Correct for any triangle of a solid centred on the origin,
+;; whatever order its corners are in.
 
 (define (v3n x y z)
   (let ((m (sqrt (+ (* x x) (* y y) (* z z)))))
@@ -99,6 +111,13 @@
     (0 1 3) (0 3 2) (4 6 7) (4 7 5)))
 
 ;; -> (positions . normals), both flat lists of 3-element lists.
+(define (v3sub a b) (list (- (car a) (car b)) (- (cadr a) (cadr b)) (- (caddr a) (caddr b))))
+(define (v3cross a b)
+  (list (- (* (cadr a) (caddr b)) (* (caddr a) (cadr b)))
+        (- (* (caddr a) (car b)) (* (car a) (caddr b)))
+        (- (* (car a) (cadr b)) (* (cadr a) (car b)))))
+(define (v3dot a b) (+ (* (car a) (car b)) (* (cadr a) (cadr b)) (* (caddr a) (caddr b))))
+
 (define (shape-triangles verts faces)
   (let loop ((fs faces) (ps '()) (ns '()))
     (if (null? fs)
@@ -107,9 +126,15 @@
                (a (list-ref verts (car f)))
                (b (list-ref verts (cadr f)))
                (c (list-ref verts (caddr f)))
-               (n (v3n (+ (car a) (car b) (car c))
-                       (+ (cadr a) (cadr b) (cadr c))
-                       (+ (caddr a) (caddr b) (caddr c)))))
+               (x (v3cross (v3sub b a) (v3sub c a)))
+               ;; The centroid points out of the solid, so it settles which
+               ;; way the cross product should face without anyone having to
+               ;; wind the vertex lists consistently.
+               (ctr (list (+ (car a) (car b) (car c))
+                          (+ (cadr a) (cadr b) (cadr c))
+                          (+ (caddr a) (caddr b) (caddr c))))
+               (o (if (< (v3dot x ctr) 0.0) (list (- (car x)) (- (cadr x)) (- (caddr x))) x))
+               (n (v3n (car o) (cadr o) (caddr o))))
           (loop (cdr fs) (cons c (cons b (cons a ps)))
                 (cons n (cons n (cons n ns))))))))
 

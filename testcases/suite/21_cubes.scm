@@ -67,6 +67,25 @@
                                               (* (caddar ns) (caddar ns))))))
                          1e-9) #f)
                      (else (loop (cdr ns))))))
+;; POINTING OUTWARD IS NOT ENOUGH, and asking only that let a real bug
+;; through. The centroid direction was used first, which is correct for a
+;; solid whose faces ARE triangles but wrong for the cube: a square face is
+;; split into two, and each half-triangle's centroid points off-axis. The
+;; x = -1 face got (-0.905, 0.302, -0.302) instead of (-1, 0, 0), so both
+;; halves of every square shaded differently and each face was creased
+;; along its diagonal — cubes that looked faceted. Every one of those
+;; normals still pointed outward.
+;;
+;; A cube's faces are axis-aligned, so its normals must be too. That is the
+;; assertion the earlier one should have been.
+(assert-true "every cube normal is axis-aligned"
+             (let loop ((k (caddr shape-offsets)))  ; the cube's slice, third of three
+               (cond ((>= k shape-total) #t)
+                     ((< (max (abs (car (list-ref shape-nrm k)))
+                              (abs (cadr (list-ref shape-nrm k)))
+                              (abs (caddr (list-ref shape-nrm k)))) 0.9999) #f)
+                     (else (loop (+ k 1))))))
+
 (assert-true "and points outward from the vertex it belongs to"
              (let loop ((ps shape-pos) (ns shape-nrm))
                (cond ((null? ps) #t)
