@@ -78,9 +78,20 @@
 ;; per vertex because all three vertices of a face share a normal, so the
 ;; interpolated result would be constant anyway.
 
-(assert-true "there is a diffuse term" (string-contains? csrc "lambert"))
+;; KEY, FILL AND SKY. One light against a flat ambient floor leaves every
+;; face turned away from it at exactly the same brightness, which flattens
+;; the geometry the cubes exist to show — two thirds of a cube's visible
+;; faces read as one dark colour. A dimmer second light recovers the
+;; silhouette edges, and a hemisphere term means a face nothing shines on
+;; is still ORIENTED rather than merely unlit.
+(assert-true "there is a key light"
+             (string-contains? csrc "let key  = max(dot(n,"))
+(assert-true "and a dimmer fill from another direction"
+             (string-contains? csrc "let fill = max(dot(n,"))
+(assert-true "and a hemisphere term, so an unlit face still has an up and a down"
+             (string-contains? csrc "let sky  = 0.26 + 0.20 * (0.5 + 0.5 * n.y);"))
 (assert-true "shading never reaches zero, so unlit faces stay visible"
-             (string-contains? csrc "0.28 + 0.72 * lambert"))
+             (string-contains? csrc "let shade = sky + 0.56 * key + 0.20 * fill;"))
 
 ;;--- the coupling with the point buffer ---------------------------------
 ;; Same seven floats as lib/points.scm. If the stride drifts, cubes read

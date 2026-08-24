@@ -360,51 +360,79 @@
 `,
 
     ensemble: `;;; ==========================================================
-;;; Ensemble — stage 1: a few actors commanding many bodies
+;;; Ensemble — stage 2: roles, sensing, and a field that moves
 ;;; ==========================================================
 ;;; Drag to orbit, scroll to zoom.
 ;;;
-;;; The actors demo gives every agent one dot. That gets the
-;;; relationship backwards: a fiber costs about a thousand
-;;; times what a cube costs, so spending one per dot spends
-;;; the expensive thing on the cheap job.
+;;; Ninety-six fibers decide; sixty-one thousand cubes are
+;;; decided upon. Stage 1 proved the expansion. This stage
+;;; gives the actors something to decide ABOUT.
 ;;;
-;;; Here it is the other way round. NINETY-SIX fibers decide;
-;;; SIXTY-ONE THOUSAND cubes are decided upon. Each actor owns
-;;; a territory and a block of bodies, and every frame it makes
-;;; one decision — where its territory should be — which the
-;;; GPU expands into 640 placements.
+;;; There is an invisible field drifting through the volume.
+;;; Nothing draws it — what you see is entirely the ensemble's
+;;; RESPONSE to it, which is the point: the picture is the
+;;; behaviour, not the data.
 ;;;
-;;; So the host does 96 decisions a frame and the device does
-;;; 61,440 placements, and neither could do the other's job.
-;;; That division is the whole architecture: an actor is not a
-;;; particle, it is something that COMMANDS particles.
+;;; TWO ROLES, AND THEY ARE DIFFERENT PROGRAMS:
 ;;;
-;;; Stage 1 is deliberately dumb — the actors drift on fixed
-;;; orbits and sense nothing. What it proves is the expansion:
-;;; that a hundred decisions really can drive sixty thousand
-;;; bodies at frame rate. Sensing, roles and competition come
-;;; next, and they change only what an actor DECIDES, not how
-;;; the decision reaches the screen.
+;;;   SCOUT   small, dim, quick. Wanders. Samples where it
+;;;           lands, and on finding something, commits.
+;;;   ANCHOR  large, bright, still. Sits on what it found and
+;;;           swells with its claim. When the field drifts out
+;;;           from under it, it lets go and scouts again.
+;;;
+;;; That divergence is the thing a shader cannot do cheaply. A
+;;; warp running thirty-two different plans runs all thirty-two;
+;;; a fiber runs only its own. Here half the ensemble is
+;;; executing code the other half is not.
+;;;
+;;; SENSING IS EXPENSIVE, SO ACTORS DO NOT DO IT OFTEN. One
+;;; evaluation of the field costs ~70us in Scheme, and doing
+;;; ninety-six of them every frame would eat two thirds of the
+;;; budget. So each actor senses on its own schedule, staggered
+;;; by index: twelve evaluations a frame, perfectly flat.
+;;;
+;;; An actor can choose not to think. A kernel invocation has
+;;; no such option — it recomputes everything, every frame,
+;;; whether or not anything changed.
+;;;
+;;; THE KNOB: (set! DRIFT x) in the REPL, 0.0 to 1.0.
+;;;   1.0  the stage-1 picture — prescribed orbits, no sensing
+;;;   0.0  pure seeking
+;;; Anything between dissolves one into the other.
 ;;; ==========================================================
+
+(load "lib/noise.scm")
 
 (define NACTORS 96)
 (define PER-ACTOR 640)
 (define N (* NACTORS PER-ACTOR))
+(define SENSE-EVERY 8)         ; frames between an actor's samples
 
-;;; Per-ACTOR state, in the read-only buffer every cube reads.
-;;; This is the channel the whole demo runs through: 96 actors
-;;; write 672 floats, and 61,440 cubes read them.
-;;; Sizes DERIVED, not written down twice. Three floats of centre and
-;;; three of tint per actor, one of radius. A layout that disagreed with
-;;; NACTORS would not fail — it would read a neighbour's numbers.
+(define DRIFT 0.0)             ; 1.0 = stage 1, 0.0 = pure seeking
+(define FIELD-SCALE 1.9)
+;;; Fast enough that a feature crosses a lattice cell in a couple of
+;;; seconds. Slower and anchors are never dislodged, so the ensemble
+;;; ratchets to all-anchors and stops being about anything.
+(define FIELD-SPEED 0.55)
+(define FIELD-SEED 20260823)
+;;; MEASURED, not guessed. Sampling the field over the volume:
+;;;   |v| > 0.30 covers 12% of space,  |v| > 0.18 covers 32%.
+;;; So a wandering scout finds something about one sample in eight, and
+;;; the GAP between the two is hysteresis — an anchor commits at 0.30 and
+;;; does not let go until 0.18, so it holds through the field's wobble
+;;; instead of flickering on the threshold. Commitment is the thing an
+;;; actor has and a pure function of the present does not.
+(define CLAIM-ON  0.30)
+(define CROWD 0.30)            ; two anchors closer than this contend
+(define CLAIM-OFF 0.18)
+
 (shared-layout! (list (list 'centres (* 3 NACTORS))
                       (list 'radii NACTORS)
                       (list 'tints (* 3 NACTORS))))
 (define W (make-shared))
 (define WV (shared-view W))
 
-;;; Orientation is a stock attribute; declaring it turns the cubes.
 (scratch-attributes! '((pose :quat)))
 (define SCRATCH (make-scratch N))
 
@@ -415,13 +443,37 @@
 (param-set! PV 'size   0.85)
 (param-set! PV 'twist  1.1)
 
-;;; The point buffer is never touched by the host after this —
-;;; the kernel writes every position from the actors' state.
 (define bodies (make-points N))
 
-;;; --- the actors -----------------------------------------------------
-;;; One fiber each. All it does this stage is move its territory and
-;;; write three numbers. That is the entire host-side cost of a frame.
+;;; --- per-actor state, as parallel vectors ---------------------------
+(define px (make-vector NACTORS 0.0))
+(define py (make-vector NACTORS 0.0))
+(define pz (make-vector NACTORS 0.0))
+(define tx (make-vector NACTORS 0.0))
+(define ty (make-vector NACTORS 0.0))
+(define tz (make-vector NACTORS 0.0))
+(define claim (make-vector NACTORS 0.0))
+
+(define (field x y z t)
+  (perlin3 (* x FIELD-SCALE)
+           (* y FIELD-SCALE)
+           (- (* z FIELD-SCALE) (* t FIELD-SPEED))
+           FIELD-SEED))
+
+;;; Reporting is EVENTS ONLY, and rate-limited. Ninety-six actors
+;;; narrating every frame is not talkative, it is noise.
+(define chatter 0)
+(define chatter-window 0)
+(define (report! text)
+  (let ((w (quotient (frame-count) 60)))
+    (if (not (= w chatter-window))
+        (begin (set! chatter-window w) (set! chatter 0)))
+    (if (< chatter 3)
+        (begin (set! chatter (+ chatter 1)) (display text) (newline)))))
+
+(define frames 0)
+(define (frame-count) frames)
+
 (define (actor-write! a cx cy cz r tr tg tb)
   (let ((k (* a 3)))
     (shared-set! WV 'centres k cx)
@@ -432,51 +484,145 @@
     (shared-set! WV 'tints (+ k 1) tg)
     (shared-set! WV 'tints (+ k 2) tb)))
 
-(define (spawn-actor a)
-  ;; SPACED BY THE GOLDEN ANGLE, not by index. Giving actor a a phase of
-  ;; 2*pi*a/N makes consecutive actors neighbours in position AND in
-  ;; radius AND in hue, so ninety-six separate commanders chain into one
-  ;; continuous tube with a gradient painted along it — which is precisely
-  ;; the claim this demo exists to make, rendered invisible.
-  ;;
-  ;; 2.39996 radians is the golden angle. Successive multiples of it never
-  ;; land near each other and never repeat, so actor a and actor a+1 are
-  ;; strangers and each swarm reads as its own body.
-  (let* ((f (/ (exact->inexact a) NACTORS))
-         (orbit (+ 0.45 (* 0.55 (- 1.0 (* f f)))))
-         (tilt  (* 2.39996 a))
-         (rate  (+ 0.12 (* 0.5 (- 1.0 f))))
-         (phase (* 2.39996 a))
-         (hue   (- (* 3.7 f) (floor (* 3.7 f)))))
-    (future
-      (let loop ((t 0.0))
-        (let* ((ang (+ phase (* t rate)))
-               (cx (* orbit (cos ang)))
-               (cz (* orbit (sin ang)))
-               (cy (* 0.5 (sin (+ tilt (* t rate 0.7))))))
-          ;; Smaller territories than a continuous tube wants: a swarm has
-          ;; to be able to sit in its own space to be seen as one thing.
-          (actor-write! a cx cy cz (* 0.09 (+ 0.6 (* 0.4 (sin (+ (* 0.7 a) (* t 0.6))))))
-                        (+ 0.35 (* 0.65 hue))
-                        (+ 0.30 (* 0.50 (sin (* 6.28 hue))))
-                        (- 1.0 (* 0.7 hue)))
-          (yield)
-          (loop (+ t 0.016)))))))
+;;; The stage-1 orbit, kept so DRIFT can blend back to it.
+(define (orbit-x a t)
+  (let ((f (/ (exact->inexact a) NACTORS)))
+    (* (+ 0.45 (* 0.55 (- 1.0 (* f f)))) (cos (+ (* 2.39996 a) (* t 0.3))))))
+(define (orbit-y a t)
+  (* 0.5 (sin (+ (* 2.39996 a) (* t 0.21)))))
+(define (orbit-z a t)
+  (let ((f (/ (exact->inexact a) NACTORS)))
+    (* (+ 0.45 (* 0.55 (- 1.0 (* f f)))) (sin (+ (* 2.39996 a) (* t 0.3))))))
 
-;;; --- the expansion --------------------------------------------------
-;;; One kernel, run once per cube per frame. Every cube works out who
-;;; owns it, reads that actor's three numbers, and places itself.
-;;; The block size reaches the shader as text rather than as a second
-;;; copy of the number. Getting it wrong would not fail either: cubes
-;;; would simply obey the wrong actor.
+(define (mix a b m) (+ (* a (- 1.0 m)) (* b m)))
+(define (wander) (- (* 1.7 (random 1000) 0.001) 0.85))
+
+;;; --- the two programs -----------------------------------------------
+;;; A scout and an anchor are not one loop with a flag. They are separate
+;;; procedures that tail-call into each other when a role changes, so an
+;;; actor literally runs different code depending on what it has decided.
+
+(define (be-scout a t)
+  ;; Wander toward a fresh target; sample on arrival or on schedule.
+  (vector-set! tx a (wander))
+  (vector-set! ty a (* 0.6 (wander)))
+  (vector-set! tz a (wander))
+  (vector-set! claim a 0.0)
+  (let loop ((t t))
+    (step-toward! a 0.045 t)
+    (if (sensing? a)
+        (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
+          (if (> v CLAIM-ON)
+              (begin
+                (report! (string-append "actor " (number->string a)
+                                        " scout -> ANCHOR, claim "
+                                        (number->string v)))
+                (vector-set! claim a v)
+                (be-anchor a t))
+              ;; nothing here; pick somewhere else to look
+              (if (< (dist2-to-target a) 0.02)
+                  (begin (vector-set! tx a (wander))
+                         (vector-set! ty a (* 0.6 (wander)))
+                         (vector-set! tz a (wander)))))))
+    (paint-scout a)
+    (yield)
+    (loop (+ t 0.016))))
+
+(define (be-anchor a t)
+  ;; Hold position. The field drifts; when it has drifted away, let go.
+  (vector-set! tx a (vector-ref px a))
+  (vector-set! ty a (vector-ref py a))
+  (vector-set! tz a (vector-ref pz a))
+  (let loop ((t t))
+    (step-toward! a 0.010 t)
+    (if (sensing? a)
+        (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
+          (vector-set! claim a v)
+          (if (< v CLAIM-OFF)
+              (begin
+                (report! (string-append "actor " (number->string a)
+                                        " anchor -> scout, faded to "
+                                        (number->string v)))
+                (be-scout a t)))
+          (let ((rival (out-claimed? a)))
+            (if rival
+                (begin
+                  (report! (string-append "actor " (number->string a)
+                                          " yields to " (number->string rival)))
+                  (vector-set! claim a 0.0)
+                  (be-scout a t))))))
+    (paint-anchor a)
+    (yield)
+    (loop (+ t 0.016))))
+
+;;; --- contention -------------------------------------------------------
+;;; The one rule that makes this an ENSEMBLE rather than ninety-six agents
+;;; each solving their own problem: two anchors cannot hold the same
+;;; ground. The weaker claim yields.
+;;;
+;;; Checked only by the actors that are sensing this frame — twelve of
+;;; them — so it costs about a thousand comparisons a frame rather than
+;;; the nine thousand a full pairwise sweep would.
+;;;
+;;; Note what this needs that a kernel cannot have: an actor must know
+;;; another actor's claim, decide it is beaten, and CHANGE WHAT PROGRAM IT
+;;; IS RUNNING. Not a different value — a different continuation.
+(define (out-claimed? a)
+  (let ((mine (vector-ref claim a)))
+    (let loop ((b 0))
+      (cond ((= b NACTORS) #f)
+            ((or (= b a) (= 0.0 (vector-ref claim b))) (loop (+ b 1)))
+            (else
+             (let ((dx (- (vector-ref px b) (vector-ref px a)))
+                   (dy (- (vector-ref py b) (vector-ref py a)))
+                   (dz (- (vector-ref pz b) (vector-ref pz a))))
+               (if (and (< (+ (* dx dx) (* dy dy) (* dz dz)) (* CROWD CROWD))
+                        (> (vector-ref claim b) mine))
+                   b
+                   (loop (+ b 1)))))))))
+
+;;; --- shared mechanics -----------------------------------------------
+(define (sensing? a) (= 0 (modulo (+ frames a) SENSE-EVERY)))
+
+(define (dist2-to-target a)
+  (let ((dx (- (vector-ref tx a) (vector-ref px a)))
+        (dy (- (vector-ref ty a) (vector-ref py a)))
+        (dz (- (vector-ref tz a) (vector-ref pz a))))
+    (+ (* dx dx) (* dy dy) (* dz dz))))
+
+;;; DRIFT blends the sensed target against the stage-1 orbit. At 1.0 the
+;;; sensing still happens and simply stops mattering, which is what makes
+;;; the knob a dissolve rather than a switch.
+(define (step-toward! a rate t)
+  (let* ((gx (mix (vector-ref tx a) (orbit-x a t) DRIFT))
+         (gy (mix (vector-ref ty a) (orbit-y a t) DRIFT))
+         (gz (mix (vector-ref tz a) (orbit-z a t) DRIFT))
+         (r (if (> DRIFT 0.5) 0.10 rate)))
+    (vector-set! px a (mix (vector-ref px a) gx r))
+    (vector-set! py a (mix (vector-ref py a) gy r))
+    (vector-set! pz a (mix (vector-ref pz a) gz r))))
+
+(define (paint-scout a)
+  (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
+                0.035 0.24 0.28 0.40))
+
+(define (paint-anchor a)
+  (let* ((c (vector-ref claim a))
+         ;; Spread the LIVE range across the ramp. Scaling from zero puts
+         ;; every anchor at the top of it, since none of them are below
+         ;; CLAIM-OFF by definition.
+         (hot (max 0.0 (min 1.0 (/ (- c CLAIM-OFF) 0.28)))))
+    (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
+                  (+ 0.05 (* 0.16 hot))
+                  (+ 0.35 (* 0.65 hot))
+                  (+ 0.18 (* 0.42 hot))
+                  (+ 0.30 (* 0.25 (- 1.0 hot))))))
+
+;;; --- the expansion ---------------------------------------------------
 (define (u32-text n) (string-append (number->string n) "u"))
 
 (define kernel (wrangle-wgsl (string-append "
-  // Who commands me. Integer division, so each block of consecutive cubes
-  // belongs to one actor — which also means an actor's bodies are
-  // contiguous in memory and its swarm is one coherent read.
   let a = i / " (u32-text PER-ACTOR) ";
-
   let c = vec3<f32>(shared_centres(a * 3u),
                     shared_centres(a * 3u + 1u),
                     shared_centres(a * 3u + 2u));
@@ -485,34 +631,32 @@
                        shared_tints(a * 3u + 1u),
                        shared_tints(a * 3u + 2u));
 
-  // A stable place within the territory. The preamble has already seeded
-  // the generator from this cube's index, and the seed does not change
-  // between frames, so these draws are the SAME every frame — the cube
-  // keeps its position in the formation while the formation moves.
+  // Stable within the formation: the preamble seeds from this cube's
+  // index and the seed does not change, so a swarm keeps its shape while
+  // its owner moves it.
   let dir = normalize(vec3<f32>(random_normal(0.0, 1.0),
                                 random_normal(0.0, 1.0),
                                 random_normal(0.0, 1.0)));
-  // Cube root of a uniform gives a uniform density in the ball; without
-  // it every swarm is a shell with nothing inside.
   let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
-  let here = c + dir * (rad * r);
-
-  // Face along the radius, so a swarm reads as something with an
-  // orientation rather than a cloud of confetti.
   attr_pose_set(i, q_from_rotvec(dir * w.p2));
-
-  pt_write(i, here, 0.006 * w.p1, tint * (0.45 + 0.55 * (1.0 - rad)));
+  pt_write(i, c + dir * (rad * r), 0.006 * w.p1,
+           tint * (0.45 + 0.55 * (1.0 - rad)));
 ")))
 
 (define cam (make-camera))
 (camera-distance-set! cam 3.0)
-(define (frame! t) (orbit-camera! cam))
+(define (frame! t) (set! frames (+ frames 1)) (orbit-camera! cam))
 
-(display "ensemble: ") (display NACTORS) (display " actors commanding ")
-(display N) (display " bodies — ") (display PER-ACTOR) (display " each")
+(display "ensemble: ") (display NACTORS) (display " actors, ")
+(display N) (display " bodies. Sensing every ") (display SENSE-EVERY)
+(display " frames, staggered. (set! DRIFT 1.0) for the stage-1 picture.")
 (newline)
 
-(do ((a 0 (+ a 1))) ((= a NACTORS)) (spawn-actor a))
+(do ((a 0 (+ a 1))) ((= a NACTORS))
+  (vector-set! px a (orbit-x a 0.0))
+  (vector-set! py a (orbit-y a 0.0))
+  (vector-set! pz a (orbit-z a 0.0))
+  (future (be-scout a 0.0)))
 
 (run-wrangle-loop bodies N kernel frame! cam
                   :canvas "vxs-gpu-canvas"

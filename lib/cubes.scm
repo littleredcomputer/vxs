@@ -137,8 +137,20 @@
    (if (cubes-posed?)
        "  let n = q_rot(attr_pose(ii), norms[vi / 6u]);\n"
        "  let n = norms[vi / 6u];\n")
-   "  let lambert = max(dot(n, normalize(vec3<f32>(0.45, 0.80, 0.40))), 0.0);\n"
-   "  let shade = 0.28 + 0.72 * lambert;\n"
+   ;; KEY, FILL AND SKY. One light with a flat ambient floor leaves every
+   ;; face turned away from it at exactly the same brightness, which
+   ;; flattens the very geometry the cubes are here to show — two thirds of
+   ;; a cube's visible faces read as one dark colour.
+   ;;
+   ;; A dimmer second light from behind and to the left recovers the
+   ;; silhouette edges, and a hemisphere term (bright above, dim below)
+   ;; means a face nothing shines on is still ORIENTED rather than merely
+   ;; unlit. Cheap: three dot products in a vertex shader that already has
+   ;; the normal in hand.
+   "  let key  = max(dot(n, normalize(vec3<f32>( 0.45, 0.80,  0.40))), 0.0);\n"
+   "  let fill = max(dot(n, normalize(vec3<f32>(-0.55, 0.15, -0.60))), 0.0);\n"
+   "  let sky  = 0.26 + 0.20 * (0.5 + 0.5 * n.y);\n"
+   "  let shade = sky + 0.56 * key + 0.20 * fill;\n"
    "\n"
    "  // A REAL w, unlike the points shader which divides by hand and emits\n"
    "  // w = 1. Two things need it. Depth: z must survive to the depth buffer,\n"
