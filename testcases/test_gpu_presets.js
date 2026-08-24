@@ -52,41 +52,47 @@ function checkAppParses() {
   }
 }
 
-// A preset body lives inside a JS template literal, so a backtick or a
-// ${ } in Scheme source terminates it early. The Scheme is comment-heavy
-// and backticks are natural punctuation in prose, which makes this an easy
-// mistake and an invisible one.
-function checkPresetQuoting(presets) {
-  for (const [name, code] of Object.entries(presets)) {
-    if (code.indexOf('`') >= 0) {
-      throw new Error(`preset ${name} contains a backtick, which ends its template literal`);
-    }
-    if (code.indexOf('${') >= 0) {
-      throw new Error(`preset ${name} contains \${, which interpolates inside its template literal`);
-    }
-  }
-}
 
+// Reads demos/*.scm — THE SAME FILES the browser fetches.
+//
+// This used to recover preset text out of web/app.js by matching markers,
+// which meant the harness was never quite reading what the page ran: a
+// preset could be malformed as JavaScript and still extract cleanly, and
+// did. Now there is one copy and both readers open it.
 function extractPresets(names) {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
-  const body = src.slice(src.indexOf('const PRESETS = {'));
   const out = {};
   for (const n of names) {
-    const open = '\n    ' + n + ': `';
-    const i = body.indexOf(open);
-    if (i < 0) throw new Error(`preset ${n} not found in web/app.js`);
-    const s = i + open.length;
-    const e = body.indexOf('`,', s);
-    if (e < 0) throw new Error(`preset ${n} is unterminated in web/app.js`);
-    out[n] = body.slice(s, e);
+    out[n] = fs.readFileSync(path.join(__dirname, '..', 'demos', n + '.scm'), 'utf8');
   }
   return out;
 }
 
+// Every option in the markup must name a demo that exists, and every name
+// the script offers must have a file. Drift between the three is silent in
+// the browser — a dropdown entry that loads nothing — so it is checked
+// here instead.
+function checkManifest() {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const block = app.slice(app.indexOf('const PRESET_NAMES = ['));
+  const named = block.slice(0, block.indexOf(']')).match(/'([a-z]+)'/g).map((q) => q.slice(1, -1));
+  const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.html'), 'utf8');
+  const options = (html.match(/<option value="([a-z]+)"/g) || []).map((m) => m.slice(15, -1));
+  for (const n of named) {
+    if (!fs.existsSync(path.join(__dirname, '..', 'demos', n + '.scm'))) {
+      throw new Error(`app.js offers "${n}" but demos/${n}.scm does not exist`);
+    }
+  }
+  for (const o of options) {
+    if (named.indexOf(o) < 0) {
+      throw new Error(`index.html offers "${o}" but app.js does not list it`);
+    }
+  }
+}
+
 (async () => {
   checkAppParses();
+  checkManifest();
   const presets = extractPresets(GPU_PRESETS);
-  checkPresetQuoting(presets);
 
   // Presets talk to the page. Keep their chatter out of the report, but
   // watch it: a dead fiber announces itself here and nowhere else, and a
