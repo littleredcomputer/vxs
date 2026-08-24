@@ -435,9 +435,31 @@
 (define CROWD 0.30)            ; two anchors closer than this contend
 (define CLAIM-OFF 0.18)
 
+;;; HEAVIER IS LESS STABLE — literally true of nuclei, and mechanically
+;;; necessary here. Without it a nucleus grows without bound: scouts
+;;; respawn after capture and are eaten again, so one body reached a mass
+;;; of 100 out of 96 actors, ate the ensemble, and the whole thing then
+;;; collapsed to ninety-six bare scouts and an empty screen.
+;;;
+;;; Raising the release threshold with mass makes growth self-limiting.
+;;; The practical ceiling is where the threshold meets CLAIM-ON, since no
+;;; ground is strong enough to hold a nucleus past that.
+(define INSTABILITY 0.0045)
+(define (release-threshold a)
+  (+ CLAIM-OFF (* INSTABILITY (- (vector-ref mass a) 1.0))))
+
 (shared-layout! (list (list 'centres (* 3 NACTORS))
                       (list 'radii NACTORS)
-                      (list 'tints (* 3 NACTORS))))
+                      (list 'tints (* 3 NACTORS))
+                      ;; A rotation VECTOR per actor: axis times rate. The
+                      ;; kernel turns it into an angle by multiplying by
+                      ;; time, so a cloud tumbles on its own axis forever
+                      ;; without the host sending anything per frame.
+                      (list 'spins (* 3 NACTORS))
+                      ;; How many of this actor's bodies are visible. The
+                      ;; rest are written at size zero and collapse — the
+                      ;; same degenerate trick a released pool slot uses.
+                      (list 'shown NACTORS)))
 (define W (make-shared))
 (define WV (shared-view W))
 
@@ -464,6 +486,17 @@
 (define ty (make-vector NACTORS 0.0))
 (define tz (make-vector NACTORS 0.0))
 (define claim (make-vector NACTORS 0.0))
+
+;;; MASS, in absorbed scouts. A nucleus grows by capture and scatters when
+;;; it decays. It is the one quantity in the demo that is neither sensed
+;;; nor decided but ACCUMULATED — a history, which is the third thing a
+;;; fiber has that a kernel invocation cannot.
+(define mass (make-vector NACTORS 1.0))
+(define SCOUT-BODIES 70)
+;; Chosen so the display saturates near the mass the instability actually
+;; permits (~20), rather than at 7 — otherwise every nucleus past a modest
+;; size looks identical and the growth stops being visible.
+(define BODIES-PER-MASS 30)
 
 ;;; A SHORT MEMORY OF HAVING LOST. Without it an actor that yields walks a
 ;;; little way off, senses the same feature it was just beaten on,
@@ -512,6 +545,9 @@
 
 (define (actor-write! a cx cy cz r tr tg tb)
   (let ((k (* a 3)))
+    (shared-set! WV 'shown a
+                 (min PER-ACTOR (+ SCOUT-BODIES
+                                   (* BODIES-PER-MASS (- (vector-ref mass a) 1.0)))))
     (shared-set! WV 'centres k cx)
     (shared-set! WV 'centres (+ k 1) cy)
     (shared-set! WV 'centres (+ k 2) cz)
@@ -577,6 +613,17 @@
         (vector-set! cooldown a (- (vector-ref cooldown a) 1))
         (if (< (dist2-to-target a) 0.02) (fresh-target! a))
         (loop t2))
+       ;; CAPTURED. The scout's mass joins the nucleus and the scout is
+       ;; sent far away to begin again — the actor survives, its substance
+       ;; does not. Cooling down on the way out stops it being recaptured
+       ;; by the same nucleus before it has cleared the reach.
+       ((and v (captor-of a))
+        => (lambda (b)
+             (vector-set! mass b (+ (vector-ref mass b) (vector-ref mass a)))
+             (vector-set! mass a 1.0)
+             (vector-set! cooldown a COOLDOWN-PERIODS)
+             (yield-away! a b)
+             (loop t2)))
        ((and v (> v CLAIM-ON))
         (report! (string-append "actor " (number->string a)
                                 " scout -> ANCHOR, claim " (number->string v)))
@@ -614,13 +661,21 @@
                 ;; re-anchors, and is beaten again — the thrash visible in
                 ;; the log as the same pair trading twice a second. Pushing
                 ;; away from the winner turns that into territory.
+                ;; Losing the ground costs the mass too: a displaced
+                ;; nucleus leaves as a bare scout.
+                (vector-set! mass a 1.0)
                 (vector-set! cooldown a COOLDOWN-PERIODS)
                 (yield-away! a rival)
                 (be-scout/keeping-target a t2))
-               ((< v CLAIM-OFF)
+               ((< v (release-threshold a))
                 (report! (string-append "actor " (number->string a)
-                                        " anchor -> scout, faded to "
-                                        (number->string v)))
+                                        " decays, scattering "
+                                        (number->string (- (vector-ref mass a) 1.0))))
+                ;; DECAY. What it absorbed is not conserved — it scatters.
+                ;; Conserving it would need somewhere to put it, and the
+                ;; ninety-six actors are already all alive; a nucleus that
+                ;; shatters simply stops being heavy.
+                (vector-set! mass a 1.0)
                 (be-scout a t2))
                (else (loop t2)))))))))
 
@@ -636,6 +691,23 @@
 ;;; Note what this needs that a kernel cannot have: an actor must know
 ;;; another actor's claim, decide it is beaten, and CHANGE WHAT PROGRAM IT
 ;;; IS RUNNING. Not a different value — a different continuation.
+;;; Which nucleus, if any, has this scout inside it. Capture radius scales
+;;; with mass, so a heavy nucleus reaches further — which is what makes
+;;; growth self-reinforcing and gives the ensemble a few dominant bodies
+;;; rather than ninety-six equal ones.
+(define (captor-of a)
+  (let loop ((b 0))
+    (cond ((= b NACTORS) #f)
+          ((or (= b a) (= 0.0 (vector-ref claim b))) (loop (+ b 1)))
+          (else
+           (let* ((dx (- (vector-ref px b) (vector-ref px a)))
+                  (dy (- (vector-ref py b) (vector-ref py a)))
+                  (dz (- (vector-ref pz b) (vector-ref pz a)))
+                  (reach (* CROWD (+ 0.55 (* 0.16 (vector-ref mass b))))))
+             (if (< (+ (* dx dx) (* dy dy) (* dz dz)) (* reach reach))
+                 b
+                 (loop (+ b 1))))))))
+
 (define (out-claimed? a)
   (let ((mine (vector-ref claim a)))
     (let loop ((b 0))
@@ -716,7 +788,19 @@
                                 random_normal(0.0, 1.0),
                                 random_normal(0.0, 1.0)));
   let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
-  attr_pose_set(i, q_from_rotvec(dir * w.p2));
+
+  // THE CLOUD TURNS. Each cube's direction within the formation is fixed —
+  // drawn once from its own index and never redrawn — so a swarm is a
+  // RIGID BODY, and rotating it means rotating that direction. The spin is
+  // a rotation vector in the shared buffer, axis times rate, and the angle
+  // is that times the clock: a cloud tumbles forever with the host sending
+  // nothing per frame.
+  let spin = vec3<f32>(shared_spins(a * 3u),
+                       shared_spins(a * 3u + 1u),
+                       shared_spins(a * 3u + 2u));
+  let sd = q_rot(q_from_rotvec(spin * w.time), dir);
+
+  attr_pose_set(i, q_from_rotvec(sd * w.p2));
 
   // Shape from the actor's RADIUS, which is the one number already in the
   // shared buffer that tracks its role — a scout sits at the floor, an
@@ -729,11 +813,20 @@
   // size popping.
   let big = shared_radii(a);
   attr_shape_set(i, select(select(0u, 1u, big > 0.050), 2u, big > 0.105));
+
+  // HOW MUCH OF THIS NUCLEUS EXISTS. An actor owns a fixed block of
+  // bodies but shows only as many as its mass has earned; the rest are
+  // written at size zero and collapse to a point — a vertex shader
+  // invocation and no fragments. So capture and decay change the SIZE OF
+  // THE CLOUD rather than only its colour.
+  let local = i - a * " (u32-text PER-ACTOR) ";
+  let alive = local < u32(shared_shown(a));
+  let sz = select(0.0, 0.006 * w.p1, alive);
   // BRIGHTEN OUTWARD, not inward. The previous form darkened by rad, so
   // the cubes at the surface of a swarm — the only ones that reach the
   // eye — were at 45% while the fully occluded core sat at 100%. The
   // shading was being spent entirely on cubes nobody can see.
-  pt_write(i, c + dir * (rad * r), 0.006 * w.p1,
+  pt_write(i, c + sd * (rad * r), sz,
            tint * (0.70 + 0.35 * rad));
 ")))
 
@@ -747,10 +840,19 @@
 (display " frames, staggered. (set! DRIFT 1.0) for the stage-1 picture.")
 (newline)
 
+;;; Each actor tumbles on its own axis, assigned once. Golden-angle
+;;; phasing again, so neighbours do not turn together and the ensemble
+;;; reads as ninety-six independent things rather than one system.
 (do ((a 0 (+ a 1))) ((= a NACTORS))
   (vector-set! px a (orbit-x a 0.0))
   (vector-set! py a (orbit-y a 0.0))
   (vector-set! pz a (orbit-z a 0.0))
+  (let* ((u (* 2.39996 a))
+         (k (* a 3))
+         (rate (+ 0.12 (* 0.30 (/ (exact->inexact (modulo (* a 7) NACTORS)) NACTORS)))))
+    (shared-set! WV 'spins k       (* rate (cos u)))
+    (shared-set! WV 'spins (+ k 1) (* rate (sin (* 0.7 u))))
+    (shared-set! WV 'spins (+ k 2) (* rate (sin u))))
   (future (be-scout a 0.0)))
 
 (run-wrangle-loop bodies N kernel frame! cam
