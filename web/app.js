@@ -462,6 +462,31 @@
 (define tz (make-vector NACTORS 0.0))
 (define claim (make-vector NACTORS 0.0))
 
+;;; A SHORT MEMORY OF HAVING LOST. Without it an actor that yields walks a
+;;; little way off, senses the same feature it was just beaten on,
+;;; re-anchors, and is beaten again — the pair trading places twice a
+;;; second, which is what the event log kept showing. Refusing to commit
+;;; for a few sensing periods turns that thrash into territory.
+;;;
+;;; This is memory, which is the other thing a fiber has and a kernel
+;;; invocation does not: a kernel begins every dispatch knowing nothing.
+(define cooldown (make-vector NACTORS 0))
+(define COOLDOWN-PERIODS 5)
+
+;;; WHAT IS DRAWN, as against what is decided. A role change is instant —
+;;; an actor commits in one frame — but making the PICTURE change in one
+;;; frame snaps a swarm between 0.035 and 0.21, a sixfold jump, thirty-four
+;;; times a second across the ensemble. That is the chop.
+;;;
+;;; So the decision stays instant and the appearance eases toward it. The
+;;; actor knows immediately; the swarm takes about a third of a second to
+;;; agree. Nothing about the dynamics changes — only what you can follow.
+(define dr (make-vector NACTORS 0.035))
+(define dR (make-vector NACTORS 0.44))
+(define dG (make-vector NACTORS 0.52))
+(define dB (make-vector NACTORS 0.72))
+(define EASE 0.10)
+
 (define (field x y z t)
   (perlin3 (* x FIELD-SCALE)
            (* y FIELD-SCALE)
@@ -506,62 +531,95 @@
 (define (wander) (- (* 1.7 (random 1000) 0.001) 0.85))
 
 ;;; --- the two programs -----------------------------------------------
-;;; A scout and an anchor are not one loop with a flag. They are separate
-;;; procedures that tail-call into each other when a role changes, so an
-;;; actor literally runs different code depending on what it has decided.
+;;; A scout and an anchor are separate procedures, and the transition
+;;; between them is in TAIL POSITION — the last thing either loop does.
+;;; Calling one from inside the other's loop body would leave the old
+;;; loop's frame on the stack forever, one per role change, and there are
+;;; thirty-four of those a second.
 
-(define (be-scout a t)
-  ;; Wander toward a fresh target; sample on arrival or on schedule.
+(define (yield-away! a rival)
+  (let* ((dx (- (vector-ref px a) (vector-ref px rival)))
+         (dy (- (vector-ref py a) (vector-ref py rival)))
+         (dz (- (vector-ref pz a) (vector-ref pz rival)))
+         (d  (max 0.001 (sqrt (+ (* dx dx) (* dy dy) (* dz dz)))))
+         (k  (/ (* 2.5 CROWD) d)))
+    (vector-set! tx a (max -0.9 (min 0.9 (+ (vector-ref px a) (* dx k)))))
+    (vector-set! ty a (max -0.6 (min 0.6 (+ (vector-ref py a) (* dy k)))))
+    (vector-set! tz a (max -0.9 (min 0.9 (+ (vector-ref pz a) (* dz k)))))))
+
+(define (fresh-target! a)
   (vector-set! tx a (wander))
   (vector-set! ty a (* 0.6 (wander)))
-  (vector-set! tz a (wander))
+  (vector-set! tz a (wander)))
+
+(define (sense-at a t)
+  (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t)))
+
+(define (be-scout a t)
+  (fresh-target! a)
+  (be-scout/keeping-target a t))
+
+;; Same program, but honouring a target someone else already chose — used
+;; when an actor is leaving somewhere rather than looking for somewhere.
+(define (be-scout/keeping-target a t)
   (vector-set! claim a 0.0)
   (let loop ((t t))
     (step-toward! a (* 0.045 PACE) t)
-    (if (sensing? a)
-        (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
-          (if (> v CLAIM-ON)
-              (begin
-                (report! (string-append "actor " (number->string a)
-                                        " scout -> ANCHOR, claim "
-                                        (number->string v)))
-                (vector-set! claim a v)
-                (be-anchor a t))
-              ;; nothing here; pick somewhere else to look
-              (if (< (dist2-to-target a) 0.02)
-                  (begin (vector-set! tx a (wander))
-                         (vector-set! ty a (* 0.6 (wander)))
-                         (vector-set! tz a (wander)))))))
     (paint-scout a)
     (yield)
-    (loop (+ t (tick)))))
+    (let ((v (if (sensing? a) (sense-at a t) #f))
+          (t2 (+ t (tick))))
+      (cond
+       ((and v (> (vector-ref cooldown a) 0))
+        (vector-set! cooldown a (- (vector-ref cooldown a) 1))
+        (if (< (dist2-to-target a) 0.02) (fresh-target! a))
+        (loop t2))
+       ((and v (> v CLAIM-ON))
+        (report! (string-append "actor " (number->string a)
+                                " scout -> ANCHOR, claim " (number->string v)))
+        (vector-set! claim a v)
+        (be-anchor a t2))
+       (else
+        ;; Re-target only on a SENSING frame. Checking every frame means a
+        ;; scout that has arrived picks a new direction sixty times a
+        ;; second and random-walks in place, which is both erratic to watch
+        ;; and covers ground it has already rejected.
+        (if (and v (< (dist2-to-target a) 0.02)) (fresh-target! a))
+        (loop t2))))))
 
 (define (be-anchor a t)
-  ;; Hold position. The field drifts; when it has drifted away, let go.
   (vector-set! tx a (vector-ref px a))
   (vector-set! ty a (vector-ref py a))
   (vector-set! tz a (vector-ref pz a))
   (let loop ((t t))
     (step-toward! a (* 0.010 PACE) t)
-    (if (sensing? a)
-        (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
-          (vector-set! claim a v)
-          (if (< v CLAIM-OFF)
-              (begin
+    (paint-anchor a)
+    (yield)
+    (let ((t2 (+ t (tick))))
+      (if (not (sensing? a))
+          (loop t2)
+          (let ((v (sense-at a t)))
+            (vector-set! claim a v)
+            (let ((rival (out-claimed? a)))
+              (cond
+               (rival
+                (report! (string-append "actor " (number->string a)
+                                        " yields to " (number->string rival)))
+                (vector-set! claim a 0.0)
+                ;; LEAVE, do not merely stand down. A yielding actor that
+                ;; stays put re-senses the same ground within a few frames,
+                ;; re-anchors, and is beaten again — the thrash visible in
+                ;; the log as the same pair trading twice a second. Pushing
+                ;; away from the winner turns that into territory.
+                (vector-set! cooldown a COOLDOWN-PERIODS)
+                (yield-away! a rival)
+                (be-scout/keeping-target a t2))
+               ((< v CLAIM-OFF)
                 (report! (string-append "actor " (number->string a)
                                         " anchor -> scout, faded to "
                                         (number->string v)))
-                (be-scout a t)))
-          (let ((rival (out-claimed? a)))
-            (if rival
-                (begin
-                  (report! (string-append "actor " (number->string a)
-                                          " yields to " (number->string rival)))
-                  (vector-set! claim a 0.0)
-                  (be-scout a t))))))
-    (paint-anchor a)
-    (yield)
-    (loop (+ t (tick)))))
+                (be-scout a t2))
+               (else (loop t2)))))))))
 
 ;;; --- contention -------------------------------------------------------
 ;;; The one rule that makes this an ENSEMBLE rather than ninety-six agents
@@ -610,11 +668,18 @@
     (vector-set! py a (mix (vector-ref py a) gy r))
     (vector-set! pz a (mix (vector-ref pz a) gz r))))
 
-(define (paint-scout a)
-  ;; Bright enough to be PRESENT. A scout is subordinate, not absent, and
-  ;; watching one wander into a bright patch is the moment this is about.
+(define (ease-toward! a rad tr tg tb)
+  (vector-set! dr a (mix (vector-ref dr a) rad EASE))
+  (vector-set! dR a (mix (vector-ref dR a) tr EASE))
+  (vector-set! dG a (mix (vector-ref dG a) tg EASE))
+  (vector-set! dB a (mix (vector-ref dB a) tb EASE))
   (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
-                0.035 0.44 0.52 0.72))
+                (vector-ref dr a)
+                (vector-ref dR a) (vector-ref dG a) (vector-ref dB a)))
+
+;;; Bright enough to be PRESENT. A scout is subordinate, not absent, and
+;;; watching one wander into a bright patch is the moment this is about.
+(define (paint-scout a) (ease-toward! a 0.035 0.44 0.52 0.72))
 
 (define (paint-anchor a)
   (let* ((c (vector-ref claim a))
@@ -622,7 +687,7 @@
          ;; every anchor at the top of it, since none of them are below
          ;; CLAIM-OFF by definition.
          (hot (max 0.0 (min 1.0 (/ (- c CLAIM-OFF) 0.28)))))
-    (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
+    (ease-toward! a
                   (+ 0.05 (* 0.16 hot))
                   (+ 0.50 (* 0.50 hot))
                   (+ 0.30 (* 0.42 hot))
