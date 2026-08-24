@@ -441,7 +441,10 @@
 (define W (make-shared))
 (define WV (shared-view W))
 
-(scratch-attributes! '((pose :quat)))
+;;; Two stock attributes. `pose` turns each body; `shape` picks which
+;;; solid it is. Shape reads role faster than colour does, and unlike a
+;;; tint it survives being small and dim.
+(scratch-attributes! '((pose :quat) (shape :u32)))
 (define SCRATCH (make-scratch N))
 
 (wrangle-params! '(spread size twist))
@@ -714,6 +717,18 @@
                                 random_normal(0.0, 1.0)));
   let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
   attr_pose_set(i, q_from_rotvec(dir * w.p2));
+
+  // Shape from the actor's RADIUS, which is the one number already in the
+  // shared buffer that tracks its role — a scout sits at the floor, an
+  // anchor swells above it. Reading it here rather than sending a fourth
+  // number keeps the per-actor channel at seven floats.
+  //
+  // 0 tetrahedron, 1 octahedron, 2 cube: sharp, middling, settled. Because
+  // the radius EASES between roles, a swarm passes through the octahedron
+  // on the way, so a commitment reads as a shape changing rather than a
+  // size popping.
+  let big = shared_radii(a);
+  attr_shape_set(i, select(select(0u, 1u, big > 0.050), 2u, big > 0.105));
   // BRIGHTEN OUTWARD, not inward. The previous form darkened by rad, so
   // the cubes at the surface of a swarm — the only ones that reach the
   // eye — were at 45% while the fully occluded core sat at 100%. The

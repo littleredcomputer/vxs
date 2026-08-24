@@ -34,15 +34,46 @@
 ;; 6 faces x 2 triangles x 3 vertices. The draw call passes this constant,
 ;; so a shader array of a different length would read past its end.
 (assert-equal "36 vertices per cube" 36 cube-vertex-count)
-(assert-true "the shader array is the same length"
+;; THREE SOLIDS IN ONE TABLE, and the cube is the largest, so it still
+;; sets the draw's vertex count. A tetrahedron uses the first 12 entries
+;; and an octahedron the next 24; the rest collapse onto the centre, which
+;; is the same degenerate-triangle trick a released slot already relied on.
+(assert-equal "the shapes total 72 vertices" 72 shape-total)
+(assert-equal "and the cube is the largest, so it sets the draw"
+              cube-vertex-count (caddr shape-counts))
+(assert-equal "offsets follow the counts" '(0 12 36) shape-offsets)
+(assert-true "the shader array holds all of them"
              (string-contains? csrc
                                (string-append "array<vec3<f32>, "
-                                              (number->string cube-vertex-count)
-                                              ">")))
-(assert-true "six face normals, one per face"
-             (string-contains? csrc "array<vec3<f32>, 6>"))
-(assert-true "the normal is chosen by face, not by vertex"
-             (string-contains? csrc "norms[vi / 6u]"))
+                                              (number->string shape-total) ">")))
+;; ONE NORMAL PER VERTEX, not per face. The three solids have 3, 3 and 6
+;; vertices per face, so no single divisor can serve them all.
+(assert-true "there is a normal for every vertex"
+             (string-contains? csrc
+                               (string-append "var shape_nrm = array<vec3<f32>, "
+                                              (number->string shape-total) ">")))
+(assert-true "and it is indexed the same way the position is"
+             (string-contains? csrc "shape_nrm[idx], live)"))
+
+;; Normals are centroid directions, so every one points AWAY from the
+;; origin by construction and winding never has to be got right. A face
+;; wound backwards would light backwards rather than fail, which is the
+;; kind of wrong that survives review.
+(assert-true "every normal is unit length"
+             (let loop ((ns shape-nrm))
+               (cond ((null? ns) #t)
+                     ((> (abs (- 1.0 (sqrt (+ (* (caar ns) (caar ns))
+                                              (* (cadar ns) (cadar ns))
+                                              (* (caddar ns) (caddar ns))))))
+                         1e-9) #f)
+                     (else (loop (cdr ns))))))
+(assert-true "and points outward from the vertex it belongs to"
+             (let loop ((ps shape-pos) (ns shape-nrm))
+               (cond ((null? ps) #t)
+                     ((<= (+ (* (caar ps) (caar ns))
+                             (* (cadar ps) (cadar ns))
+                             (* (caddar ps) (caddar ns))) 0.0) #f)
+                     (else (loop (cdr ps) (cdr ns))))))
 
 ;;--- it must not billboard ----------------------------------------------
 ;; THE difference from lib/points.scm. A sprite adds its corner offset
@@ -51,7 +82,7 @@
 ;; flat hexagons that never rotate — which looks like a lighting bug.
 
 (assert-true "the offset is applied in world space"
-             (string-contains? csrc "let world = centre + verts[vi] * half;"))
+             (string-contains? csrc "let world = centre + lv * half;"))
 (assert-true "and the camera rotation is applied AFTER it"
              (string-contains? csrc "let rx = world.x * cy + world.z * sy;"))
 
@@ -113,7 +144,7 @@
 ;; the centre — every triangle degenerate, no fragments. That is what lets
 ;; the draw always submit the full capacity.
 (assert-true "size scales the offset, so size 0 is invisible"
-             (string-contains? csrc "verts[vi] * half"))
+             (string-contains? csrc "lv * half"))
 
 (assert-true "the cube shader indexes by the shared stride"
              (string-contains? csrc
@@ -159,12 +190,22 @@
 ;; order swings the cube around the origin.
 (assert-true "corners rotate about the centre, then translate"
              (string-contains? psrc
-               "let world = centre + q_rot(attr_pose(ii), verts[vi] * half);"))
+               "let world = centre + q_rot(attr_pose(ii), lv * half);"))
 ;; Rotating geometry without the normal leaves shading fixed to the world
 ;; while the faces move under it — which reads as a lighting bug.
 (assert-true "and the normal turns with them"
-             (string-contains? psrc
-               "let n = q_rot(attr_pose(ii), norms[vi / 6u]);"))
+             (string-contains? psrc "let n = q_rot(attr_pose(ii), bn);"))
+
+;;--- shapes are opt-in too ----------------------------------------------
+(scratch-attributes! '((shape :u32)))
+(define ssrc (cubes-wgsl))
+(assert-true "a declared shape attribute selects per instance"
+             (string-contains? ssrc "let sh = min(attr_shape(ii), 2u);"))
+(assert-true "and vertices past that shape's count collapse to the centre"
+             (string-contains? ssrc "let live = vi < shape_cnt[sh];"))
+(scratch-attributes! '())
+(assert-true "declaring none pins every instance to the cube"
+             (string-contains? (cubes-wgsl) "let sh = 2u;"))
 
 ;;--- the quaternion convention ------------------------------------------
 ;; (x y z w), scalar LAST, which is what makes q.xyz and q.w read cleanly

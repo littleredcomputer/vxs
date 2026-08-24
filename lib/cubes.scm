@@ -42,6 +42,118 @@
 ;; layer 21 asserts the shader against it.
 (define cube-vertex-count 36)
 
+
+;;--- the shape table ----------------------------------------------------
+;; Three solids in one draw call. An instance names a shape and the vertex
+;; shader reads its slice of a combined table; vertices past that shape's
+;; count collapse onto the centre, which is the same degenerate-triangle
+;; trick the cube already used for its own tail.
+;;
+;; So a tetrahedron costs 24 wasted vertices out of 36 and no extra draw,
+;; no second pipeline, and no per-shape instance sorting. The largest shape
+;; sets the count and the smaller ones ride along.
+;;
+;; GENERATED, not written out. A hundred and forty-four vectors typed by
+;; hand is a hundred and forty-four chances to transpose a sign, and the
+;; failure would be one dark facet nobody notices.
+;;
+;; Normals are CENTROID directions, not cross products. For a solid centred
+;; on the origin the centroid of a face already points out of it, so
+;; winding never has to be got right — which matters because a face wound
+;; the wrong way would light backwards rather than fail.
+
+(define (v3n x y z)
+  (let ((m (sqrt (+ (* x x) (* y y) (* z z)))))
+    (list (/ x m) (/ y m) (/ z m))))
+
+;; Circumradius sqrt(3) for all three, matching the cube's corners, so a
+;; shape swap changes the silhouette without changing the scale.
+(define shape-R 1.7320508075688772)
+
+(define tetra-verts
+  (list (list 1.0 1.0 1.0) (list 1.0 -1.0 -1.0)
+        (list -1.0 1.0 -1.0) (list -1.0 -1.0 1.0)))
+(define tetra-faces '((0 1 2) (0 2 3) (0 3 1) (1 3 2)))
+
+(define octa-verts
+  (let ((a shape-R))
+    (list (list a 0.0 0.0) (list (- a) 0.0 0.0)
+          (list 0.0 a 0.0) (list 0.0 (- a) 0.0)
+          (list 0.0 0.0 a) (list 0.0 0.0 (- a)))))
+(define octa-faces '((0 2 4) (0 4 3) (0 3 5) (0 5 2)
+                     (1 4 2) (1 3 4) (1 5 3) (1 2 5)))
+
+(define cube-corners
+  (let loop ((i 0) (acc '()))
+    (if (= i 8)
+        (reverse acc)
+        (loop (+ i 1)
+              (cons (list (if (= 0 (modulo i 2)) -1.0 1.0)
+                          (if (= 0 (modulo (quotient i 2) 2)) -1.0 1.0)
+                          (if (= 0 (quotient i 4)) -1.0 1.0))
+                    acc)))))
+;; Six quads, each as two triangles, wound consistently outward.
+(define cube-faces
+  '((0 2 6) (0 6 4) (1 5 7) (1 7 3)
+    (0 4 5) (0 5 1) (2 3 7) (2 7 6)
+    (0 1 3) (0 3 2) (4 6 7) (4 7 5)))
+
+;; -> (positions . normals), both flat lists of 3-element lists.
+(define (shape-triangles verts faces)
+  (let loop ((fs faces) (ps '()) (ns '()))
+    (if (null? fs)
+        (cons (reverse ps) (reverse ns))
+        (let* ((f (car fs))
+               (a (list-ref verts (car f)))
+               (b (list-ref verts (cadr f)))
+               (c (list-ref verts (caddr f)))
+               (n (v3n (+ (car a) (car b) (car c))
+                       (+ (cadr a) (cadr b) (cadr c))
+                       (+ (caddr a) (caddr b) (caddr c)))))
+          (loop (cdr fs) (cons c (cons b (cons a ps)))
+                (cons n (cons n (cons n ns))))))))
+
+(define tetra-tris (shape-triangles tetra-verts tetra-faces))
+(define octa-tris  (shape-triangles octa-verts octa-faces))
+(define cube-tris  (shape-triangles cube-corners cube-faces))
+
+(define shape-pos (append (car tetra-tris) (car octa-tris) (car cube-tris)))
+(define shape-nrm (append (cdr tetra-tris) (cdr octa-tris) (cdr cube-tris)))
+(define shape-counts (list (length (car tetra-tris))
+                           (length (car octa-tris))
+                           (length (car cube-tris))))
+(define shape-offsets
+  (list 0 (car shape-counts) (+ (car shape-counts) (cadr shape-counts))))
+(define shape-total (length shape-pos))
+
+(define (wgsl-vec3-list vs)
+  (wgsl-join
+   (map (lambda (v)
+          (string-append "    vec3<f32>(" (wgsl-number (car v)) ", "
+                         (wgsl-number (cadr v)) ", "
+                         (wgsl-number (caddr v)) ")"))
+        vs)
+   ",\n"))
+
+(define (wgsl-u32-list ns)
+  (wgsl-join (map (lambda (n) (string-append (number->string n) "u")) ns) ", "))
+
+(define (shape-table-wgsl)
+  (string-append
+   "  var shape_pos = array<vec3<f32>, " (number->string shape-total) ">(\n"
+   (wgsl-vec3-list shape-pos) "\n  );\n"
+   "  var shape_nrm = array<vec3<f32>, " (number->string shape-total) ">(\n"
+   (wgsl-vec3-list shape-nrm) "\n  );\n"
+   "  var shape_off = array<u32, 3>(" (wgsl-u32-list shape-offsets) ");\n"
+   "  var shape_cnt = array<u32, 3>(" (wgsl-u32-list shape-counts) ");\n"))
+
+;; An instance names its shape through a declared :u32 attribute called
+;; `shape`. Declaring none means every instance is a cube, which is what
+;; every program written before this expected.
+(define (cubes-shaped?)
+  (let ((a (assq 'shape scratch-attrs)))
+    (and a (eq? (cadr a) :u32))))
+
 ;; Is there a stock `pose` to honour? An attribute named pose, of type
 ;; :quat, is the convention — declare one and the cubes turn.
 (define (cubes-posed?)
@@ -69,11 +181,20 @@
    ;; The SAME buffer the compute pass writes, bound here read-only. No
    ;; second copy, no upload, no synchronisation to get wrong — the kernel
    ;; sets a pose and the renderer reads it out of the slot it was put in.
-   (if (cubes-posed?)
+   ;; Bound when EITHER attribute is declared, and each accessor emitted
+   ;; only for the one that was — a getter for an attribute nobody declared
+   ;; would reference an offset that does not exist.
+   (if (or (cubes-posed?) (cubes-shaped?))
        (string-append
         "@group(0) @binding(2) var<storage, read> scratch : array<f32>;\n"
-        (scratch-accessors 'pose :quat (scratch-offset 'pose) #t)
-        (embedded-source "quat.wgsl") "\n")
+        (if (cubes-posed?)
+            (string-append
+             (scratch-accessors 'pose :quat (scratch-offset 'pose) #t)
+             (embedded-source "quat.wgsl") "\n")
+            "")
+        (if (cubes-shaped?)
+            (scratch-accessors 'shape :u32 (scratch-offset 'shape) #t)
+            ""))
        "")
    "\n"
    "struct VSOut {\n"
@@ -84,23 +205,7 @@
    "@vertex\n"
    "fn vs(@builtin(vertex_index) vi : u32,\n"
    "      @builtin(instance_index) ii : u32) -> VSOut {\n"
-   "  var verts = array<vec3<f32>, 36>(\n"
-   "    vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(1.0, 1.0, -1.0), vec3<f32>(1.0, 1.0, 1.0),\n"
-   "    vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, -1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(-1.0, 1.0, -1.0), vec3<f32>(-1.0, -1.0, -1.0),\n"
-   "    vec3<f32>(-1.0, 1.0, -1.0), vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>(1.0, 1.0, 1.0),\n"
-   "    vec3<f32>(-1.0, 1.0, -1.0), vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(1.0, 1.0, -1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(-1.0, -1.0, -1.0), vec3<f32>(1.0, -1.0, -1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(1.0, -1.0, 1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0), vec3<f32>(1.0, 1.0, 1.0),\n"
-   "    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0),\n"
-   "    vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(-1.0, -1.0, -1.0), vec3<f32>(-1.0, 1.0, -1.0),\n"
-   "    vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(-1.0, 1.0, -1.0), vec3<f32>(1.0, 1.0, -1.0)\n"
-   "  );\n"
-   "  var norms = array<vec3<f32>, 6>(\n"
-   "    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0)\n"
-   "  );\n"
+   (shape-table-wgsl)
    "\n"
    "  let base = ii * " points-stride-wgsl ";\n"
    "  let centre = vec3<f32>(pts[base + 0u], pts[base + 1u], pts[base + 2u]);\n"
@@ -111,11 +216,20 @@
    "  // always faces the camera; a cube adds it here, before, so it rotates\n"
    "  // with the scene and can show you a different face as you orbit. That\n"
    "  // is also why a cube needs an orientation and a sprite does not.\n"
-   ;; Rotate the corner about the cube's own centre, then place it. The
-   ;; other order would swing the cube around the origin instead.
+   ;; Pick this instance's shape, and collapse the vertices it does not
+   ;; use onto the centre — a zero-area triangle the rasteriser discards.
+   ;; That is how three solids share one draw call and one vertex count.
+   (if (cubes-shaped?)
+       "  let sh = min(attr_shape(ii), 2u);\n"
+       "  let sh = 2u;\n")
+   "  let live = vi < shape_cnt[sh];\n"
+   "  let idx = shape_off[sh] + vi;\n"
+   "  let lv = select(vec3<f32>(0.0, 0.0, 0.0), shape_pos[idx], live);\n"
+   ;; Rotate the corner about the shape's own centre, then place it. The
+   ;; other order would swing it around the origin instead.
    (if (cubes-posed?)
-       "  let world = centre + q_rot(attr_pose(ii), verts[vi] * half);\n"
-       "  let world = centre + verts[vi] * half;\n")
+       "  let world = centre + q_rot(attr_pose(ii), lv * half);\n"
+       "  let world = centre + lv * half;\n")
    "\n"
    "  let cy = cos(u.yaw);\n"
    "  let sy = sin(u.yaw);\n"
@@ -131,12 +245,16 @@
    "  // in the fragment stage because all three vertices of a face share a\n"
    "  // normal, so the interpolated result would be constant anyway. Without\n"
    "  // any shading a cube is a flat silhouette and reads as a hexagon.\n"
+   ;; One normal PER VERTEX rather than per face, because the three solids
+   ;; have different vertices-per-face (3, 3 and 6) and a single divisor
+   ;; cannot serve them all.
+   "  let bn = select(vec3<f32>(0.0, 1.0, 0.0), shape_nrm[idx], live);\n"
    ;; The NORMAL turns too. Rotating the geometry and not the normal
    ;; leaves the shading fixed to the world while the faces move under it,
    ;; which reads as a lighting bug rather than as a pose.
    (if (cubes-posed?)
-       "  let n = q_rot(attr_pose(ii), norms[vi / 6u]);\n"
-       "  let n = norms[vi / 6u];\n")
+       "  let n = q_rot(attr_pose(ii), bn);\n"
+       "  let n = bn;\n")
    ;; KEY, FILL AND SKY. One light with a flat ambient floor leaves every
    ;; face turned away from it at exactly the same brightness, which
    ;; flattens the very geometry the cubes are here to show — two thirds of
