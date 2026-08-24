@@ -44,6 +44,14 @@
 ;;; ==========================================================
 
 (load "lib/noise.scm")
+;;; Loaded explicitly, so this demo is self-contained and so its
+;;; declarations start from a known state: lib/wrangle.scm re-runs its
+;;; (define scratch-attrs '()) on load, and a demo that inherited an
+;;; earlier one's attributes would emit a scratch binding nothing binds.
+;;; Seven of the ten demos already did this; these two relied on declaring
+;;; everything themselves, which works until one of them does not.
+(load "lib/gpu.scm")
+
 
 (define NACTORS 96)
 (define PER-ACTOR 640)

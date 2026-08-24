@@ -36,45 +36,50 @@
 (define cam (make-camera))
 (define seed-buf (make-points N))   ; contents irrelevant: the GPU overwrites
 
-(define kernel "
-  // Three independent normals place the point; a gamma draw gives it an
-  // orbital offset, so the cloud shears rather than rotating rigidly.
-  let x0 = random_normal(0.0, 0.34);
-  let y0 = random_normal(0.0, 0.10);
-  let z0 = random_normal(0.0, 0.34);
-  let g  = random_gamma(2.0, 2.6);
+(define kernel
+  '(let* (;; Three independent normals place the point; a gamma draw gives
+          ;; it an orbital offset, so the cloud shears rather than rotating
+          ;; rigidly.
+          ;;
+          ;; ORDER MATTERS HERE, and let* is what guarantees it: the
+          ;; generator is stateful, so these four draws must happen in this
+          ;; sequence for a point to land where it landed last frame.
+          (x0 (random-normal 0.0 0.34))
+          (y0 (random-normal 0.0 0.10))
+          (z0 (random-normal 0.0 0.34))
+          (g  (random-gamma 2.0 2.6))
 
-  let r  = length(vec2<f32>(x0, z0));
-  let a  = w.time * (0.25 + 0.55 / (0.35 + r)) + g;
-  let ca = cos(a);
-  let sa = sin(a);
+          (r  (length (vec2 x0 z0)))
+          (a  (+ (* time (+ 0.25 (/ 0.55 (+ 0.35 r)))) g))
+          (ca (cos a))
+          (sa (sin a))
+          (p  (vec3 (- (* x0 ca) (* z0 sa))
+                    (* y0 (+ 1.0 (* 0.25 (sin (+ (* time 0.6) g)))))
+                    (+ (* x0 sa) (* z0 ca))))
 
-  let p = vec3<f32>(x0 * ca - z0 * sa,
-                    y0 * (1.0 + 0.25 * sin(w.time * 0.6 + g)),
-                    x0 * sa + z0 * ca);
+          ;; Temperature = joint log-density of this point's own position,
+          ;; under the very distribution that placed it. The y term
+          ;; dominates because its scale is smallest, which is what makes
+          ;; the disc read as a disc.
+          (lp (+ (logpdf-normal x0 0.0 0.34)
+                 (logpdf-normal y0 0.0 0.10)
+                 (logpdf-normal z0 0.0 0.34)))
 
-  // Temperature = joint log-density of this point's own position, under
-  // the very distribution that placed it. The y term dominates because
-  // its scale is smallest, which is what makes the disc read as a disc.
-  let lp = logpdf_normal(x0, 0.0, 0.34)
-         + logpdf_normal(y0, 0.0, 0.10)
-         + logpdf_normal(z0, 0.0, 0.34);
+          ;; The ramp has a cool end, so the band can span it. Measured
+          ;; against the actual densities:
+          ;;   mode  -> 0.96  white      1 sigma -> 0.84  amber
+          ;;   1.5s  -> 0.61  red-orange 2 sigma -> 0.26  magenta
+          ;;   3 sig -> 0.00  dim violet
+          ;; A previous band peaked at orange because the ramp topped out
+          ;; at white and the dense core accumulates toward white on its
+          ;; own. With a violet tail underneath, the core can be allowed
+          ;; white per-point: most of the visible area is the long cool
+          ;; run, not the peak.
+          (temp (smoothstep -8.0 3.0 lp)))
 
-// The ramp now has a cool end, so the band can span it. Measured against
-  // the actual densities:
-  //   mode  -> 0.96  white      1 sigma -> 0.84  amber
-  //   1.5s  -> 0.61  red-orange 2 sigma -> 0.26  magenta
-  //   3 sig -> 0.00  dim violet
-  // A previous band peaked at orange because the ramp topped out at white
-  // and the dense core accumulates toward white on its own. With a violet
-  // tail underneath, the core can be allowed white per-point: most of the
-  // visible area is now the long cool run, not the peak.
-  let temp = smoothstep(-8.0, 3.0, lp);
+     (point p (+ 0.0030 (* 0.0016 temp)) (heat-colour temp))))
 
-  pt_write(i, p, 0.0030 + 0.0016 * temp, heat_colour(temp));
-")
-
-(define wrangle-src (wrangle-wgsl kernel))
+(define wrangle-src (wrangle-scheme kernel))
 
 (define (frame! t) (orbit-camera! cam))
 

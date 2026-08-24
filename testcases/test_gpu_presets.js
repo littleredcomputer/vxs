@@ -71,6 +71,28 @@ function extractPresets(names) {
 // the script offers must have a file. Drift between the three is silent in
 // the browser — a dropdown entry that loads nothing — so it is checked
 // here instead.
+// Every demo must load lib/gpu.scm itself.
+//
+// Declarations like scratch-attributes! are GLOBAL, and the page does not
+// reset the VM between presets — it only clears fibers. A demo that
+// inherited an earlier one's attributes would emit a scratch binding that
+// nothing binds, which is a validation failure rather than a wrong picture,
+// but only on the particular order someone happened to click.
+//
+// Loading lib/gpu.scm re-runs lib/wrangle.scm, whose (define scratch-attrs
+// '()) puts the declarations back to a known state. Seven demos already did
+// this; two relied on declaring everything themselves, which works right up
+// until one of them stops.
+function checkDemosAreSelfContained(names) {
+  for (const n of names) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'demos', n + '.scm'), 'utf8');
+    if (src.indexOf('(load "lib/gpu.scm")') < 0) {
+      throw new Error(`demos/${n}.scm does not load lib/gpu.scm, so it inherits ` +
+                      `whatever the previously loaded demo declared`);
+    }
+  }
+}
+
 function checkManifest() {
   const app = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
   const block = app.slice(app.indexOf('const PRESET_NAMES = ['));
@@ -101,6 +123,7 @@ function checkManifest() {
 (async () => {
   checkAppParses();
   checkManifest();
+  checkDemosAreSelfContained(GPU_PRESETS);
   const presets = extractPresets(GPU_PRESETS);
 
   // Presets talk to the page. Keep their chatter out of the report, but
