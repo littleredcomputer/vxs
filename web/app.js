@@ -518,9 +518,9 @@
 ;;; actor knows immediately; the swarm takes about a third of a second to
 ;;; agree. Nothing about the dynamics changes — only what you can follow.
 (define dr (make-vector NACTORS 0.035))
-(define dR (make-vector NACTORS 0.44))
-(define dG (make-vector NACTORS 0.52))
-(define dB (make-vector NACTORS 0.72))
+(define dR (make-vector NACTORS 0.22))
+(define dG (make-vector NACTORS 0.62))
+(define dB (make-vector NACTORS 1.00))
 (define EASE 0.10)
 
 (define (field x y z t)
@@ -754,7 +754,10 @@
 
 ;;; Bright enough to be PRESENT. A scout is subordinate, not absent, and
 ;;; watching one wander into a bright patch is the moment this is about.
-(define (paint-scout a) (ease-toward! a 0.035 0.44 0.52 0.72))
+;;; Saturated, not tinted grey. Against black, a colour with all three
+;;; channels near each other reads as dim no matter how bright it is —
+;;; what makes something look lit is the SPREAD between channels.
+(define (paint-scout a) (ease-toward! a 0.035 0.22 0.62 1.00))
 
 (define (paint-anchor a)
   (let* ((c (vector-ref claim a))
@@ -762,11 +765,15 @@
          ;; every anchor at the top of it, since none of them are below
          ;; CLAIM-OFF by definition.
          (hot (max 0.0 (min 1.0 (/ (- c CLAIM-OFF) 0.28)))))
+    ;; Violet when barely holding, amber when strong — two ends of a real
+    ;; ramp rather than one colour getting lighter. The blue channel FALLS
+    ;; as the red rises, which is what makes the two states distinguishable
+    ;; at a glance across a crowded volume.
     (ease-toward! a
                   (+ 0.05 (* 0.16 hot))
-                  (+ 0.50 (* 0.50 hot))
-                  (+ 0.30 (* 0.42 hot))
-                  (+ 0.38 (* 0.22 (- 1.0 hot))))))
+                  (+ 0.55 (* 0.45 hot))
+                  (+ 0.14 (* 0.62 hot))
+                  (- 0.85 (* 0.68 hot)))))
 
 ;;; --- the expansion ---------------------------------------------------
 (define (u32-text n) (string-append (number->string n) "u"))

@@ -285,7 +285,27 @@
    "\n"
    "  var o : VSOut;\n"
    "  o.pos = vec4<f32>(rx * u.fov / aspect, ry * u.fov, a * zc + b, zc);\n"
-   "  o.tint = vec3<f32>(pts[base + 4u], pts[base + 5u], pts[base + 6u]) * shade;\n"
+   ;; A RIM, which is the cheap half of glow. Real bloom needs a second
+   ;; pass, a render target and a blur; this needs one dot product. The
+   ;; silhouette of a solid — where its surface turns away from the eye —
+   ;; lights up, and against a black background that is what glowing looks
+   ;; like. It also does something bloom does not: it draws the EDGE of
+   ;; every body, so a cloud of them reads as many objects rather than one
+   ;; mass.
+   ;;
+   ;; The normal has to come into camera space to be compared with the view
+   ;; direction, by the same yaw-then-pitch the position already took.
+   "  let nx = n.x * cy + n.z * sy;\n"
+   "  let nz0 = n.z * cy - n.x * sy;\n"
+   "  let ncam = vec3<f32>(nx, n.y * cp - nz0 * sp, nz0 * cp + n.y * sp);\n"
+   "  let vdir = normalize(vec3<f32>(rx, ry, zc));\n"
+   "  let rim = pow(1.0 - abs(dot(normalize(ncam), vdir)), 2.5);\n"
+   "\n"
+   "  let hue = vec3<f32>(pts[base + 4u], pts[base + 5u], pts[base + 6u]);\n"
+   ;; Gamma below one lifts the midtones without touching the ends, which
+   ;; is what makes a dim scene brighter rather than merely whiter — a
+   ;; linear multiply would clip the highlights first and desaturate them.
+   "  o.tint = pow(hue * shade + hue * rim * 0.85, vec3<f32>(0.80));\n"
    "  return o;\n"
    "}\n"
    "\n"

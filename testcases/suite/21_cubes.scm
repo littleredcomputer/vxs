@@ -124,6 +124,26 @@
 (assert-true "shading never reaches zero, so unlit faces stay visible"
              (string-contains? csrc "let shade = sky + 0.56 * key + 0.20 * fill;"))
 
+;; A RIM is the cheap half of glow: real bloom wants a second pass, a
+;; render target and a blur, while this is one dot product against the
+;; view direction. It also does something bloom does not — it draws the
+;; EDGE of every body, so a crowd of them reads as many objects rather
+;; than one mass.
+(assert-true "the silhouette lights up"
+             (string-contains? csrc
+               "let rim = pow(1.0 - abs(dot(normalize(ncam), vdir)), 2.5);"))
+;; The normal must reach camera space to be compared with the view
+;; direction, by the same yaw-then-pitch the position takes. Comparing a
+;; world normal against a camera-space view vector would put the rim in the
+;; wrong place and swing it as the camera orbits.
+(assert-true "and the normal is brought into camera space to find it"
+             (string-contains? csrc "let ncam = vec3<f32>(nx, n.y * cp - nz0 * sp,"))
+;; Gamma below one lifts midtones without touching the ends. A linear
+;; multiply would clip the highlights first and desaturate them, which
+;; makes a scene whiter rather than brighter.
+(assert-true "midtones are lifted, not multiplied"
+             (string-contains? csrc "vec3<f32>(0.80));"))
+
 ;;--- the coupling with the point buffer ---------------------------------
 ;; Same seven floats as lib/points.scm. If the stride drifts, cubes read
 ;; their neighbours' attributes and nothing errors.
