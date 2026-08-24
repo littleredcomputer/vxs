@@ -319,7 +319,10 @@
 
   async function fetchPreset(name) {
     if (presetCache[name]) return presetCache[name];
-    const url = 'demos/' + name + '.scm';
+    // ../demos, not demos: this page is web/index.html and is served from
+    // the REPO ROOT, so a bare relative path resolves inside web/. Same
+    // convention the lib watcher and the watch-path default already use.
+    const url = '../demos/' + name + '.scm';
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
     const text = await res.text();
@@ -439,7 +442,7 @@
     try {
       editor.value = await fetchPreset(name);
     } catch (e) {
-      logToTerm(`cannot load demos/${name}.scm — ${e.message}. ` +
+      logToTerm(`cannot load ../demos/${name}.scm — ${e.message}. ` +
                 `Serve from the repo root ("python3 serve.py"), not from web/.`, 'err');
       return;
     }

@@ -77,9 +77,18 @@ function checkManifest() {
   const named = block.slice(0, block.indexOf(']')).match(/'([a-z]+)'/g).map((q) => q.slice(1, -1));
   const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.html'), 'utf8');
   const options = (html.match(/<option value="([a-z]+)"/g) || []).map((m) => m.slice(15, -1));
+  // RESOLVE THE URL THE WAY A BROWSER WOULD: relative to web/index.html,
+  // which is where the page lives even though it is served from the repo
+  // root. A bare 'demos/...' resolves to web/demos/... and 404s on every
+  // preset — which is exactly what shipped, because existsSync from the
+  // test's own directory said the files were fine.
+  const m = app.match(/const url = '([^']*)' \+ name \+ '\.scm';/);
+  if (!m) throw new Error('cannot find the demo URL in app.js');
   for (const n of named) {
-    if (!fs.existsSync(path.join(__dirname, '..', 'demos', n + '.scm'))) {
-      throw new Error(`app.js offers "${n}" but demos/${n}.scm does not exist`);
+    const resolved = path.join(__dirname, '..', 'web', m[1] + n + '.scm');
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`app.js fetches "${m[1]}${n}.scm", which resolves to ` +
+                      `${resolved} from web/index.html — nothing there`);
     }
   }
   for (const o of options) {
