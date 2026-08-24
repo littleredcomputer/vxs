@@ -441,7 +441,7 @@
 (define W (make-shared))
 (define WV (shared-view W))
 
-;;; Two stock attributes. `pose` turns each body; `shape` picks which
+;;; Two stock attributes. 'pose' turns each body; 'shape' picks which
 ;;; solid it is. Shape reads role faster than colour does, and unlike a
 ;;; tint it survives being small and dim.
 (scratch-attributes! '((pose :quat) (shape :u32)))

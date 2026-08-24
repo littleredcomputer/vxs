@@ -30,6 +30,43 @@ const createVxsModule = require(path.join(__dirname, '..', 'web', 'vxs.js'));
 
 const GPU_PRESETS = ['plasma', 'rings', 'points', 'wrangle', 'actors', 'cubes', 'field', 'ensemble'];
 
+// Does web/app.js actually PARSE as JavaScript?
+//
+// Everything else here extracts preset text by hand and evaluates it as
+// Scheme, which means a JavaScript syntax error in the file sails straight
+// through: the extractor finds its markers, the preset runs, every test
+// passes, and the browser then refuses to load the page at all. That
+// happened — a backtick inside a Scheme comment, `pose`, closed the
+// template literal early and killed the whole application while this suite
+// stayed green.
+//
+// One `node --check` costs nothing and catches the entire class.
+function checkAppParses() {
+  const { execFileSync } = require('child_process');
+  const app = path.join(__dirname, '..', 'web', 'app.js');
+  try {
+    execFileSync(process.execPath, ['--check', app], { stdio: 'pipe' });
+  } catch (e) {
+    throw new Error('web/app.js is not valid JavaScript:\n' +
+                    String(e.stderr || e.message).split('\n').slice(0, 6).join('\n'));
+  }
+}
+
+// A preset body lives inside a JS template literal, so a backtick or a
+// ${ } in Scheme source terminates it early. The Scheme is comment-heavy
+// and backticks are natural punctuation in prose, which makes this an easy
+// mistake and an invisible one.
+function checkPresetQuoting(presets) {
+  for (const [name, code] of Object.entries(presets)) {
+    if (code.indexOf('`') >= 0) {
+      throw new Error(`preset ${name} contains a backtick, which ends its template literal`);
+    }
+    if (code.indexOf('${') >= 0) {
+      throw new Error(`preset ${name} contains \${, which interpolates inside its template literal`);
+    }
+  }
+}
+
 function extractPresets(names) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
   const body = src.slice(src.indexOf('const PRESETS = {'));
@@ -47,7 +84,9 @@ function extractPresets(names) {
 }
 
 (async () => {
+  checkAppParses();
   const presets = extractPresets(GPU_PRESETS);
+  checkPresetQuoting(presets);
 
   // Presets talk to the page. Keep their chatter out of the report, but
   // watch it: a dead fiber announces itself here and nowhere else, and a
