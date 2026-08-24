@@ -528,6 +528,39 @@ exists yet.
 `if` also hoists **both** arms' `let`-lifted statements, not just the tail
 expression.
 
+### A wrangle in Scheme
+
+`wrangle-wgsl` takes WGSL text and remains the escape hatch. `wrangle-scheme`
+takes an expression and compiles it:
+
+```scheme
+(wrangle-scheme
+  `(let* ((q   (+ (* position scale) (vec3 (* time drift) 0.0 0.0)))
+          (f   (perlin3v q field-seed))
+          (mag (length f)))
+     (point position (* gain mag) (heat-colour mag)
+            (pose (q-from-rotvec (* f twist))))))
+```
+
+A body sees `position`/`P`, `pscale`, `colour`/`color`/`Cd`, `index`, every
+declared parameter and attribute, and everything in the kernel language. It
+must end in `point`, whose type no operator accepts — which is what confines
+it to terminal position rather than a rule to remember.
+
+**Fields are total, attributes are partial**, and the asymmetry is legible
+from the storage layout: `pt_write` is one packed write of seven floats, so
+a partial point would have to read back what it did not mention, while
+attribute setters are independent and omitting one emits nothing. Name the
+input to say "unchanged" — `(point position pscale colour)`.
+
+Attribute names are checked against `scratch-attributes!`, so a misspelling
+fails at expand time with the name in hand rather than at shader compile as
+an unresolved call.
+
+⚠️ A knob may share a name with a builtin function without shadowing it —
+operator position and variable position are separate. A parameter called
+`floor` resolves to its slot, and `(floor x)` still calls the function.
+
 ### Bounded folds
 
 The kernel language is pure-expression, and `fold-i` keeps it that way: an
@@ -778,48 +811,6 @@ does not change.
 Building the index array on the host is practical rather than a fallback:
 a single O(N) pass over 60k elements is ~120k simple VM operations, a few
 milliseconds, and nothing needs it every frame.
-
-#### `point`: a terminal form for wrangle bodies
-
-Today a wrangle body is WGSL text. Everything above its final writes is
-already pure — `let`-bound expressions, no effects, no order dependence —
-so the body is really
-
-```
-(state, randomness) → (new position, new colour, new attributes)
-```
-
-with the only effects at the very end, together. That needs no statements
-in the kernel language, only a terminal form:
-
-```scheme
-(define-wrangle drift
-  (let* ((cur  (* position inv-s))
-         (prop (+ cur (vec3 (random-normal 0.0 sigma)
-                            (random-normal 0.0 sigma)
-                            (random-normal 0.0 sigma))))
-         (keep (< (random-uniform 0.0 1.0) rate))
-         (nxt  (if keep prop cur)))
-    (point (* nxt s) size (heat-colour (length nxt)) :age (+ age 1.0))))
-```
-
-Two rules, both legible from the storage layout rather than memorised:
-
-- **Point fields are total.** `pt_write` is one packed write of seven
-  floats, so a partial point must read back what it does not mention.
-  Naming the input — `(point pos size colour)` — makes that visible, and
-  `(point pos)` simply does not parse.
-- **Attributes are partial.** They are written by independent setters into
-  a separate buffer, so omitting one means not emitting its setter. No
-  read-modify-write, nothing hidden.
-
-Keywords validate against `scratch-attributes!`, so `:acceptence` fails at
-expand time.
-
-This also finishes something half-built: `wrangle-env` already resolves a
-declared parameter to `w.p0` and a declared attribute to `attr_…(i)`, and
-nothing consumes those bindings yet, because no body is compiled from
-Scheme.
 
 #### `define-once`
 
