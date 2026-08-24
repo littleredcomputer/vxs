@@ -396,7 +396,9 @@
 ;;; no such option — it recomputes everything, every frame,
 ;;; whether or not anything changed.
 ;;;
-;;; THE KNOB: (set! DRIFT x) in the REPL, 0.0 to 1.0.
+;;; TWO KNOBS, both live from the REPL:
+;;;   (set! PACE 0.15)   slower, to watch a hand-off happen
+;;;   (set! DRIFT x)     0.0 to 1.0, described below
 ;;;   1.0  the stage-1 picture — prescribed orbits, no sensing
 ;;;   0.0  pure seeking
 ;;; Anything between dissolves one into the other.
@@ -415,6 +417,12 @@
 ;;; seconds. Slower and anchors are never dislodged, so the ensemble
 ;;; ratchets to all-anchors and stops being about anything.
 (define FIELD-SPEED 0.55)
+
+;;; THE OTHER KNOB. Everything that moves is scaled by this — the field's
+;;; drift, the actors' approach, the simulation clock — so slowing down to
+;;; watch a hand-off does not also change the equilibrium. Tuning the three
+;;; constants separately would.
+(define PACE 0.40)
 (define FIELD-SEED 20260823)
 ;;; MEASURED, not guessed. Sampling the field over the volume:
 ;;;   |v| > 0.30 covers 12% of space,  |v| > 0.18 covers 32%.
@@ -509,7 +517,7 @@
   (vector-set! tz a (wander))
   (vector-set! claim a 0.0)
   (let loop ((t t))
-    (step-toward! a 0.045 t)
+    (step-toward! a (* 0.045 PACE) t)
     (if (sensing? a)
         (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
           (if (> v CLAIM-ON)
@@ -526,7 +534,7 @@
                          (vector-set! tz a (wander)))))))
     (paint-scout a)
     (yield)
-    (loop (+ t 0.016))))
+    (loop (+ t (tick)))))
 
 (define (be-anchor a t)
   ;; Hold position. The field drifts; when it has drifted away, let go.
@@ -534,7 +542,7 @@
   (vector-set! ty a (vector-ref py a))
   (vector-set! tz a (vector-ref pz a))
   (let loop ((t t))
-    (step-toward! a 0.010 t)
+    (step-toward! a (* 0.010 PACE) t)
     (if (sensing? a)
         (let ((v (abs (field (vector-ref px a) (vector-ref py a) (vector-ref pz a) t))))
           (vector-set! claim a v)
@@ -553,7 +561,7 @@
                   (be-scout a t))))))
     (paint-anchor a)
     (yield)
-    (loop (+ t 0.016))))
+    (loop (+ t (tick)))))
 
 ;;; --- contention -------------------------------------------------------
 ;;; The one rule that makes this an ENSEMBLE rather than ninety-six agents
@@ -597,14 +605,16 @@
   (let* ((gx (mix (vector-ref tx a) (orbit-x a t) DRIFT))
          (gy (mix (vector-ref ty a) (orbit-y a t) DRIFT))
          (gz (mix (vector-ref tz a) (orbit-z a t) DRIFT))
-         (r (if (> DRIFT 0.5) 0.10 rate)))
+         (r (if (> DRIFT 0.5) (* 0.10 PACE) rate)))
     (vector-set! px a (mix (vector-ref px a) gx r))
     (vector-set! py a (mix (vector-ref py a) gy r))
     (vector-set! pz a (mix (vector-ref pz a) gz r))))
 
 (define (paint-scout a)
+  ;; Bright enough to be PRESENT. A scout is subordinate, not absent, and
+  ;; watching one wander into a bright patch is the moment this is about.
   (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
-                0.035 0.24 0.28 0.40))
+                0.035 0.44 0.52 0.72))
 
 (define (paint-anchor a)
   (let* ((c (vector-ref claim a))
@@ -614,9 +624,9 @@
          (hot (max 0.0 (min 1.0 (/ (- c CLAIM-OFF) 0.28)))))
     (actor-write! a (vector-ref px a) (vector-ref py a) (vector-ref pz a)
                   (+ 0.05 (* 0.16 hot))
-                  (+ 0.35 (* 0.65 hot))
-                  (+ 0.18 (* 0.42 hot))
-                  (+ 0.30 (* 0.25 (- 1.0 hot))))))
+                  (+ 0.50 (* 0.50 hot))
+                  (+ 0.30 (* 0.42 hot))
+                  (+ 0.38 (* 0.22 (- 1.0 hot))))))
 
 ;;; --- the expansion ---------------------------------------------------
 (define (u32-text n) (string-append (number->string n) "u"))
@@ -639,13 +649,18 @@
                                 random_normal(0.0, 1.0)));
   let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
   attr_pose_set(i, q_from_rotvec(dir * w.p2));
+  // BRIGHTEN OUTWARD, not inward. The previous form darkened by rad, so
+  // the cubes at the surface of a swarm — the only ones that reach the
+  // eye — were at 45% while the fully occluded core sat at 100%. The
+  // shading was being spent entirely on cubes nobody can see.
   pt_write(i, c + dir * (rad * r), 0.006 * w.p1,
-           tint * (0.45 + 0.55 * (1.0 - rad)));
+           tint * (0.70 + 0.35 * rad));
 ")))
 
 (define cam (make-camera))
 (camera-distance-set! cam 3.0)
 (define (frame! t) (set! frames (+ frames 1)) (orbit-camera! cam))
+(define (tick) (* 0.016 PACE))
 
 (display "ensemble: ") (display NACTORS) (display " actors, ")
 (display N) (display " bodies. Sensing every ") (display SENSE-EVERY)
