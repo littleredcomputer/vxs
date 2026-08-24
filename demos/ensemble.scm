@@ -418,67 +418,80 @@
                   (+ 0.14 (* 0.62 hot))
                   (- 0.85 (* 0.68 hot)))))
 
-;;; --- the expansion ---------------------------------------------------
-(define (u32-text n) (string-append (number->string n) "u"))
+;;; --- the expansion, in Scheme --------------------------------------
+;;; No WGSL text. lib/wgsl.scm compiles this and type-checks it first, so
+;;; mixing a vec2 with a vec3, or handing an attribute the wrong type, is
+;;; an error HERE with the form in hand rather than a shader compile log
+;;; naming a line of generated text.
+;;;
+;;; wrangle-wgsl is still there and still the escape hatch — this is the
+;;; same kernel it used to hold, not a smaller one.
+;;;
+;;; PER-ACTOR reaches the shader through quasiquote rather than as a second
+;;; copy of the number. Getting that wrong would not fail: bodies would
+;;; simply obey the wrong actor and render something entirely plausible.
+(define kernel
+  (wrangle-scheme
+   `(let* (;; Who commands me. Integer division, so each block of
+           ;; consecutive bodies belongs to one actor — which also means an
+           ;; actor's swarm is contiguous in memory and one coherent read.
+           (a     (/ index (u32 ,PER-ACTOR)))
+           (a3    (* a (u32 3)))
+           (c     (vec3 (shared-centres a3)
+                        (shared-centres (+ a3 (u32 1)))
+                        (shared-centres (+ a3 (u32 2)))))
+           (r     (* (shared-radii a) spread))
+           (tint  (vec3 (shared-tints a3)
+                        (shared-tints (+ a3 (u32 1)))
+                        (shared-tints (+ a3 (u32 2)))))
 
-(define kernel (wrangle-wgsl (string-append "
-  let a = i / " (u32-text PER-ACTOR) ";
-  let c = vec3<f32>(shared_centres(a * 3u),
-                    shared_centres(a * 3u + 1u),
-                    shared_centres(a * 3u + 2u));
-  let r = shared_radii(a) * w.p0;
-  let tint = vec3<f32>(shared_tints(a * 3u),
-                       shared_tints(a * 3u + 1u),
-                       shared_tints(a * 3u + 2u));
+           ;; A stable station within the formation. The preamble has
+           ;; already seeded the generator from this body's index, and the
+           ;; seed does not change between frames, so these draws are the
+           ;; SAME every frame — a body holds its place while the formation
+           ;; moves.
+           (dir   (normalize (vec3 (random-normal 0.0 1.0)
+                                   (random-normal 0.0 1.0)
+                                   (random-normal 0.0 1.0))))
+           ;; Cube root of a uniform gives uniform density in the ball;
+           ;; without it every swarm is a shell with nothing inside.
+           (rad   (pow (random-uniform 0.0 1.0) 0.3333333))
 
-  // Stable within the formation: the preamble seeds from this cube's
-  // index and the seed does not change, so a swarm keeps its shape while
-  // its owner moves it.
-  let dir = normalize(vec3<f32>(random_normal(0.0, 1.0),
-                                random_normal(0.0, 1.0),
-                                random_normal(0.0, 1.0)));
-  let rad = pow(random_uniform(0.0, 1.0), 0.3333333);
+           ;; THE CLOUD TURNS. Because each body's direction is fixed, a
+           ;; swarm is a RIGID BODY and rotating it means rotating that
+           ;; direction. The spin is a rotation vector — axis times rate —
+           ;; and the angle is that times the clock, so a cloud tumbles
+           ;; forever with the host sending nothing per frame.
+           (spin  (vec3 (shared-spins a3)
+                        (shared-spins (+ a3 (u32 1)))
+                        (shared-spins (+ a3 (u32 2)))))
+           (sd    (q-rot (q-from-rotvec (* spin time)) dir))
 
-  // THE CLOUD TURNS. Each cube's direction within the formation is fixed —
-  // drawn once from its own index and never redrawn — so a swarm is a
-  // RIGID BODY, and rotating it means rotating that direction. The spin is
-  // a rotation vector in the shared buffer, axis times rate, and the angle
-  // is that times the clock: a cloud tumbles forever with the host sending
-  // nothing per frame.
-  let spin = vec3<f32>(shared_spins(a * 3u),
-                       shared_spins(a * 3u + 1u),
-                       shared_spins(a * 3u + 2u));
-  let sd = q_rot(q_from_rotvec(spin * w.time), dir);
+           ;; HOW MUCH OF THIS NUCLEUS EXISTS. An actor owns a fixed block
+           ;; of bodies but shows only as many as its mass has earned; the
+           ;; rest are written at size zero and collapse to a point — a
+           ;; vertex shader invocation and no fragments. So capture and
+           ;; decay change the SIZE OF THE CLOUD, not only its colour.
+           (local (- index (* a (u32 ,PER-ACTOR))))
+           (alive (< local (u32 (shared-shown a))))
 
-  attr_pose_set(i, q_from_rotvec(sd * w.p2));
+           ;; Shape from the actor's RADIUS, the one number already in the
+           ;; shared buffer that tracks its role. 0 tetrahedron, 1
+           ;; octahedron, 2 cube: sharp, middling, settled. Because the
+           ;; radius EASES between roles, a swarm passes through the
+           ;; octahedron on the way, so a commitment reads as a shape
+           ;; changing hands rather than a size popping.
+           (big   (shared-radii a)))
 
-  // Shape from the actor's RADIUS, which is the one number already in the
-  // shared buffer that tracks its role — a scout sits at the floor, an
-  // anchor swells above it. Reading it here rather than sending a fourth
-  // number keeps the per-actor channel at seven floats.
-  //
-  // 0 tetrahedron, 1 octahedron, 2 cube: sharp, middling, settled. Because
-  // the radius EASES between roles, a swarm passes through the octahedron
-  // on the way, so a commitment reads as a shape changing rather than a
-  // size popping.
-  let big = shared_radii(a);
-  attr_shape_set(i, select(select(0u, 1u, big > 0.050), 2u, big > 0.105));
-
-  // HOW MUCH OF THIS NUCLEUS EXISTS. An actor owns a fixed block of
-  // bodies but shows only as many as its mass has earned; the rest are
-  // written at size zero and collapse to a point — a vertex shader
-  // invocation and no fragments. So capture and decay change the SIZE OF
-  // THE CLOUD rather than only its colour.
-  let local = i - a * " (u32-text PER-ACTOR) ";
-  let alive = local < u32(shared_shown(a));
-  let sz = select(0.0, 0.006 * w.p1, alive);
-  // BRIGHTEN OUTWARD, not inward. The previous form darkened by rad, so
-  // the cubes at the surface of a swarm — the only ones that reach the
-  // eye — were at 45% while the fully occluded core sat at 100%. The
-  // shading was being spent entirely on cubes nobody can see.
-  pt_write(i, c + sd * (rad * r), sz,
-           tint * (0.70 + 0.35 * rad));
-")))
+      ;; BRIGHTEN OUTWARD, not inward: the bodies at the surface of a swarm
+      ;; are the only ones that reach the eye, so that is where the range
+      ;; belongs.
+      (point (+ c (* sd (* rad r)))
+             (if alive (* 0.006 size) 0.0)
+             (* tint (+ 0.70 (* 0.35 rad)))
+             (pose (q-from-rotvec (* sd twist)))
+             (shape (if (> big 0.105) (u32 2)
+                        (if (> big 0.050) (u32 1) (u32 0))))))))
 
 (define cam (make-camera))
 (camera-distance-set! cam 3.0)
