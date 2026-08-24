@@ -151,6 +151,42 @@
   (list 0 (car shape-counts) (+ (car shape-counts) (cadr shape-counts))))
 (define shape-total (length shape-pos))
 
+;;--- the table as a BUFFER -----------------------------------------------
+;; Six floats per vertex — position then normal — in one flat array, the
+;; same shape the point buffer uses and for the same reason: a vec3 in a
+;; storage array carries 16-byte alignment, so a packed layout has to be
+;; indexed by hand.
+;;
+;; It lived as a function-local `var` array, which in WGSL is PER
+;; INVOCATION. At three solids that is about 1.7KB of private storage per
+;; vertex; a dodecahedron alone is 108 vertices, and five solids would be
+;; ~5.7KB per invocation, which spills and takes occupancy with it — a
+;; frame-rate cliff rather than an error. In a buffer it is read once,
+;; shared across invocations and cached, and the shader stops carrying it.
+;;
+;; Which is also what makes cylinders, cones and arrows a matter of
+;; appending rows rather than a decision.
+(define shape-vertex-stride 6)
+
+(define (shape-table-bytes)
+  (let* ((n (length shape-pos))
+         (b (make-bytes (* n shape-vertex-stride 4)))
+         (v (bytes-view b :f32)))
+    (let loop ((ps shape-pos) (ns shape-nrm) (k 0))
+      (if (null? ps)
+          (begin (bytes-seal! b) b)
+          (let ((o (* k shape-vertex-stride)))
+            (view-set! v (+ o 0) (car (car ps)))
+            (view-set! v (+ o 1) (cadr (car ps)))
+            (view-set! v (+ o 2) (caddr (car ps)))
+            (view-set! v (+ o 3) (car (car ns)))
+            (view-set! v (+ o 4) (cadr (car ns)))
+            (view-set! v (+ o 5) (caddr (car ns)))
+            (loop (cdr ps) (cdr ns) (+ k 1)))))))
+
+(define (shape-stride-wgsl)
+  (string-append (number->string shape-vertex-stride) "u"))
+
 (define (wgsl-vec3-list vs)
   (wgsl-join
    (map (lambda (v)
@@ -163,14 +199,27 @@
 (define (wgsl-u32-list ns)
   (wgsl-join (map (lambda (n) (string-append (number->string n) "u")) ns) ", "))
 
+;; Only the offsets and counts stay in the shader — two small integers per
+;; solid, which stays trivial however many solids there are.
 (define (shape-table-wgsl)
   (string-append
-   "  var shape_pos = array<vec3<f32>, " (number->string shape-total) ">(\n"
-   (wgsl-vec3-list shape-pos) "\n  );\n"
-   "  var shape_nrm = array<vec3<f32>, " (number->string shape-total) ">(\n"
-   (wgsl-vec3-list shape-nrm) "\n  );\n"
-   "  var shape_off = array<u32, 3>(" (wgsl-u32-list shape-offsets) ");\n"
-   "  var shape_cnt = array<u32, 3>(" (wgsl-u32-list shape-counts) ");\n"))
+   "  var shape_off = array<u32, " (number->string (length shape-offsets)) ">("
+   (wgsl-u32-list shape-offsets) ");\n"
+   "  var shape_cnt = array<u32, " (number->string (length shape-counts)) ">("
+   (wgsl-u32-list shape-counts) ");\n"))
+
+;; The binding and its two accessors, emitted once at file scope.
+(define (shape-buffer-wgsl)
+  (string-append
+   "@group(0) @binding(3) var<storage, read> shapes : array<f32>;\n"
+   "fn shape_pos(k : u32) -> vec3<f32> {\n"
+   "  let b = k * " (shape-stride-wgsl) ";\n"
+   "  return vec3<f32>(shapes[b], shapes[b + 1u], shapes[b + 2u]);\n"
+   "}\n"
+   "fn shape_nrm(k : u32) -> vec3<f32> {\n"
+   "  let b = k * " (shape-stride-wgsl) ";\n"
+   "  return vec3<f32>(shapes[b + 3u], shapes[b + 4u], shapes[b + 5u]);\n"
+   "}\n"))
 
 ;; An instance names its shape through a declared :u32 attribute called
 ;; `shape`. Declaring none means every instance is a cube, which is what
@@ -203,6 +252,7 @@
    "};\n"
    "@group(0) @binding(0) var<uniform> u : U;\n"
    "@group(0) @binding(1) var<storage, read> pts : array<f32>;\n"
+   (shape-buffer-wgsl)
    ;; The SAME buffer the compute pass writes, bound here read-only. No
    ;; second copy, no upload, no synchronisation to get wrong — the kernel
    ;; sets a pose and the renderer reads it out of the slot it was put in.
@@ -249,7 +299,7 @@
        "  let sh = 2u;\n")
    "  let live = vi < shape_cnt[sh];\n"
    "  let idx = shape_off[sh] + vi;\n"
-   "  let lv = select(vec3<f32>(0.0, 0.0, 0.0), shape_pos[idx], live);\n"
+   "  let lv = select(vec3<f32>(0.0, 0.0, 0.0), shape_pos(idx), live);\n"
    ;; Rotate the corner about the shape's own centre, then place it. The
    ;; other order would swing it around the origin instead.
    (if (cubes-posed?)
@@ -273,7 +323,7 @@
    ;; One normal PER VERTEX rather than per face, because the three solids
    ;; have different vertices-per-face (3, 3 and 6) and a single divisor
    ;; cannot serve them all.
-   "  let bn = select(vec3<f32>(0.0, 1.0, 0.0), shape_nrm[idx], live);\n"
+   "  let bn = select(vec3<f32>(0.0, 1.0, 0.0), shape_nrm(idx), live);\n"
    ;; The NORMAL turns too. Rotating the geometry and not the normal
    ;; leaves the shading fixed to the world while the faces move under it,
    ;; which reads as a lighting bug rather than as a pose.

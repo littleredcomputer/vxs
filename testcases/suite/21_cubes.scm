@@ -42,18 +42,36 @@
 (assert-equal "and the cube is the largest, so it sets the draw"
               cube-vertex-count (caddr shape-counts))
 (assert-equal "offsets follow the counts" '(0 12 36) shape-offsets)
-(assert-true "the shader array holds all of them"
+;; THE TABLE IS A BUFFER, not an array in the shader. A function-local var
+;; in WGSL is PER INVOCATION, so carrying the geometry there costs every
+;; vertex a private copy of every solid — fine at three, a frame-rate cliff
+;; at five, and the reason adding a dodecahedron would have hurt.
+(assert-true "the solids are bound as storage, read-only"
              (string-contains? csrc
-                               (string-append "array<vec3<f32>, "
-                                              (number->string shape-total) ">")))
+               "@group(0) @binding(3) var<storage, read> shapes : array<f32>;"))
+(assert-false "and are not a per-invocation array"
+              (string-contains? csrc "array<vec3<f32>, 72>"))
+;; Six floats a vertex, position then normal, indexed by hand — a vec3 in a
+;; storage array carries 16-byte alignment, so a packed layout cannot use
+;; one. Same reasoning as the point buffer's stride.
+(assert-equal "six floats per vertex" 6 shape-vertex-stride)
+(assert-equal "so the table is stride * vertices * 4 bytes"
+              (* shape-total 6 4) (bytes-length (shape-table-bytes)))
+(assert-true "read through an accessor that knows the stride"
+             (string-contains? csrc "let b = k * 6u;"))
 ;; ONE NORMAL PER VERTEX, not per face. The three solids have 3, 3 and 6
 ;; vertices per face, so no single divisor can serve them all.
 (assert-true "there is a normal for every vertex"
-             (string-contains? csrc
-                               (string-append "var shape_nrm = array<vec3<f32>, "
-                                              (number->string shape-total) ">")))
+             (string-contains? csrc "fn shape_nrm(k : u32) -> vec3<f32>"))
 (assert-true "and it is indexed the same way the position is"
-             (string-contains? csrc "shape_nrm[idx], live)"))
+             (string-contains? csrc "shape_nrm(idx), live)"))
+
+;; The packed bytes must agree with what the accessors read: vertex k's
+;; normal is at k*6+3, and for the cube's first triangle that is (-1,0,0).
+(assert-equal "a normal lands where the accessor looks for it"
+              -1.0
+              (view-ref (bytes-view (shape-table-bytes) :f32)
+                        (+ (* (caddr shape-offsets) 6) 3)))
 
 ;; Normals are centroid directions, so every one points AWAY from the
 ;; origin by construction and winding never has to be got right. A face

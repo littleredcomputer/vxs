@@ -227,6 +227,10 @@
              ;; what gpu-buffer-read is for, when a program wants a number
              ;; out rather than a picture.
              (scratch (if scratch-bytes (gpu-buffer device scratch-bytes) #f))
+             ;; The solids' vertices, uploaded once and read by every
+             ;; vertex. Only the geometry renderer wants it; the sprite
+             ;; path never touches it.
+             (shapes  (if (eq? draw-as :cubes) (gpu-buffer device (shape-table-bytes)) #f))
              ;; Shared data is uploaded EVERY frame, unlike scratch. That
              ;; is what it is for: observations that change per frame and
              ;; therefore cannot be baked into the shader source. Static
@@ -249,7 +253,7 @@
                 ;; dispatch when a pose is declared — same buffer, written
                 ;; by the kernel and read by the renderer.
                 (gpu-draw-geometry! device buf draw cube-vertex-count
-                                    count t2 camera canvas scratch)
+                                    count t2 camera canvas scratch shapes)
                 (gpu-draw-buffer! device buf draw count t2 camera canvas))
             (yield)
             (loop t2 now)))))))
@@ -266,7 +270,8 @@
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
              (shader  (touch (gpu-compile device (cubes-wgsl))))
-             (buf     (gpu-buffer device bytes)))
+             (buf     (gpu-buffer device bytes))
+             (shapes  (gpu-buffer device (shape-table-bytes))))
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
                  (t2 (if (paused?) t (+ t (- now last)))))
@@ -275,6 +280,6 @@
             ;; push its changes each frame. gpu-buffer-write! is that push.
             (gpu-buffer-write! device buf bytes)
             (gpu-draw-geometry! device buf shader cube-vertex-count
-                                count t2 camera canvas)
+                                count t2 camera canvas #f shapes)
             (yield)
             (loop t2 now)))))))
