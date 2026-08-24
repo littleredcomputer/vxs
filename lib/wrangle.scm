@@ -294,10 +294,23 @@
 (define wrangle-stride points-stride)
 
 ;;--- named scratch attributes -------------------------------------------
-;; State a wrangle needs that the renderer must not see: weight, age,
-;; velocity, an ancestor index. Until now a kernel could only touch what
-;; the renderer already reads, so anything stateful had to be smuggled
-;; through a colour channel or not exist at all.
+;; State a wrangle needs that the fixed point layout has no room for:
+;; weight, age, velocity, an orientation, an ancestor index. Until now a
+;; kernel could only touch what the renderer already reads, so anything
+;; stateful had to be smuggled through a colour channel or not exist.
+;;
+;; The point buffer's layout is fixed because it is the renderer's
+;; contract: position, size, colour. These are declared per demo instead,
+;; and a demo that declares none pays nothing — no buffer, no binding, no
+;; preamble.
+;;
+;; NOT a private side of the wrangle, though it started as one. The
+;; renderer may bind the same buffer read-only and ask for named attributes
+;; back — lib/cubes.scm reads pose and shape that way, which is how an
+;; oriented solid gets its orientation without widening the stride for
+;; every demo that draws round points. Opt-in on both ends, and the
+;; read-only flag on scratch-accessors means the render side gets a getter
+;; with no setter to misuse.
 ;;
 ;; A SECOND BUFFER, not a wider point stride. The renderer is the hot path
 ;; and the kernel is not: widening the stride would make the vertex shader
