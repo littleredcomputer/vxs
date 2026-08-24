@@ -101,7 +101,23 @@
   '((time . (:f32 . "w.time"))
     (seed . (:f32 . "f32(w.seed)"))
     (count . (:f32 . "f32(w.count)"))
-    (step . (:f32 . "f32(w.step)"))))
+    (step . (:f32 . "f32(w.step)"))
+    ;; This point's own values, and its index. Every invocation owns
+    ;; exactly one, so the name can bind straight to the accessor — the
+    ;; same move an attribute name makes.
+    ;; VEX's names alongside the spelled-out ones, and `pscale` rather
+    ;; than `size` deliberately: adding to the built-in namespace is a
+    ;; BREAKING change, since a declared name may not shadow one. `size`
+    ;; took a name a program was already using for a parameter, and the
+    ;; guard caught it — which is the guard working, and also the reason to
+    ;; prefer names nobody reaches for by accident.
+    (position . (:vec3f . "pt_pos(i)"))
+    (P . (:vec3f . "pt_pos(i)"))
+    (pscale . (:f32 . "pt_size(i)"))
+    (colour . (:vec3f . "pt_colour(i)"))
+    (color . (:vec3f . "pt_colour(i)"))
+    (Cd . (:vec3f . "pt_colour(i)"))
+    (index . (:u32 . "i"))))
 
 ;; THREE SOURCES, ONE RESULT, REBUILT. The environment is derived from the
 ;; built-ins plus whatever wrangle-params! and scratch-attributes! were
@@ -437,6 +453,95 @@
             "  scratch[b] = v.x; scratch[b + 1u] = v.y; scratch[b + 2u] = v.z;\n"
             "}\n"))))
      (else (error "scratch-accessors: unknown type" type)))))
+
+;;--- (point pos size colour (attr expr) ...) -----------------------------
+;; The terminal form: what a wrangle body ends with, and the only place
+;; statements enter the kernel language.
+;;
+;; FIELDS ARE TOTAL. pt_write is one packed write of seven floats, so a
+;; partial point would have to read back what it does not mention. Naming
+;; the input is how you say "unchanged" —
+;;
+;;   (point (* nxt s) size colour)     ; new position, same size and colour
+;;
+;; which reads as intended, makes the read-modify-write visible as the name
+;; being read, and means (point pos) simply does not parse.
+;;
+;; ATTRIBUTES ARE PARTIAL. They are written by independent setters into a
+;; separate buffer, so omitting one means not emitting its setter. No
+;; read-modify-write, nothing hidden. The asymmetry is legible from the
+;; storage layout rather than something to memorise: fields are total
+;; because the write is packed, attributes are partial because the writes
+;; are separate.
+;;
+;; Attribute names are checked against scratch-attributes!, so a misspelt
+;; one fails at expand time with the name in hand rather than at shader
+;; compile with an unresolved call.
+(define (wrangle-point-terminal args env)
+  (if (< (length args) 3)
+      (error 'wgsl "(point) needs a position, a size and a colour"))
+  (let* ((rp (wgsl-compile (car args) env))
+         (rs (wgsl-compile (cadr args) env))
+         (rc (wgsl-compile (caddr args) env)))
+    (if (not (eq? (wgsl-type-of rp) :vec3f))
+        (error 'wgsl (string-append "(point): position must be a vec3f, got "
+                                    (wgsl-type-name (wgsl-type-of rp)))))
+    (if (not (eq? (wgsl-type-of rs) :f32))
+        (error 'wgsl (string-append "(point): size must be an f32, got "
+                                    (wgsl-type-name (wgsl-type-of rs)))))
+    (if (not (eq? (wgsl-type-of rc) :vec3f))
+        (error 'wgsl (string-append "(point): colour must be a vec3f, got "
+                                    (wgsl-type-name (wgsl-type-of rc)))))
+    (let loop ((as (cdddr args))
+               (stmts (append (wgsl-stmts-of rp) (wgsl-stmts-of rs) (wgsl-stmts-of rc)))
+               (sets '()))
+      (if (null? as)
+          (wgsl-result
+           :point
+           (append stmts
+                   (list (string-append "pt_write(i, " (wgsl-code-of rp) ", "
+                                        (wgsl-code-of rs) ", " (wgsl-code-of rc) ");"))
+                   (reverse sets))
+           "")
+          (let ((spec (car as)))
+            (if (or (not (pair? spec)) (not (symbol? (car spec)))
+                    (not (pair? (cdr spec))) (not (null? (cddr spec))))
+                (error 'wgsl "(point): expected (attribute expression)" spec))
+            (let* ((name (car spec))
+                   (decl (scratch-attr name))     ; raises if undeclared
+                   (type (cadr decl))
+                   (want (cond ((eq? type :u32) :u32)
+                               ((eq? type :quat) :vec4f)
+                               (else type)))
+                   (r (wgsl-compile (cadr spec) env)))
+              (if (not (eq? (wgsl-type-of r) want))
+                  (error 'wgsl (string-append "(point): attribute "
+                                              (symbol->string name) " wants "
+                                              (wgsl-type-name want) ", got "
+                                              (wgsl-type-name (wgsl-type-of r)))))
+              (loop (cdr as)
+                    (append stmts (wgsl-stmts-of r))
+                    (cons (string-append "attr_" (wgsl-fn-name name) "_set(i, "
+                                         (wgsl-code-of r) ");")
+                          sets))))))))
+
+(wgsl-define-terminal! 'point wrangle-point-terminal)
+
+;; (wrangle-scheme body) -> complete compute shader source.
+;;
+;; The Scheme counterpart of wrangle-wgsl, which stays exactly as it is:
+;; raw WGSL remains the escape hatch, and it has already earned that —
+;; fold-i exists because a real program wanted something this language did
+;; not have, and a form that foreclosed the escape would have made that a
+;; blocker rather than a feature request.
+(define (wrangle-scheme body)
+  (let ((r (wgsl-compile body wrangle-env)))
+    (if (not (eq? (wgsl-type-of r) :point))
+        (error 'wgsl
+               "a wrangle body must end in (point ...); this one produces a value"))
+    (wrangle-wgsl (wgsl-join (map (lambda (l) (string-append "  " l))
+                                  (wgsl-stmts-of r))
+                             "\n"))))
 
 ;;--- shared read-only data ----------------------------------------------
 ;; Data every element reads, rather than data each element owns.

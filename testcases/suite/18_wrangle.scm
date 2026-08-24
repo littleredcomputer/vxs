@@ -660,4 +660,80 @@
 (scratch-attributes! '())        ; leave the world as we found it
 (wrangle-params! '(sigma radius gain))
 
+;;--- a wrangle written in Scheme ----------------------------------------
+;; wrangle-wgsl stays exactly as it is: raw WGSL remains the escape hatch,
+;; and it has earned that — fold-i exists because a real program wanted
+;; something this language did not have, and a form that foreclosed the
+;; escape would have made that a blocker rather than a request.
+;;
+;; What Scheme adds is a body that TYPE-CHECKS at expand time: mixing a
+;; vec2 with a vec3 becomes an error here, with the form in hand, rather
+;; than a shader compile log naming a line of generated text.
+
+(wrangle-params! '(scale gain (warm :flag)))
+(scratch-attributes! '((pose :quat) (charge :f32)))
+
+;; The terminal form is the only place statements enter the language, and
+;; its type is one no operator accepts — which is what confines it to the
+;; last position of a body rather than a rule anyone has to remember.
+(assert-equal "a body must end in (point ...)"
+              'raised (guard (e (#t 'raised)) (wrangle-scheme '(+ 1.0 2.0))))
+(assert-equal "and (point ...) is not a value"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-type '(+ 1.0 (point position pscale colour)) wrangle-env)))
+
+;; FIELDS ARE TOTAL, because pt_write is one packed write of seven floats
+;; and a partial point would have to read back what it did not mention.
+;; Naming the input is how you say "unchanged".
+(assert-equal "position, size and colour are all required"
+              'raised (guard (e (#t 'raised)) (wrangle-scheme '(point position pscale))))
+(assert-equal "and they are type-checked"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-scheme '(point position colour colour))))
+
+;; ATTRIBUTES ARE PARTIAL, because their setters are independent. The
+;; asymmetry is legible from the storage layout rather than memorised.
+(define psrc (wrangle-scheme '(point position pscale colour)))
+(assert-true "a point with no attributes writes only the point"
+             (string-contains? psrc "pt_write(i, pt_pos(i), pt_size(i), pt_colour(i));"))
+;; Checks for a CALL, not a name: the preamble DEFINES every declared
+;; attribute's setter, so the bare name is always present. An earlier form
+;; of this assertion matched the definition and failed.
+(assert-false "and emits no setter call at all"
+              (string-contains? psrc "attr_charge_set(i, "))
+(define asrc (wrangle-scheme '(point position pscale colour (charge 0.5))))
+(assert-true "naming one emits exactly that setter"
+             (string-contains? asrc "attr_charge_set(i, 0.5);"))
+(assert-false "and still not the other"
+              (string-contains? asrc "attr_pose_set(i, "))
+
+;; Checked against the declaration, so a misspelling fails here with the
+;; name in hand rather than at shader compile as an unresolved call.
+(assert-equal "an undeclared attribute is refused"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-scheme '(point position pscale colour (nonesuch 1.0)))))
+(assert-equal "as is one given the wrong type"
+              'raised (guard (e (#t 'raised))
+                        (wrangle-scheme '(point position pscale colour (pose 1.0)))))
+
+;;--- arithmetic applies only to what it applies to ----------------------
+;; The rule used to be "reject bool, and if either side is f32 take the
+;; other type", which let anything through when paired with a float — a
+;; terminal form included — and typed (u32 * 3.0) as u32 while emitting
+;; WGSL that will not compile. Naming what IS allowed excludes a new type
+;; until someone decides otherwise.
+(define ue (cons (cons 'k (cons :u32 "k")) wrangle-env))
+(assert-equal "a scalar broadcasts across a vector"
+              "(2.0 * pt_colour(i))" (wgsl-code '(* 2.0 colour) ue))
+(assert-equal "u32 combines with u32"
+              "(k * 3u)" (wgsl-code '(* k (u32 3)) ue))
+;; Every bare number emits as f32, so this would have produced "k * 3.0".
+(assert-equal "but not with a bare number, which is an f32"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(* k 3) ue)))
+(assert-equal "nor with a bool"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(+ 1.0 (< 1.0 2.0)) ue)))
+
+(wrangle-params! '(sigma radius gain))
+(scratch-attributes! '())
+
 (suite-summary)

@@ -39,6 +39,11 @@
 (define (wgsl-type-name t)
   (cond ((eq? t :f32)   "f32")
         ((eq? t :u32)   "u32")
+        ;; Not a WGSL type. It names the result of a TERMINAL form — one
+        ;; that writes rather than evaluates — so it exists only to be
+        ;; rejected by every operator, which is what confines such a form
+        ;; to the last position of a body.
+        ((eq? t :point)  "a terminal form")
         ((eq? t :bool)  "bool")
         ((eq? t :vec2f) "vec2<f32>")
         ((eq? t :vec3f) "vec3<f32>")
@@ -111,13 +116,25 @@
 
 ;; The broadcast rule: identical types combine to themselves, and a scalar
 ;; combines with any vector to give that vector.
+;; Which types arithmetic applies to at all. The previous form rejected
+;; :bool by name and then said "if either side is :f32, take the other" —
+;; which let ANYTHING through when paired with a float, including a
+;; terminal form's :point, and typed (u32 * 3.0) as u32 while emitting
+;; WGSL that will not compile. Naming what is allowed rather than what is
+;; not means a new type is excluded until someone decides otherwise.
+(define (wgsl-vector-type? t) (memq t '(:vec2f :vec3f :vec4f)))
+(define (wgsl-arith-type? t) (or (eq? t :f32) (eq? t :u32) (wgsl-vector-type? t)))
+
 (define (wgsl-arith-type op ta tb)
-  (if (or (eq? ta :bool) (eq? tb :bool))
-      (error 'wgsl (string-append "(" (symbol->string op)
-                                  ") does not apply to bool")))
+  (if (not (and (wgsl-arith-type? ta) (wgsl-arith-type? tb)))
+      (error 'wgsl (string-append "(" (symbol->string op) ") does not apply to "
+                                  (wgsl-type-name (if (wgsl-arith-type? ta) tb ta)))))
   (cond ((eq? ta tb) ta)
-        ((eq? ta :f32) tb)
-        ((eq? tb :f32) ta)
+        ;; A scalar broadcasts across a VECTOR, and only there. An f32 does
+        ;; not silently combine with a u32 — WGSL will not, and the
+        ;; conversion that would make it work is the one worth writing.
+        ((and (eq? ta :f32) (wgsl-vector-type? tb)) tb)
+        ((and (eq? tb :f32) (wgsl-vector-type? ta)) ta)
         (else (error 'wgsl
                      (string-append "type mismatch in (" (symbol->string op) "): "
                                     (wgsl-type-name ta) " and " (wgsl-type-name tb))))))
@@ -254,6 +271,25 @@
            (wgsl-result :f32 (wgsl-stmts-of r)
                         (string-append "f32(" (wgsl-code-of r) ")")))))
 
+    ;; (u32 n) — an integer literal, or a conversion from f32.
+    ;;
+    ;; Needed because every bare number in this language emits as f32:
+    ;; (* a 3) gives "a * 3.0", which will not typecheck against a u32.
+    ;; Explicit rather than inferred, on the same principle as (f32 k) —
+    ;; a conversion is worth seeing.
+    ((eq? op 'u32)
+     (let ((x (car args)))
+       (if (and (number? x) (integer? x) (>= x 0))
+           (wgsl-result :u32 '() (string-append (number->string x) "u"))
+           (let ((r (wgsl x env)))
+             (cond ((eq? (wgsl-type-of r) :u32) r)
+                   ((eq? (wgsl-type-of r) :f32)
+                    (wgsl-result :u32 (wgsl-stmts-of r)
+                                 (string-append "u32(" (wgsl-code-of r) ")")))
+                   (else (error 'wgsl (string-append
+                          "(u32) expects a non-negative integer, an f32 or a u32, got "
+                          (wgsl-type-name (wgsl-type-of r))))))))))
+
     ;; (fold-i N init (idx acc) body) — a bounded fold.
     ;;
     ;; A FOLD, NOT A LOOP: an accumulator and a compile-time bound, no
@@ -373,7 +409,11 @@
     ;; else consumes one.
     ((memq op '(< > <= >= =))
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
-       (if (not (and (eq? (wgsl-type-of a) :f32) (eq? (wgsl-type-of b) :f32)))
+       ;; Scalars of the SAME type: two f32s or two u32s. WGSL will not
+       ;; compare across them and neither will this, since the conversion
+       ;; that would make it work is exactly the one worth writing down.
+       (if (not (and (memq (wgsl-type-of a) '(:f32 :u32))
+                     (eq? (wgsl-type-of a) (wgsl-type-of b))))
            (error 'wgsl
                   (string-append "(" (symbol->string op)
                                  ") compares scalars, got: "
@@ -452,7 +492,29 @@
                     (string-append (cadr sig) "("
                                    (wgsl-join (map wgsl-code-of rs) ", ") ")"))))
 
+    ;; TERMINAL FORMS. A form that writes rather than evaluates — the last
+    ;; thing a body does, and the only place statements enter this language.
+    ;;
+    ;; Registered rather than built in, because the compiler has no
+    ;; business knowing what a point is. lib/wrangle.scm owns that concept
+    ;; and installs the handler; this file only knows that some forms end a
+    ;; body instead of producing a value.
+    ((assq op wgsl-terminals)
+     => (lambda (entry) ((cdr entry) args env)))
+
     (else (error 'wgsl "unknown operator in kernel:" op))))
+
+;; ((name . handler) ...) — handler takes (args env) and returns a
+;; wgsl-result whose type is :point.
+(define wgsl-terminals '())
+
+(define (wgsl-define-terminal! name handler)
+  (set! wgsl-terminals
+        (cons (cons name handler)
+              (let loop ((xs wgsl-terminals) (acc '()))
+                (cond ((null? xs) (reverse acc))
+                      ((eq? (caar xs) name) (loop (cdr xs) acc))
+                      (else (loop (cdr xs) (cons (car xs) acc))))))))
 
 (define (wgsl-append-stmts rs)
   (if (null? rs) '() (append (wgsl-stmts-of (car rs)) (wgsl-append-stmts (cdr rs)))))
