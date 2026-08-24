@@ -22,3 +22,17 @@ vx-scheme-asan
 
 # Generated from lib/prelude.scm at build time (see src/Makefile)
 src/vx_embedded_libs.h
+
+# The wasm build. Deliberately NOT tracked.
+#
+# It was, on the argument that clone-and-serve is the deployment model —
+# but nobody clones this, and two people now send each other diffs, so
+# every patch has to route around a binary that conflicts on any branch
+# that rebuilt. It also cost a wrong diagnosis: a committed artifact can
+# disagree with its source, and twice the answer "your cache is stale"
+# was given about a file that was fine.
+#
+# Rebuild with `make -C src wasm`. `make test` builds it first, so the
+# test suite needs nothing extra.
+web/vxs.js
+web/vxs.wasm
