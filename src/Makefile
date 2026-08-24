@@ -8,7 +8,16 @@ BUILDSTAMP      = $(shell date -u +%H:%M:%SZ)-$(shell git rev-parse --short HEAD
 DEFVER          = -DVERSION=$(VERSION) -DVXS_BUILD='"$(BUILDSTAMP)"' 
 CXXFLAGS        = -std=c++20 -O3 -Wall -Wextra -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER)
 
-EMSDK_DIR       ?= $(HOME)/Work/me/emsdk/upstream/emscripten
+# Where emscripten lives, discovered rather than assumed. In order:
+#
+#   1. em++ already on PATH — you sourced emsdk_env.sh
+#   2. $EMSDK, which the emsdk installer itself exports
+#   3. EMSDK_DIR passed on the command line
+#
+# The old default named one developer's directory layout, which is simply
+# wrong everywhere else — the first outside contributor hit it immediately
+# and had to pass EMSDK_DIR by hand.
+EMSDK_DIR       ?= $(if $(EMSDK),$(EMSDK)/upstream/emscripten,)
 EMCC            = $(shell which em++ 2>/dev/null || echo $(EMSDK_DIR)/em++)
 EMFLAGS         = -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER) \
                   -s WASM=1 \
@@ -21,6 +30,19 @@ EMFLAGS         = -std=c++20 -O3 -fno-strict-aliasing -fexceptions -fno-rtti $(D
                   -s NO_EXIT_RUNTIME=1
 
 NODE            = $(shell which node 2>/dev/null || echo $(EMSDK_DIR)/../../node/*/bin/node)
+
+# Say so plainly rather than failing as "no such file or directory: /em++".
+# web/vxs.wasm is no longer checked in, so this is now the difference
+# between a browser demo and none, and it should not have to be guessed at.
+define NEED_EMCC
+	@command -v "$(EMCC)" >/dev/null 2>&1 || { \
+	  echo "=== emscripten not found ==="; \
+	  echo "  Looked for em++ on PATH, then \$$EMSDK, then EMSDK_DIR."; \
+	  echo "  Fix by either:"; \
+	  echo "    source /path/to/emsdk/emsdk_env.sh"; \
+	  echo "    make -C src wasm EMSDK_DIR=/path/to/emsdk/upstream/emscripten"; \
+	  exit 1; }
+endef
 
 all: vx-scheme wasm
 
@@ -52,6 +74,7 @@ vx-scheme: vx_vm.cpp main.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compil
 	$(Q)$(CXX) $(CXXFLAGS) vx_vm.cpp main.cpp -o vx-scheme
 
 wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler.h vx_embedded_libs.h
+	$(NEED_EMCC)
 	@echo "=== BUILDING WASM (web/vxs.js, web/vxs.wasm) ==="
 	$(Q)mkdir -p ../web
 	$(Q)$(EMCC) $(EMFLAGS) vx_vm.cpp vx_wasm.cpp -o ../web/vxs.js
