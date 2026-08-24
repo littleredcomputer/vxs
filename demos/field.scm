@@ -41,10 +41,14 @@
 ;;; Orientation is a STOCK attribute: an attribute named 'pose of type
 ;;; :quat is the convention the cube renderer looks for, so declaring it
 ;;; is the whole of turning the cubes on.
-(scratch-attributes! '((pose :quat)))
+;;; `pose` turns each body; `shape` picks which solid it is. Both are stock
+;;; attributes the cube renderer looks for by name — declaring `shape` is
+;;; the whole of enabling the other two solids.
+(scratch-attributes! '((pose :quat) (shape :u32)))
 (define SCRATCH (make-scratch N))
 
-(wrangle-params! '(scale drift gain floor twist (field-seed :u32) (warm :flag)))
+(wrangle-params! '(scale drift gain floor twist
+                   (field-seed :u32) (solid :u32) (warm :flag)))
 
 (define P (make-wrangle-params))
 (define PV (wrangle-params-view P))
@@ -53,6 +57,9 @@
 (param-set! PV 'gain  0.55)            ; field magnitude -> cube size
 (param-set! PV 'floor 0.12)            ; smallest cube, as a fraction
 (param-set! PV 'field-seed 20260822)
+;;; 0 tetrahedron, 1 octahedron, 2 cube. Live from the REPL:
+;;;   (param-set! PV 'solid 1)
+(param-set! PV 'solid 2)
 (param-set! PV 'twist 1.7)             ; field magnitude -> radians
 (param-set! PV 'warm  #f)
 
@@ -113,7 +120,11 @@
       ;; products with no trigonometry — so the sin and cos happen once
       ;; rather than thirty-six times.
       (point position half (* col (+ 0.35 (* 0.65 t)))
-             (pose (q-from-rotvec (* f twist)))))))
+             (pose (q-from-rotvec (* f twist)))
+             ;; 0 tetrahedron, 1 octahedron, 2 cube. A :u32 knob rather
+             ;; than a constant, so it rides in the uniform and switching
+             ;; costs nothing — no recompile, no second kernel.
+             (shape solid)))))
 
 (define cam (make-camera))
 (camera-distance-set! cam 3.4)
