@@ -56,52 +56,64 @@
 (param-set! PV 'twist 1.7)             ; field magnitude -> radians
 (param-set! PV 'warm  #f)
 
-(define kernel (wrangle-wgsl "
-  let p = pt_pos(i);
+;;; --- the kernel, in Scheme -------------------------------------------
+;;; lib/wgsl.scm compiles this and type-checks it first, so a vec2 handed
+;;; to something expecting a vec3 — or an attribute given the wrong type —
+;;; is an error here with the form in hand, rather than a shader
+;;; compilation log naming a line of generated text.
+;;;
+;;; wrangle-wgsl still exists and is still the escape hatch. This is the
+;;; same kernel it used to hold.
+(define kernel
+  (wrangle-scheme
+   '(let* (;; The field slides; the grid does not. Sampling at the cube's
+           ;; own position plus a time offset is what makes the structure
+           ;; appear to move THROUGH the lattice rather than with it.
+           (q    (+ (* position scale)
+                    (vec3 (* time drift) (* time drift 0.37) 0.0)))
+           (f    (perlin3v q field-seed))
+           (mag  (length f))
+           (dir  (/ f (max mag 0.000001)))
+           (t    (clamp mag 0.0 1.0))
 
-  // The field slides; the grid does not. Sampling at the cube's
-  // own position plus a time offset is what makes the structure
-  // appear to move THROUGH the lattice rather than with it.
-  let q = p * w.p0 + vec3<f32>(w.time * w.p1, w.time * w.p1 * 0.37, 0.0);
-  let f = perlin3v(q, w.i0);
+           ;; Size from magnitude, with a floor so nothing vanishes: an
+           ;; empty cell reads as a lull rather than a hole.
+           ;;
+           ;; THIS COEFFICIENT HAS TWO REGIMES, and the crossover is the
+           ;; grid spacing. Well under it (0.1, here) every cube stands
+           ;; alone and the field reads as texture — each cube is its own
+           ;; sample of it.
+           ;;
+           ;; Well over it (try 0.5) each cube reaches several spacings and
+           ;; swallows its neighbours, so all that survives to be seen is
+           ;; the local MAXIMA of the magnitude field. That is a
+           ;; morphological dilation, and it looks like architecture: flat
+           ;; slabs, hard occlusion edges, structure at a far coarser scale
+           ;; than the lattice. Same field, same seed.
+           (half (* (+ floor (* gain mag)) 0.1))
 
-  let mag = length(f);
-  let dir = f / max(mag, 1e-6);
+           ;; Colour from DIRECTION, not magnitude. The two carry different
+           ;; information and mapping both to one channel throws half of it
+           ;; away — direction gives the field its grain, magnitude its
+           ;; weather.
+           ;;
+           ;; `if` is a SELECTION here, not a branch: both arms evaluate
+           ;; and the condition picks. Harmless for two pure colour ramps,
+           ;; and worth knowing before putting a random draw in one.
+           (col  (if warm (heat-colour t) (+ 0.5 (* 0.5 dir)))))
 
-  // Size from magnitude, with a floor so nothing vanishes: an
-  // empty cell reads as a lull rather than a hole.
-  //
-  // THIS COEFFICIENT HAS TWO REGIMES, and the crossover is the grid
-  // spacing. Well under it (0.1, here) every cube stands alone and the
-  // field reads as texture — each cube is its own sample of it.
-  //
-  // Well over it (try 0.5) each cube reaches several spacings and swallows
-  // its neighbours, so all that survives to be seen is the local MAXIMA of
-  // the magnitude field. That is a morphological dilation, and it looks
-  // like architecture: flat slabs, hard occlusion edges, and structure at
-  // a far coarser scale than the lattice. Same field, same seed.
-  let half = (w.p3 + w.p2 * mag) * 0.1;
-
-  // Colour from DIRECTION, not magnitude. The two carry different
-  // information and mapping both to one channel throws half of it
-  // away — direction gives the field its grain, magnitude its
-  // weather.
-  var col = 0.5 + 0.5 * dir;
-  if (flag_warm()) { col = heat_colour(clamp(mag, 0.0, 1.0)); }
-
-  // POSE. The field vector IS a rotation vector — axis f/|f|, angle
-  // |f| * twist — which is continuous everywhere including f = 0, where
-  // the axis stops meaning anything exactly as the angle reaches zero.
-  // Aiming an axis at the field instead would have to choose a roll, and
-  // no continuous choice exists on a sphere, so it would snap somewhere.
-  //
-  // Converted to a quaternion HERE, once per cube. The renderer applies it
-  // 36 times, once per vertex, and q_rot is two cross products with no
-  // trigonometry — so the sin and cos happen once rather than 36 times.
-  attr_pose_set(i, q_from_rotvec(f * w.p4));
-
-  pt_write(i, p, half, col * (0.35 + 0.65 * clamp(mag, 0.0, 1.0)));
-"))
+      ;; POSE. The field vector IS a rotation vector — axis f/|f|, angle
+      ;; |f| * twist — continuous everywhere including f = 0, where the
+      ;; axis stops meaning anything exactly as the angle reaches zero.
+      ;; Aiming an axis at the field instead would have to choose a roll,
+      ;; and no continuous choice exists on a sphere, so it would snap.
+      ;;
+      ;; Converted to a quaternion HERE, once per cube. The renderer
+      ;; applies it 36 times, once per vertex, and q_rot is two cross
+      ;; products with no trigonometry — so the sin and cos happen once
+      ;; rather than thirty-six times.
+      (point position half (* col (+ 0.35 (* 0.65 t)))
+             (pose (q-from-rotvec (* f twist)))))))
 
 (define cam (make-camera))
 (camera-distance-set! cam 3.4)
