@@ -89,7 +89,7 @@ test-gc:
 	$(Q)$(CXX) $(CXXFLAGS) vx_vm.cpp ../testcases/test_vx_gc.cpp -o test_gc && ./test_gc && rm test_gc
 
 test-unit:
-	@echo "=== RUNNING STRUCTURED 58-TEST UNIT MATRIX ==="
+	@echo "=== RUNNING STRUCTURED UNIT MATRIX ==="
 	$(Q)$(NODE) ../testcases/run_all_tests.js
 
 test-wasm:

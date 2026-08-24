@@ -75,7 +75,49 @@ const TEST_DEFINITIONS = [
   { id: 'err-touch-non-future', name: 'Catch Touch on Non-Future', code: '(touch "not-a-future")', expectOk: false, errorContains: 'touch: expected a future' },
   { id: 'err-car-non-pair', name: 'Catch car Contract Violation', code: '(car 42)', expectOk: false, errorContains: 'car: contract violation, expected pair' },
   { id: 'err-cdr-non-pair', name: 'Catch cdr Contract Violation', code: '(cdr \'())', expectOk: false, errorContains: 'cdr: contract violation, expected pair' },
-  { id: 'err-set-car-non-pair', name: 'Catch set-car! Contract Violation', code: '(set-car! 42 10)', expectOk: false, errorContains: 'set-car!: contract violation, expected pair' }
+  { id: 'err-set-car-non-pair', name: 'Catch set-car! Contract Violation', code: '(set-car! 42 10)', expectOk: false, errorContains: 'set-car!: contract violation, expected pair' },
+
+  // 10. Reader faults.
+  //
+  // These used to be the quietest failures in the system. An unclosed
+  // form was not an error at all: read_list stopped at end of input and
+  // returned the elements it had, so a file missing one ')' still loaded
+  // and still ran, with one expression nested a level deeper than it was
+  // written. An unterminated string swallowed the rest of the file the
+  // same way. And a STRAY ')' was worse than quiet — read_atom stopped at
+  // it without consuming it, so the top-level loop read a zero-length
+  // token forever: measured at 53 seconds of allocation before
+  // std::bad_alloc, after which the VM could not evaluate anything again.
+  //
+  // Each one is checked for its POSITION as well as its message, because
+  // the position is the entire benefit. "Something is unbalanced" you can
+  // get by counting; which paren, on which line, you cannot.
+  { id: 'read-unclosed-paren', name: 'Reader: unclosed list is reported', code: '(define (g y) (+ y 1)', expectOk: false, errorContains: "line 1, column 1: '(' is never closed" },
+  // When several forms are open at end of input, the INNERMOST one is
+  // reported, because that is where the recursion notices. It is also the
+  // more useful of the two: one missing ')' in a long definition leaves
+  // the enclosing (define ...) open too, and being told about the inner
+  // (let ...) narrows the search far more than being told about the whole
+  // definition you already knew you were inside.
+  { id: 'read-unclosed-nested', name: 'Reader: reports the innermost unclosed form', code: '(a\n  (b\n    (c 1 2)', expectOk: false, errorContains: 'line 2, column 3' },
+  { id: 'read-stray-paren', name: 'Reader: stray close paren does not hang', code: '(+ 1 2))', expectOk: false, errorContains: "line 1, column 8: unexpected ')'" },
+  { id: 'read-stray-bracket', name: 'Reader: stray close bracket does not hang', code: '(+ 1 2)]', expectOk: false, errorContains: "unexpected ']'" },
+  { id: 'read-unclosed-string', name: 'Reader: unterminated string is reported', code: '(define s "hello\n(define (g) 1)', expectOk: false, errorContains: 'line 1, column 11: string is never closed' },
+  { id: 'read-unclosed-bracket', name: 'Reader: unclosed bracket vector is reported', code: '(define v [1 2 3', expectOk: false, errorContains: "'[' is never closed" },
+  { id: 'read-unclosed-vector', name: 'Reader: unclosed literal vector is reported', code: "(define v '#(1 2 3", expectOk: false, errorContains: "'#(' is never closed" },
+
+  // The other half of the contract: a reader that reports faults must not
+  // invent them. #\( and #\) are ordinary character literals and a naive
+  // balance check calls both of them broken — which would be a worse bug
+  // than the one being fixed, since it rejects correct programs.
+  { id: 'read-char-open-paren', name: 'Reader: #\\( is a character, not an open paren', code: '(char->integer #\\()', expectOk: true, expectResult: '40' },
+  { id: 'read-char-close-paren', name: 'Reader: #\\) is a character, not a close paren', code: '(char->integer #\\))', expectOk: true, expectResult: '41' },
+  { id: 'read-parens-in-string', name: 'Reader: parens inside a string are text', code: '(string-length "a ) b ( c")', expectOk: true, expectResult: '9' },
+  { id: 'read-parens-in-comment', name: 'Reader: parens inside a comment are text', code: '; ) ) ( (\n(+ 20 22)', expectOk: true, expectResult: '42' },
+
+  // And the session survives. This is the property that matters most for
+  // live editing: a typo must cost you the form, not the interpreter.
+  { id: 'read-vm-survives', name: 'Reader: a fault leaves the VM usable', code: '(+ 20 22)', expectOk: true, expectResult: '42' }
 ];
 
 async function runTestSuite(evalJsonFn, clearFibersFn) {

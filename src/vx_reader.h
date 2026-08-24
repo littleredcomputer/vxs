@@ -11,6 +11,22 @@
 
 namespace vxs {
 
+// A malformed source text, reported rather than absorbed.
+//
+// It derives from std::runtime_error, so every existing catch site — the
+// wasm eval entry points and main.cpp's top-level eval_string — already
+// unwinds it correctly and the VM stays usable afterward. That last part
+// is the whole point: a typo must cost you the form you typed, not the
+// session you typed it into.
+//
+// Deliberately NOT RaiseEscape. That type is raise/guard's, and its
+// payload lives in VM::in_flight_raises, which the reader has no business
+// pushing to; a syntax fault is also not a condition a running program
+// should be able to intercept, since by definition there is no program.
+struct ReaderError : std::runtime_error {
+  explicit ReaderError(const std::string &msg) : std::runtime_error(msg) {}
+};
+
 //=============================================================================
 // Scheme S-Expression Reader / Lexer
 //=============================================================================
@@ -140,6 +156,23 @@ public:
   }
 
 private:
+  // Reports a fault at a byte offset, as line:column.
+  //
+  // The line and column are recomputed by walking the source from the
+  // start, which is linear — and free, because this runs exactly once,
+  // on the way out. Tracking a line counter through every advance() to
+  // save a walk that only ever happens when the program is already
+  // wrong would be paying on the fast path for the slow one.
+  [[noreturn]] void fault(size_t at, const std::string &what) const {
+    size_t line = 1, col = 1;
+    for (size_t i = 0; i < at && i < src.size(); ++i) {
+      if (src[i] == '\n') { line++; col = 1; } else { col++; }
+    }
+    std::ostringstream os;
+    os << "read error at line " << line << ", column " << col << ": " << what;
+    throw ReaderError(os.str());
+  }
+
   static inline bool iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -188,6 +221,7 @@ private:
   }
 
   Value read_list() {
+    const size_t open_at = cursor;
     advance(); // '('
     skip_whitespace_and_comments();
     if (peek() == ')') {
@@ -198,11 +232,13 @@ private:
     std::vector<Value> elements;
     Value tail = Value::nil();
     bool is_dotted = false;
+    bool closed = false;
 
     while (!is_at_end()) {
       skip_whitespace_and_comments();
       if (peek() == ')') {
         advance();
+        closed = true;
         break;
       }
 
@@ -214,13 +250,24 @@ private:
         tail = read_form();
         is_dotted = true;
         skip_whitespace_and_comments();
-        if (peek() == ')')
+        if (peek() == ')') {
           advance();
+          closed = true;
+        }
         break;
       }
 
       elements.push_back(read_form());
     }
+
+    // THE SILENT ONE. This loop used to end on is_at_end() and return the
+    // elements it had, which is a perfectly well-formed list — so a file
+    // missing one ')' did not fail to load, it loaded something else, and
+    // the only symptom was an expression sitting one level deeper than it
+    // was written. Nothing downstream can detect that, because by then it
+    // is indistinguishable from what you meant to type.
+    if (!closed)
+      fault(open_at, "'(' is never closed");
 
     Value result = is_dotted ? tail : Value::nil();
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
@@ -243,17 +290,22 @@ private:
   // ObjVector (or binding list) out of them instead of leaving them as an
   // inert call form — see quote_materialize in vx_compiler.h.
   Value read_bracket_vector() {
+    const size_t open_at = cursor;
     advance(); // '['
     skip_whitespace_and_comments();
     std::vector<Value> elements;
+    bool closed = false;
     while (!is_at_end()) {
       skip_whitespace_and_comments();
       if (peek() == ']') {
         advance();
+        closed = true;
         break;
       }
       elements.push_back(read_form());
     }
+    if (!closed)
+      fault(open_at, "'[' is never closed");
     Value list = Value::nil();
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
       list = vm.heap.cons(*it, list);
@@ -265,17 +317,22 @@ private:
   // {k1 v1 ...} desugars to a (%brace-map k1 v1 ...) call form — same
   // reasoning as read_bracket_vector above.
   Value read_brace_map() {
+    const size_t open_at = cursor;
     advance(); // '{'
     skip_whitespace_and_comments();
     std::vector<Value> elements;
+    bool closed = false;
     while (!is_at_end()) {
       skip_whitespace_and_comments();
       if (peek() == '}') {
         advance();
+        closed = true;
         break;
       }
       elements.push_back(read_form());
     }
+    if (!closed)
+      fault(open_at, "'{' is never closed");
     Value list = Value::nil();
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
       list = vm.heap.cons(*it, list);
@@ -285,15 +342,22 @@ private:
   }
 
   Value read_vector() {
+    // The caller consumed both '#' and '(' before handing over, so the
+    // opening is two bytes back from here.
+    const size_t open_at = cursor >= 2 ? cursor - 2 : 0;
     std::vector<Value> elements;
+    bool closed = false;
     while (!is_at_end()) {
       skip_whitespace_and_comments();
       if (peek() == ')') {
         advance();
+        closed = true;
         break;
       }
       elements.push_back(read_form());
     }
+    if (!closed)
+      fault(open_at, "'#(' is never closed");
     Value vec = vm.heap.make_vector(static_cast<uint32_t>(elements.size()));
     ObjVector *ov = vec.as_ptr<ObjVector>();
     for (size_t i = 0; i < elements.size(); ++i) {
@@ -303,6 +367,7 @@ private:
   }
 
   Value read_string() {
+    const size_t open_at = cursor;
     advance(); // '"'
     std::string s;
     while (!is_at_end() && peek() != '"') {
@@ -325,8 +390,12 @@ private:
         s += c;
       }
     }
-    if (peek() == '"')
-      advance();
+    // An unterminated string used to swallow the entire rest of the file
+    // and return it as a perfectly good string, so every definition after
+    // the stray quote quietly vanished from the program.
+    if (peek() != '"')
+      fault(open_at, "string is never closed");
+    advance();
     return vm.heap.make_string(s);
   }
 
@@ -341,6 +410,16 @@ private:
       }
       advance();
     }
+
+    // THE HANG. read_atom stops at a delimiter without consuming it, so
+    // reaching here on a stray ')' produced a zero-length token and left
+    // the cursor exactly where it was — and read_all_forms' loop, seeing
+    // input remaining, called straight back in. Measured: 53 seconds of
+    // appending the empty symbol to a vector, then std::bad_alloc, and a
+    // VM too damaged to evaluate anything afterward. In a browser tab
+    // that is a freeze followed by a dead interpreter, from one keystroke.
+    if (cursor == start)
+      fault(start, std::string("unexpected '") + peek() + "'");
 
     std::string_view token = src.substr(start, cursor - start);
 
