@@ -881,6 +881,21 @@ Not scheduled, kept so they are not rediscovered from scratch.
   self-intersecting regime is where `a > R` and that minimum stops
   existing.
 
+- **Runge-Kutta on the GPU: the tableau folds at COMPILE time.** An RK step
+  is a fold over the rows of a Butcher tableau, but `fold-i` cannot carry
+  seven stage-vectors as an accumulator and does not need to — the tableau
+  is known when the kernel is generated, so Scheme does the fold and emits
+  UNROLLED WGSL. Zero coefficients then emit nothing at all, which is an
+  optimisation you would otherwise get around to and here is just what code
+  generation produces.
+
+  ⚠️ **Adaptive step size is the one part that does not port.** Different
+  elements would take different numbers of steps, and a warp runs until its
+  slowest lane finishes, so per-element step control costs the whole warp
+  its divergence. The division that follows: **fixed step on the device,
+  with the CPU oracle establishing what step size the accuracy target
+  entitles you to.**
+
 - **An adaptive ODE solver as a coroutine, for use as an ORACLE.** A
   high-order extrapolation solver with dense output has a control-flow
   shape that keeps being written inside out: a callback invoked once per
@@ -901,6 +916,13 @@ Not scheduled, kept so they are not rediscovered from scratch.
   trajectories in a wrangle for the picture, a few at 1e-12 for the truth,
   and then the cheap integrator's error becomes *measurable* rather than
   assumed.
+
+  **The target should be DOPRI5 rather than an extrapolation method.** It
+  is one tableau and one interpolation polynomial; it carries dense output;
+  and it is strong enough for this class of problem — two Arenstorf orbits
+  at 1e-7 in 453 accepted steps. An extrapolation method is more powerful
+  and much larger, and transliterating careful numerical code twice is
+  where the care leaks out of it.
 
   **Dense output is what makes that comparison possible at all.** The two
   integrators take unrelated step sizes, so there are no matched samples to
