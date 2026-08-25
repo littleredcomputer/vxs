@@ -133,16 +133,20 @@
 (assert-true "the uniform carries time, count and seed"
              (string-contains? src "struct WU {\n  time : f32,\n  count : u32,\n  seed : u32,\n  step : u32,"))
 
-;; Eight spare slots, and named scalars rather than array<f32, 8>: in the
-;; uniform address space an array's stride is padded to 16 bytes, so the
-;; array spelling would cost 128 bytes and index wrongly for anyone who
-;; assumed the floats were packed. This way the struct is exactly 48.
-(assert-true "and eight live parameter slots"
+;; Sixteen spare slots, and named scalars rather than array<f32, 16>: in
+;; the uniform address space an array's stride is padded to 16 bytes, so
+;; the array spelling would cost 256 bytes and index wrongly for anyone who
+;; assumed the floats were packed. This way the members occupy 116 bytes,
+;; which WGSL rounds to 128 — and a substep's slice costs 256 whatever the
+;; struct does, since it is addressed by dynamic offset.
+(assert-true "and sixteen live parameter slots"
              (string-contains? src "  p0 : f32,\n  p1 : f32,"))
-(assert-true "through to the eighth"
-             (string-contains? src "  p7 : f32,\n};"))
+(assert-true "through to the sixteenth"
+             (string-contains? src "  p15 : f32,\n};"))
 (assert-true "not an array, whose uniform stride would be 16 bytes each"
-             (not (string-contains? src "array<f32, 8>")))
+             (not (string-contains? src "array<f32, 16>")))
+(assert-true "and eight integer slots, ahead of the floats"
+             (string-contains? src "  i7 : u32,\n  p0 : f32,"))
 
 ;; The distributions the body can reach. Named individually because the
 ;; point of welding this library in was to have them.
@@ -300,14 +304,14 @@
 (assert-equal "and drops the previous names" #f (assq 'sigma wrangle-env))
 (assert-equal "while the built-ins survive" "w.time" (wgsl-code 'time wrangle-env))
 
-;; The block itself: eight floats, made once and written in place, because
+;; The block itself: sixteen floats, made once and written in place, because
 ;; a fresh list per frame would allocate sixty times a second in a demo
 ;; that otherwise runs at zero objects per frame.
 (wrangle-params! '(sigma radius gain))
 (define PB (make-wrangle-params))
 (define PV (wrangle-params-view PB))
-(assert-equal "the block is eight floats, a flag word and three ints"
-              48 (bytes-length PB))
+(assert-equal "the block is sixteen floats, a flag word and eight ints"
+              100 (bytes-length PB))
 (assert-equal "unset slots read zero" 0.0 (param-ref PV 'gain))
 (param-set! PV 'gain 2.5)
 (param-set! PV 'sigma 0.25)
@@ -319,13 +323,13 @@
 
 (assert-equal "an undeclared name is an error, not slot zero"
               'raised (guard (e (#t 'raised)) (param-set! PV 'nonesuch 1.0)))
-(assert-equal "more than eight float parameters is an error"
+(assert-equal "more than sixteen float parameters is an error"
               'raised (guard (e (#t 'raised))
-                        (wrangle-params! '(a b c d e f g h i))))
+                        (wrangle-params! '(a b c d e f g h i j k l m n o p q))))
 
 ;;--- typed parameters ---------------------------------------------------
 ;; The type decides which slot a parameter lands in: :f32 takes one of
-;; eight float slots, :u32 an honest integer slot, :flag one bit of a word.
+;; sixteen float slots, :u32 an honest integer slot, :flag one bit of a word.
 ;; ONE declarator rather than three, and a bare symbol still means :f32.
 ;;
 ;; :u32 and :flag are not tidiness. An f32 has 24 mantissa bits, so an
@@ -354,9 +358,11 @@
                "fn flag_trails() -> bool { return (w.flags & (1u << 1u)) != 0u; }"))
 (assert-equal "an unknown parameter type is refused"
               'raised (guard (e (#t 'raised)) (wrangle-params! '((x :vec3f)))))
-(assert-equal "at most three integer slots"
+(assert-equal "at most eight integer slots"
               'raised (guard (e (#t 'raised))
-                        (wrangle-params! '((a :u32) (b :u32) (c :u32) (d :u32)))))
+                        (wrangle-params! '((a :u32) (b :u32) (c :u32) (d :u32)
+                                           (e :u32) (f :u32) (g :u32) (h :u32)
+                                           (i :u32)))))
 
 (wrangle-params! '(sigma (mode :u32) (flat :flag) (trails :flag)))
 (define TB (make-wrangle-params))

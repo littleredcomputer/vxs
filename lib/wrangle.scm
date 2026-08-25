@@ -153,8 +153,8 @@
 ;;   (wrangle-params! '(sigma radius gain))                  ; all :f32
 ;;   (wrangle-params! '((sigma :f32) (mode :u32) (flat :flag)))
 ;;
-;;   :f32   -> p0..p7, one of eight float slots
-;;   :u32   -> i0..i2, an honest integer slot
+;;   :f32   -> p0..p15, one of sixteen float slots
+;;   :u32   -> i0..i7, an honest integer slot
 ;;   :flag  -> one bit of `flags`
 ;;
 ;; ONE declarator rather than three, because three would each do a third of
@@ -171,19 +171,19 @@
 ;; kernels because one of them has a flag set, and `if (mode > 0.5)` — a
 ;; float comparison standing in for a bit test.
 
-(define wrangle-param-slots 8)    ; p0..p7
-(define wrangle-int-slots 3)      ; i0..i2
+(define wrangle-param-slots 16)   ; p0..p15
+(define wrangle-int-slots 8)      ; i0..i7
 (define wrangle-flag-bits 32)     ; bits of `flags`
 
 ;; ((name type slot) ...) — slot is the index within that type's class.
 (define wrangle-params '())
 
-;; Block layout, in 32-bit words: eight floats, then flags, then i0..i2.
+;; Block layout, in 32-bit words: sixteen floats, then flags, then i0..i7.
 ;; It does NOT mirror the struct — the host maps one to the other — so the
 ;; float slots keep the offsets they have always had.
-(define wrangle-param-words 12)
-(define wrangle-flags-word 8)
-(define wrangle-int-word0 9)
+(define wrangle-param-words 25)
+(define wrangle-flags-word 16)
+(define wrangle-int-word0 17)
 
 (define (wrangle-params! specs)
   (let loop ((ss specs) (nf 0) (ni 0) (nb 0) (acc '()))
@@ -249,8 +249,8 @@
                        (number->string (caddr p)) "u)) != 0u; }\n"))
                     flags)))))
 
-;; The parameter block: eight floats, a flag word and three integer slots,
-;; owned by the host and rewritten in place.
+;; The parameter block: sixteen floats, a flag word and eight integer
+;; slots, owned by the host and rewritten in place.
 ;;
 ;; A BYTES OBJECT, made once and mutated, rather than a fresh list per
 ;; frame. At sixty frames a second a list would allocate every frame, and
@@ -561,7 +561,8 @@
 ;;
 ;; The scratch buffer cannot hold it: scratch is addressed as
 ;; scratch[i * stride + off], so it is per-element by construction. The
-;; parameter block is eight floats. And anything that changes per frame
+;; parameter block is a fixed handful of scalars. And anything that
+;; changes per frame
 ;; cannot be baked into the source without recompiling the shader, which is
 ;; the problem live parameters were added to solve.
 ;;
@@ -700,22 +701,32 @@
    ;; then silently drops the rest — which survives every test written
    ;; early. The seed had exactly this bug.
    "  flags : u32,\n"
-   "  i0 : u32,\n"
-   "  i1 : u32,\n"
-   "  i2 : u32,\n"
-   ;; Eight general-purpose slots. A kernel constant baked into the SOURCE
+   "  i0 : u32,\n  i1 : u32,\n  i2 : u32,\n  i3 : u32,\n"
+   "  i4 : u32,\n  i5 : u32,\n  i6 : u32,\n  i7 : u32,\n"
+   ;; Sixteen general-purpose slots. A kernel constant baked into the SOURCE
    ;; means changing it recompiles the shader, so dragging a slider hitches
    ;; on every frame it moves. These live in the uniform, which is already
    ;; rewritten before every dispatch at no cost — the difference between a
    ;; knob you demonstrate and a knob you play.
    ;;
-   ;; Written as eight named scalars and NOT array<f32, 8>: in the uniform
+   ;; Written as named scalars and NOT array<f32, 16>: in the uniform
    ;; address space an array's stride is padded to 16 bytes, so the array
-   ;; spelling would cost 128 bytes and index wrongly for anyone assuming
+   ;; spelling would cost 256 bytes and index wrongly for anyone assuming
    ;; the floats are packed. Individual f32 members pack at 4-byte
-   ;; alignment, so the struct is exactly 48 bytes.
+   ;; alignment, so the members occupy 116 bytes, which WGSL rounds up to
+   ;; 128 because a uniform struct's size is a multiple of 16.
+   ;;
+   ;; 128 OF A 256-BYTE STRIDE. Substeps are addressed by dynamic offset,
+   ;; and minUniformBufferOffsetAlignment is 256 on every device we care
+   ;; about, so each substep already occupies 256 bytes whatever this
+   ;; struct costs. Growth is free until it crosses that line, and then it
+   ;; doubles both the allocation and the per-substep write — so 256 is the
+   ;; real wall, and the answer there is a read-only struct passed down as
+   ;; a parameter, not a wider uniform.
    "  p0 : f32,\n  p1 : f32,\n  p2 : f32,\n  p3 : f32,\n"
    "  p4 : f32,\n  p5 : f32,\n  p6 : f32,\n  p7 : f32,\n"
+   "  p8 : f32,\n  p9 : f32,\n  p10 : f32,\n  p11 : f32,\n"
+   "  p12 : f32,\n  p13 : f32,\n  p14 : f32,\n  p15 : f32,\n"
    "};\n"
    "@group(0) @binding(0) var<uniform> w : WU;\n"
    "@group(0) @binding(1) var<storage, read_write> pts : array<f32>;\n"

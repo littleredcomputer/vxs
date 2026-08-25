@@ -345,12 +345,20 @@ Parameters are **typed**, and the type decides which slot they occupy:
 
 | type | slots | in a kernel |
 |---|---|---|
-| `:f32` | 8 (`p0`…`p7`) | `sigma` → `w.p0` |
-| `:u32` | 3 (`i0`…`i2`) | `mode` → `w.i0` |
+| `:f32` | 16 (`p0`…`p15`) | `sigma` → `w.p0` |
+| `:u32` | 8 (`i0`…`i7`) | `mode` → `w.i0` |
 | `:flag` | 32 bits of `flags` | `flatten` → a `:bool`, so `(if flatten a b)` works |
 
 Flags also get an emitted `fn flag_flatten() -> bool` for WGSL-text
 bodies, the same dual treatment attributes get.
+
+The struct's members occupy 116 bytes, which WGSL rounds to 128 since a
+uniform struct's size is a multiple of 16. Substeps are addressed by
+dynamic offset and `minUniformBufferOffsetAlignment` is 256, so each
+substep's slice costs 256 bytes whatever the struct holds — which is why
+widening it was free. **256 is the real wall**: past it the allocation and
+the per-substep write both double, and the answer there is a read-only
+struct passed down as a parameter, not a wider uniform.
 
 ⚠️ `:u32` and `:flag` are not tidiness. An f32 carries 24 mantissa bits, so
 an integer or a bitfield in a float slot works perfectly up to bit 23 and
@@ -476,7 +484,8 @@ each frame cannot drift.
 Data every element **reads**, as against scratch, which each element
 **owns** — a lookup table every element consults, a per-frame input every
 element reads. Scratch is addressed `scratch[i * stride + off]`, so it is
-per-element by construction; the parameter block is eight floats; and
+per-element by construction; the parameter block is a fixed handful of
+scalars; and
 anything that changes per frame cannot be baked into the source.
 
 ```scheme

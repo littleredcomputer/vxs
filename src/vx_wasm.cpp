@@ -749,7 +749,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
     // Alignment is a device limit, not a constant. 256 is the guaranteed
     // maximum and the near-universal value, but reading it is free.
     var align = (device.limits && device.limits.minUniformBufferOffsetAlignment) || 256;
-    var ustride = Math.ceil(64 / align) * align;
+    var ustride = Math.ceil(128 / align) * align;
     var entry = globalThis.vxsWrangleCache[key];
     if (!entry || entry.device !== device) {
       var module = shader.module;
@@ -770,8 +770,12 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
         compute: { module: module, entryPoint: 'main' }
       });
       var ubuf = device.createBuffer({
-        // struct WU: time/count/seed/pad, then eight parameter slots.
-        // 64 rather than 16 because a kernel constant baked into the
+        // struct WU: time/count/seed/step, flags and eight integer slots,
+        // then sixteen float parameter slots — 116 bytes of members, which
+        // WGSL rounds to 128 since a uniform struct's size is a multiple
+        // of 16. Substeps are addressed by dynamic offset at a 256-byte
+        // alignment, so this is 128 of a slice that costs 256 either way.
+        // 128 rather than 16 because a kernel constant baked into the
         // source recompiles the shader every time it changes; in the
         // uniform it is free, and the uniform is rewritten before every
         // dispatch anyway.
@@ -790,7 +794,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
           // An explicit size is REQUIRED with a dynamic offset: without
           // it the binding runs to the end of the buffer, and every offset
           // past the first would overrun it.
-          { binding: 0, resource: { buffer: ubuf, offset: 0, size: 64 } },
+          { binding: 0, resource: { buffer: ubuf, offset: 0, size: 128 } },
           { binding: 1, resource: { buffer: buf } }
         ].concat(scratch ? [{ binding: 2, resource: { buffer: scratch } }] : [])
          .concat(shared ? [{ binding: 3, resource: { buffer: shared } }] : [])
@@ -812,7 +816,7 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
       entry.bind = device.createBindGroup({
         layout: entry.bgl,
         entries: [
-          { binding: 0, resource: { buffer: entry.ubuf, offset: 0, size: 64 } },
+          { binding: 0, resource: { buffer: entry.ubuf, offset: 0, size: 128 } },
           { binding: 1, resource: { buffer: buf } }
         ].concat(scratch ? [{ binding: 2, resource: { buffer: scratch } }] : [])
          .concat(shared ? [{ binding: 3, resource: { buffer: shared } }] : [])
@@ -842,18 +846,19 @@ EM_JS(int, js_gpu_wrangle, (int deviceId, int bufId, int shaderId, int count, do
       entry.uu32[o + 3] = k >>> 0;
       // Parameters are optional; absent means every slot stays zero. The
       // caller owns the block and rewrites it in place, so this is a copy
-      // of at most 48 bytes per substep and never an allocation.
+      // of at most 100 bytes per substep and never an allocation.
       //
-      // The block does NOT mirror the struct: it holds eight floats, then
-      // flags and three integer slots. Keeping the float offsets where
-      // they have always been means nothing written before this moved.
+      // The block does NOT mirror the struct: it holds sixteen floats,
+      // then flags and eight integer slots, while the struct leads with
+      // time/count/seed/step. Keeping the float offsets where they have
+      // always been means nothing written before this moved.
       var pw = paramsLen >> 2;
-      for (var pi = 0; pi < 8; pi++) {
-        entry.uf32[o + 8 + pi] = (paramsPtr && pi < pw) ? HEAPF32[(paramsPtr >> 2) + pi] : 0.0;
+      for (var pi = 0; pi < 16; pi++) {
+        entry.uf32[o + 13 + pi] = (paramsPtr && pi < pw) ? HEAPF32[(paramsPtr >> 2) + pi] : 0.0;
       }
-      for (var ii = 0; ii < 4; ii++) {
-        entry.uu32[o + 4 + ii] = (paramsPtr && (8 + ii) < pw)
-          ? HEAPU32[(paramsPtr >> 2) + 8 + ii] : 0;
+      for (var ii = 0; ii < 9; ii++) {
+        entry.uu32[o + 4 + ii] = (paramsPtr && (16 + ii) < pw)
+          ? HEAPU32[(paramsPtr >> 2) + 16 + ii] : 0;
       }
     }
     device.queue.writeBuffer(entry.ubuf, 0, entry.uf32, 0, steps * slot);
@@ -1527,7 +1532,7 @@ static void register_wasm_primitives(VM &vm) {
       ObjBytes *pb = vm.require_bytes(args[6], "gpu-wrangle!");
       params = pb->data.data();
       params_len = static_cast<int>(pb->data.size());
-      if (params_len > 48) params_len = 48;
+      if (params_len > 100) params_len = 100;
     }
     // Substeps: run the kernel N times inside one encoder and one submit.
     // Looping in Scheme instead yields between dispatches, so N steps cost

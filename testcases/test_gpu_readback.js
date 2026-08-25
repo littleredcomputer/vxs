@@ -180,24 +180,26 @@ function check(name, cond, detail) {
     ev(`(param-set! PV 'sigma ${sg}) (param-set! PV 'gain ${gn})`);
     ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB)`);
     const w = fakeDevice.queue._lastWrite;
-    const f = new Float32Array(w.bytes.buffer, 0, 16);
-    const u = new Uint32Array(w.bytes.buffer, 0, 16);
-    seen.push({ size: w.size, seed: u[2], p0: f[8], p1: f[9] });
+    const f = new Float32Array(w.bytes.buffer, 0, 32);
+    const u = new Uint32Array(w.bytes.buffer, 0, 32);
+    seen.push({ size: w.size, seed: u[2], p0: f[13], p1: f[14] });
   }
-  // The STRUCT is 48 bytes (pinned against the WGSL text in layer 18);
-  // the BUFFER is one dynamic-offset-aligned slice per substep, so a
-  // single-step dispatch still allocates a full 256-byte slice.
+  // The STRUCT's members occupy 116 bytes, which WGSL rounds to 128 since
+  // a uniform struct's size is a multiple of 16 (pinned against the WGSL
+  // text in layer 18); the BUFFER is one dynamic-offset-aligned slice per
+  // substep, so a single-step dispatch still allocates a full 256-byte
+  // slice, and the struct could double again before that changed.
   check('the uniform buffer is one aligned slice per substep',
         seen.every((r) => r.size === 256), JSON.stringify(seen[0]));
-  check('and the binding declares an explicit 64-byte size',
-        fakeDevice._boundGroup.entries[0].resource.size === 64,
+  check('and the binding declares an explicit 128-byte size',
+        fakeDevice._boundGroup.entries[0].resource.size === 128,
         JSON.stringify(fakeDevice._boundGroup.entries[0].resource));
 
   // Integers and flags travel as integers. A bitfield in a float slot
   // works to bit 23 and then silently drops the rest.
   ev(`(param-set! PV 'mode 16777217) (param-set! PV 'trails #t)`);
   ev(`(gpu-wrangle! dev handle wsh 3 0.0 7 PB)`);
-  const tw = new Uint32Array(fakeDevice.queue._lastWrite.bytes.buffer, 0, 16);
+  const tw = new Uint32Array(fakeDevice.queue._lastWrite.bytes.buffer, 0, 32);
   check('an integer parameter reaches the device exactly past 2^24',
         tw[5] === 16777217, String(tw[5]));
   // `trails` is the first :flag declared, so bit 0.
@@ -255,9 +257,9 @@ function check(name, cond, detail) {
   // The bytes each substep will actually read.
   const ub = fakeDevice.queue._lastWrite.bytes.buffer;
   const steps = [0, 1, 2, 3, 4].map((k) => ({
-    step: new Uint32Array(ub, k * 256, 16)[3],
-    seed: new Uint32Array(ub, k * 256, 16)[2],
-    p0: new Float32Array(ub, k * 256, 16)[8],
+    step: new Uint32Array(ub, k * 256, 32)[3],
+    seed: new Uint32Array(ub, k * 256, 32)[2],
+    p0: new Float32Array(ub, k * 256, 32)[13],
   }));
   check('every substep carries a distinct RNG stream',
         JSON.stringify(steps.map((r) => r.step)) === JSON.stringify([0, 1, 2, 3, 4]),
