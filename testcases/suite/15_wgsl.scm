@@ -55,6 +55,57 @@
 (assert-equal "unary minus" "-(time)" (wgsl-code '(- time) E))
 (assert-equal "division" "(time / 2.0)" (wgsl-code '(/ time 2) E))
 
+;;--- the two modular operators ------------------------------------------
+;; They are DIFFERENT operations and both are spelled out, because the two
+;; languages a reader is likely to be arriving from disagree about which
+;; one `mod` means. WGSL's % truncates (sign follows the dividend, as C's
+;; fmod); GLSL's mod floors (sign follows the divisor, as Scheme's modulo).
+;; On non-negative operands they agree, which is exactly why picking one
+;; and calling it `mod` would survive early testing and then be wrong on a
+;; centred grid.
+(define EU '((i . :u32) (n . :u32) (time . :f32)))
+(assert-equal "remainder is WGSL's %, straight through"
+              "(time % 2.0)" (wgsl-code '(remainder time 2) E))
+(assert-equal "and on unsigned operands too"
+              "(i % n)" (wgsl-code '(remainder i n) EU))
+;; With nothing negative the two definitions coincide, so the floor would
+;; be dead work — an unsigned modulo emits the same % and needs no
+;; statements at all.
+(assert-equal "unsigned modulo needs no floor"
+              "(i % n)" (wgsl-code '(modulo i n) EU))
+
+;; The floored form names both operands twice, so both are bound first.
+;; Splicing the operand text twice would EVALUATE it twice, and the
+;; generator is stateful: (modulo (random-normal ...) k) would draw two
+;; different numbers and combine them. This is the property that assertion
+;; protects, and it is invisible in the result type.
+(assert-equal "a float modulo floors, binding both operands"
+              (string-append "let m_1 : f32 = time;\n"
+                             "let n_2 : f32 = 2.0;\n"
+                             "return (m_1 - n_2 * floor(m_1 / n_2));")
+              (wgsl-body '(modulo time 2) E ""))
+;; A stand-in for the effectful calls the real environment supplies —
+;; lib/wrangle.scm's generator lives a layer up, and the property being
+;; asserted belongs to the compiler, not to that generator.
+(wgsl-declare! 'draw "draw_one" '(:f32) :f32)
+(define (occurrences hay needle)
+  (let ((h (string-length hay)) (n (string-length needle)))
+    (let loop ((k 0) (c 0))
+      (cond ((> (+ k n) h) c)
+            ((string=? (substring hay k (+ k n)) needle) (loop (+ k 1) (+ c 1)))
+            (else (loop (+ k 1) c))))))
+(assert-equal "so an operand that draws is drawn once"
+              1 (occurrences (wgsl-body '(modulo (draw time) 2) E "") "draw_one("))
+(assert-equal "where naming it twice would have drawn twice"
+              2 (occurrences (wgsl-body '(- (draw time) (* 2 (floor (/ (draw time) 2)))) E "")
+                             "draw_one("))
+
+;; Mixed signedness is refused here as everywhere: WGSL will not, and the
+;; conversion that would make it work is the one worth writing.
+(assert-equal "a float cannot be taken modulo an integer"
+              'rejected (guard (e (#t 'rejected))
+                          (wgsl-body '(modulo time n) EU "") 'accepted))
+
 (assert-equal "scalar times vector is a vector" :vec2f (wgsl-type '(* uv 2.0) E))
 (assert-equal "vector times scalar is a vector" :vec2f (wgsl-type '(* 2.0 uv) E))
 (assert-equal "scalar plus scalar stays scalar" :f32 (wgsl-type '(+ time 1) E))

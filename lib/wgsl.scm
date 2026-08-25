@@ -76,6 +76,22 @@
   (set! wgsl-counter (+ wgsl-counter 1))
   (string-append base "_" (number->string wgsl-counter)))
 
+;; Bind a result to a fresh local, so its code can be MENTIONED twice
+;; without being EVALUATED twice. Compiled results are spliced as text, so
+;; an operator whose expansion repeats an operand repeats whatever that
+;; operand does — and the generator is stateful, so (modulo (random-normal
+;; ...) k) written naively would draw two different numbers and combine
+;; them. Anything that expands to more than one mention of an argument
+;; must come through here.
+(define (wgsl-bind base r)
+  (let ((fresh (wgsl-fresh base)))
+    (wgsl-result (wgsl-type-of r)
+                 (append (wgsl-stmts-of r)
+                         (list (string-append "let " fresh " : "
+                                              (wgsl-type-name (wgsl-type-of r))
+                                              " = " (wgsl-code-of r) ";")))
+                 fresh)))
+
 ;; Always emits a decimal point: (number->string 1) is "1", which WGSL
 ;; reads as i32.
 (define (wgsl-number n) (number->string (* 1.0 n)))
@@ -403,6 +419,33 @@
                     (wgsl-append-stmts (list a b))
                     (string-append (cdr (assq op wgsl-binary-same)) "("
                                    (wgsl-code-of a) ", " (wgsl-code-of b) ")"))))
+
+    ;; (remainder a b) truncates — the sign follows the DIVIDEND, which is
+    ;; what WGSL's % and C's fmod do. (modulo a b) floors — the sign
+    ;; follows the DIVISOR, which is what Scheme's modulo and GLSL's mod
+    ;; do. They agree whenever both operands are non-negative and disagree
+    ;; on every case where they do not, so BOTH are spelled out and
+    ;; neither is called `mod`: someone arriving from GLSL and someone
+    ;; arriving from WGSL would read that name as opposite things, and a
+    ;; centred grid or a noise field crosses zero constantly.
+    ((memq op '(remainder modulo))
+     (let* ((a (wgsl (car args) env))
+            (b (wgsl (cadr args) env))
+            (t (wgsl-arith-type op (wgsl-type-of a) (wgsl-type-of b))))
+       (if (or (eq? op 'remainder) (eq? t :u32))
+           ;; Unsigned operands cannot disagree: with nothing negative the
+           ;; two definitions coincide, so the floor would be dead work.
+           (wgsl-result t (wgsl-append-stmts (list a b))
+                        (string-append "(" (wgsl-code-of a) " % "
+                                       (wgsl-code-of b) ")"))
+           ;; a - b * floor(a / b) names both operands twice, so both are
+           ;; bound first — see wgsl-bind.
+           (let ((ab (wgsl-bind "m" a)) (bb (wgsl-bind "n" b)))
+             (wgsl-result t (append (wgsl-stmts-of ab) (wgsl-stmts-of bb))
+                          (string-append "(" (wgsl-code-of ab) " - "
+                                         (wgsl-code-of bb) " * floor("
+                                         (wgsl-code-of ab) " / "
+                                         (wgsl-code-of bb) "))"))))))
 
     ;; Comparisons produce bool, which exists only to feed `if` and the
     ;; boolean connectives — there is no other way to make one and nothing

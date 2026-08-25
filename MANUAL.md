@@ -507,6 +507,30 @@ not `shared` — `shared` is a reserved word in WGSL.
 Unlike `:scratch`, which uploads once, `:shared` is re-uploaded before
 every dispatch: the case it exists for is data that changes each frame.
 
+### `modulo` and `remainder`, not `mod`
+
+Both exist and they are different operations:
+
+| form | rounds toward | sign follows | same as |
+|---|---|---|---|
+| `(remainder a b)` | zero | the **dividend** | WGSL `%`, C `fmod` |
+| `(modulo a b)` | −∞ | the **divisor** | GLSL `mod`, Scheme `modulo` |
+
+They agree whenever both operands are non-negative and disagree everywhere
+else — which is why neither is called `mod`. A reader arriving from GLSL
+and a reader arriving from WGSL would read that name as opposite things,
+and the disagreement only shows up once something crosses zero, which on a
+centred grid or a noise field is constantly.
+
+On `:u32` operands `modulo` emits a plain `%`, since with nothing negative
+the two coincide and the floor would be dead work.
+
+`(modulo a b)` on floats expands to `a - b * floor(a / b)`, which names
+both operands twice — so both are bound to locals first. That matters
+because compiled results are spliced as **text**: naming an operand twice
+would evaluate it twice, and `(modulo (random-uniform 0 1) k)` would
+otherwise draw two different numbers and combine them.
+
 ### `if` is a selection, not a branch
 
 In the kernel language `(if c a b)` compiles to WGSL `select(b, a, c)`.
