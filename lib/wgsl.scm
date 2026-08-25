@@ -428,11 +428,20 @@
     ;; neither is called `mod`: someone arriving from GLSL and someone
     ;; arriving from WGSL would read that name as opposite things, and a
     ;; centred grid or a noise field crosses zero constantly.
-    ((memq op '(remainder modulo))
+    ;;
+    ;; `%` IS a synonym for remainder, and is safe where `mod` was not:
+    ;; the glyph is WGSL's own spelling, so it can only mean what WGSL
+    ;; means by it. The ambiguity was in the word, not the operation.
+    ;;
+    ;; The two diverge on a negative DIVIDEND, not a negative divisor:
+    ;; (modulo -1 3) is 2 and (remainder -1 3) is -1, both with a positive
+    ;; divisor. Wrapping a coordinate that has gone negative back into
+    ;; [0, b) is the case, and it is the ordinary one.
+    ((memq op '(remainder % modulo))
      (let* ((a (wgsl (car args) env))
             (b (wgsl (cadr args) env))
             (t (wgsl-arith-type op (wgsl-type-of a) (wgsl-type-of b))))
-       (if (or (eq? op 'remainder) (eq? t :u32))
+       (if (or (memq op '(remainder %)) (eq? t :u32))
            ;; Unsigned operands cannot disagree: with nothing negative the
            ;; two definitions coincide, so the floor would be dead work.
            (wgsl-result t (wgsl-append-stmts (list a b))

@@ -513,7 +513,7 @@ Both exist and they are different operations:
 
 | form | rounds toward | sign follows | same as |
 |---|---|---|---|
-| `(remainder a b)` | zero | the **dividend** | WGSL `%`, C `fmod` |
+| `(remainder a b)`, `(% a b)` | zero | the **dividend** | WGSL `%`, C `fmod` |
 | `(modulo a b)` | −∞ | the **divisor** | GLSL `mod`, Scheme `modulo` |
 
 They agree whenever both operands are non-negative and disagree everywhere
@@ -521,6 +521,16 @@ else — which is why neither is called `mod`. A reader arriving from GLSL
 and a reader arriving from WGSL would read that name as opposite things,
 and the disagreement only shows up once something crosses zero, which on a
 centred grid or a noise field is constantly.
+
+`%` is a synonym for `remainder`, and is safe where `mod` was not: the
+glyph is WGSL's own spelling, so it can only mean what WGSL means by it.
+The ambiguity was in the word, not the operation.
+
+⚠️ The two diverge on a negative **dividend**, not a negative divisor.
+`(modulo -1 3)` is `2` and `(remainder -1 3)` is `-1`, both with a
+positive divisor. Wrapping a coordinate that has gone negative back into
+`[0, b)` is the case that cares, and it is the ordinary one — negative
+divisors are the rare thing, and not where the hazard lives.
 
 On `:u32` operands `modulo` emits a plain `%`, since with nothing negative
 the two coincide and the floor would be dead work.

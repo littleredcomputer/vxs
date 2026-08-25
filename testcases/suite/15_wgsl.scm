@@ -62,12 +62,19 @@
 ;; fmod); GLSL's mod floors (sign follows the divisor, as Scheme's modulo).
 ;; On non-negative operands they agree, which is exactly why picking one
 ;; and calling it `mod` would survive early testing and then be wrong on a
-;; centred grid.
+;; centred grid. They diverge on a negative DIVIDEND, not a negative
+;; divisor: (modulo -1 3) is 2 and (remainder -1 3) is -1, both with a
+;; positive divisor — wrapping a coordinate that has gone negative back
+;; into [0, b) is the ordinary case, not an exotic one.
 (define EU '((i . :u32) (n . :u32) (time . :f32)))
 (assert-equal "remainder is WGSL's %, straight through"
               "(time % 2.0)" (wgsl-code '(remainder time 2) E))
 (assert-equal "and on unsigned operands too"
               "(i % n)" (wgsl-code '(remainder i n) EU))
+;; `%` is a synonym, and safe where `mod` was not: the glyph is WGSL's own
+;; spelling, so it cannot be read as GLSL's floored operation.
+(assert-equal "% is the same operator by its WGSL spelling"
+              "(time % 2.0)" (wgsl-code '(% time 2) E))
 ;; With nothing negative the two definitions coincide, so the floor would
 ;; be dead work — an unsigned modulo emits the same % and needs no
 ;; statements at all.
