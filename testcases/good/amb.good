@@ -14,4 +14,14 @@ Floor assignment:
   ((baker 3) (cooper 2) (fletcher 4) (miller 5) (smith 1))
   (found without searching the rest: still live? #t)
 
+Two searches interleaved, a step at a time:
+  up to 20: (3 4 5)    up to 12: (3 4 5)
+  up to 20: (5 12 13)    up to 12: (6 8 10)
+  up to 20: (6 8 10)    up to 12: --none--
+
+A search nested inside another search's choice point:
+  (5 from (3 4))
+  (13 from (5 12))
+  (25 from (7 24))
+
 done.

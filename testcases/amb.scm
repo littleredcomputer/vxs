@@ -67,33 +67,27 @@
            8))
 
 ;;--- 3. amb, by re-execution -------------------------------------------
-;; The oracle. `choose` is the choice point: it asks which branch to take
-;; and records the width of the fan-out, so the driver knows afterwards
-;; which choices still had alternatives left.
+;; The oracle, and all of its state closed over by the search that owns
+;; it. As globals these worked exactly once: a second search alive at the
+;; same time would share one path, and a search nested inside another's
+;; choice point would overwrite its parent's. Neither fails loudly — the
+;; outer search would just quietly explore the wrong tree.
 ;;
 ;; `path` is what this run actually chose, as (index . width) pairs.
 ;; `plan` is what the driver wants chosen, from the previous run's path.
 ;; Beyond the end of the plan a run takes branch 0 — so the first attempt
 ;; is leftmost-first, and each subsequent one differs from the last in
 ;; exactly one place.
-
-(define amb-path '())
-(define amb-plan '())
-(define amb-fail (list 'amb-fail))   ; a fresh object, so eq? identifies it
-
-(define (choose choices)
-  (if (null? choices) (raise amb-fail))
-  (let* ((k (length amb-path))
-         (i (if (< k (length amb-plan)) (car (list-ref amb-plan k)) 0)))
-    (if (>= i (length choices)) (raise amb-fail))
-    (set! amb-path (append amb-path (list (cons i (length choices)))))
-    (list-ref choices i)))
-
-(define (require ok) (if (not ok) (raise amb-fail)))
+;;
+;; The failure token is a FRESH object per search, which is what lets
+;; searches nest: an inner guard tests it with eq?, so an outer search's
+;; failure passing through an inner one is not caught by mistake — it is
+;; re-raised and reaches the search that actually owns it.
 
 ;; The rightmost choice with an untried alternative, bumped by one, with
 ;; everything to its right dropped. #f when the tree is exhausted. This is
-;; ordinary odometer arithmetic — it is the whole search strategy.
+;; ordinary odometer arithmetic — it is the whole search strategy, and it
+;; holds no state, so it stays a plain procedure.
 (define (advance path)
   (let loop ((rev (reverse path)))
     (cond ((null? rev) #f)
@@ -104,29 +98,49 @@
 ;; Every solution, as a generator — so a caller can ask for the first and
 ;; walk away, and the rest of the tree is never explored.
 ;;
+;; `proc` is handed its own `choose` and `require`. Passing them in rather
+;; than defining them globally is the whole fix: they close over this
+;; search's state and nothing else can reach it.
+;;
 ;; NOTE the shape: the guard wraps ONLY the attempt, and the yield sits
 ;; outside it. (yield) inside guard cannot work — guard's continuation
 ;; includes native frames, so the fiber cannot suspend through it. That is
 ;; a real constraint on this design, not an incidental style choice.
-(define (solutions thunk)
-  (generator
-   (lambda ()
-     (set! amb-plan '())
-     (let loop ()
-       (set! amb-path '())
-       (let* ((attempt (guard (e ((eq? e amb-fail) amb-fail)) (thunk)))
-              (taken   amb-path))
-         (if (not (eq? attempt amb-fail))
-             (yield attempt))
-         (let ((next (advance taken)))
-           (if next (begin (set! amb-plan next) (loop)) 'exhausted)))))))
+(define (solutions proc)
+  (let ((path '())
+        (plan '())
+        (fail (list 'amb-fail)))   ; fresh, so eq? identifies THIS search
+
+    (define (choose choices)
+      (if (null? choices) (raise fail))
+      (let* ((k (length path))
+             (i (if (< k (length plan)) (car (list-ref plan k)) 0)))
+        ;; A replayed index can overshoot if an earlier choice narrowed
+        ;; this fan-out. Fail the branch rather than index off the end.
+        (if (>= i (length choices)) (raise fail))
+        (set! path (append path (list (cons i (length choices)))))
+        (list-ref choices i)))
+
+    (define (require ok) (if (not ok) (raise fail)))
+
+    (generator
+     (lambda ()
+       (set! plan '())
+       (let loop ()
+         (set! path '())
+         (let* ((attempt (guard (e ((eq? e fail) fail)) (proc choose require)))
+                (taken   path))
+           (if (not (eq? attempt fail))
+               (yield attempt))
+           (let ((next (advance taken)))
+             (if next (begin (set! plan next) (loop)) 'exhausted))))))))
 
 ;;--- Pythagorean triples ------------------------------------------------
 
 (define (upto a b) (if (> a b) '() (cons a (upto (+ a 1) b))))
 
 (define (pythagorean n)
-  (lambda ()
+  (lambda (choose require)
     (let* ((a (choose (upto 1 n)))
            (b (choose (upto a n)))
            (c (choose (upto b n))))
@@ -152,7 +166,7 @@
         (else (distinct? (cdr xs)))))
 
 (define (floors)
-  (lambda ()
+  (lambda (choose require)
     (let* ((levels '(1 2 3 4 5))
            (baker    (choose levels))
            (cooper   (choose levels))
@@ -180,6 +194,45 @@
     ;; unresumed generator is collected with its fiber inside it.
     (say "  (found without searching the rest: still live? "
          (generator-live? g) ")")))
+
+(say "")
+(say "Two searches interleaved, a step at a time:")
+;; The reason the state had to be closed over. As globals these two shared
+;; one path and one plan, so interleaving them silently explored a tree
+;; that was neither one's.
+(let ((p (solutions (pythagorean 20)))
+      (q (solutions (pythagorean 12))))
+  ;; The LAST resume returns the thunk's return value, not a solution,
+  ;; which is what generator-live? afterwards is for. `q` runs out first.
+  (define (next g)
+    (let ((v (resume g))) (if (generator-live? g) v '--none--)))
+  (let loop ((n 0))
+    (if (< n 3)
+        (begin
+          (say "  up to 20: " (next p) "    up to 12: " (next q))
+          (loop (+ n 1))))))
+
+(say "")
+(say "A search nested inside another search's choice point:")
+;; The inner search runs to completion inside every attempt of the outer
+;; one. Each has its own failure token, so an outer failure crossing the
+;; inner guard is re-raised rather than swallowed — which is what makes
+;; the tokens fresh objects compared with eq?, not a shared symbol.
+(let ((outer (solutions
+              (lambda (choose require)
+                (let* ((c (choose '(5 13 25)))
+                       (inner (solutions
+                               (lambda (ch rq)
+                                 (let* ((a (ch (upto 1 c)))
+                                        (b (ch (upto a c))))
+                                   (rq (= (+ (* a a) (* b b)) (* c c)))
+                                   (list a b)))))
+                       (legs (resume inner)))
+                  (require (generator-live? inner))   ; fails when none exist
+                  (list c 'from legs))))))
+  (let loop ()
+    (let ((s (resume outer)))
+      (if (generator-live? outer) (begin (say "  " s) (loop))))))
 
 (say "")
 (say "done.")
