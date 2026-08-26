@@ -87,6 +87,18 @@ between resumes, and it owns its fiber outright. Abandoning one mid-run
 collects it with its fiber — and, per the same rule `vxs-clear-fibers`
 follows, **without running its pending `unwind-protect` cleanups**.
 
+Abandoning them is safe. A `SlabStack` allocates 32 KB the moment it
+exists, so `make_generator` charges the collector for that — otherwise the
+GC counts a forty-byte object and lets an unbounded amount of fiber pile
+up behind it. Measured over 20,000 abandoned mid-run: **222 MB peak RSS
+across four collections before that charge, 2.4 MB after.**
+
+⚠️ A **future** is different, and dropping the reference does *not* make it
+garbage: its fiber stays in the scheduler's ring until it completes, so it
+is rooted whether you hold it or not. 20,000 concurrent futures really do
+cost ~640 MB of stacks — that is honest live memory, not a leak, and the
+fix is to spawn fewer at once, not to collect harder.
+
 Two things it refuses rather than hangs on: resuming a generator that is
 already running (directly or round a chain), and `touch`ing a future from
 inside one — nothing will ever settle it, because nothing but `resume`

@@ -262,10 +262,23 @@
 
 ;; Abandoned mid-run, and therefore collected with a live fiber inside.
 ;; The generator OWNS that fiber — unlike a future, whose fiber the
-;; scheduler reaps — so a leak here would be silent and unbounded.
+;; scheduler roots until it completes — so nothing else can free it.
+;;
+;; The assertion is about COLLECTION PRESSURE, not just survival. A
+;; SlabStack allocates 32KB the moment it exists, and an ObjGenerator is
+;; about forty bytes, so a collector charged only for the object sees no
+;; reason to run while an unbounded amount of fiber piles up behind it.
+;; Measured before make_generator charged for the fiber: 20,000 abandoned
+;; generators peaked at 222MB of RSS across FOUR collections. After: 2.4MB.
+;; "Did not crash" would have passed both, which is why this counts GCs.
+(define (stat name) (cdr (assq name (vm-stats))))
+(define gc-before (stat 'gc-count))
 (do ((i 0 (+ i 1))) ((= i 3000))
-  (generator (lambda () (yield i) i)))
-(assert-equal "three thousand abandoned generators do not exhaust memory"
-              #t #t)
+  (resume (generator (lambda () (yield i) i))))
+(assert-equal "abandoning generators provokes collection, not just growth"
+              #t (> (stat 'gc-count) gc-before))
+(gc)
+(assert-equal "and they are genuinely reclaimed"
+              #t (< (stat 'live-bytes) (* 4 1024 1024)))
 
 (suite-summary)

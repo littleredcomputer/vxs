@@ -257,6 +257,22 @@ struct ObjFuture : Obj {
 struct ObjGenerator : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Generator;
 
+  // What a fiber costs the allocator, charged to the collector so that
+  // abandoning generators actually provokes collections. A SlabStack
+  // allocates 32KB the moment it exists, so an ObjGenerator is a ~40-byte
+  // object owning a thousand times that — and a GC threshold counting
+  // only the 40 lets an unbounded amount of fiber pile up between
+  // collections. Measured before this existed: 20,000 abandoned
+  // generators peaked at 222MB of RSS across FOUR collections.
+  //
+  // A CONSTANT, not the fiber's live footprint. It is charged on
+  // construction and credited back by object_size() on sweep, so the two
+  // must agree exactly or bytes_allocated drifts — and it is unsigned, so
+  // drifting downward would wrap. A fiber whose stack grows past one slab
+  // is undercharged; the baseline is what matters, since it is what every
+  // fiber pays whether it does anything or not.
+  static constexpr size_t FIBER_BASELINE_BYTES = 32768;
+
   Fiber *fiber;        // owned; nullptr once it has finished
   Value result;        // the thunk's return value, once done
   bool done;
@@ -644,6 +660,11 @@ public:
   // window.
   inline Value make_generator(Fiber *fiber) {
     ObjGenerator *g = allocate<ObjGenerator>(fiber);
+    // The fiber this will own is invisible to the collector otherwise:
+    // it is plain new'd C++ memory, not a heap object. Charge for it, or
+    // the threshold counts a 40-byte object and lets 32KB pile up behind
+    // it. Same reasoning as make_bytes, same mechanism.
+    note_extra_bytes(ObjGenerator::FIBER_BASELINE_BYTES);
     return Value::from_ptr(g);
   }
 
@@ -811,7 +832,11 @@ public:
       case ObjType::Handle:  return sizeof(ObjHandle);
       case ObjType::Bytes:   return sizeof(ObjBytes) + static_cast<ObjBytes*>(obj)->data.capacity();
       case ObjType::View:    return sizeof(ObjView);
-      case ObjType::Generator: return sizeof(ObjGenerator);
+      // Must mirror what make_generator charged, exactly — see
+      // ObjGenerator::FIBER_BASELINE_BYTES. The charge stands until the
+      // object is swept even if resume() already freed the fiber, because
+      // it is the sweep that credits it back.
+      case ObjType::Generator: return sizeof(ObjGenerator) + ObjGenerator::FIBER_BASELINE_BYTES;
     }
     return sizeof(Obj);
   }
