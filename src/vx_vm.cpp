@@ -1089,17 +1089,20 @@ restart:
             // for-each, load, force all call back in through
             // call_closure), so it physically cannot suspend.
             //
-            // `guard` is the one that bites in practice — wrapping a GPU
-            // call in an error handler is the obvious thing to write, and
-            // it is exactly what cannot work. Say so, name the fix, and
-            // do not pretend this is about map.
+            // `guard` USED to be the one that bit in practice — wrapping a
+            // GPU call in an error handler is the obvious thing to write,
+            // and it was exactly what could not work. It compiles inline
+            // now and is no longer on this list; the message must not go
+            // on naming it, or it sends people to rewrite the one form
+            // that is already fine.
             f.state = Fiber::State::Error;
             f.error_message =
                 "[VM Error] touch: cannot await a host-settled future here. "
-                "This touch is inside guard/map/apply/for-each/load, whose "
-                "continuation includes native frames, so the fiber cannot "
-                "suspend and the event loop can never run to settle it. "
-                "Await it in the fiber body directly, outside that form.";
+                "This touch is inside map/apply/for-each/load/force or "
+                "dynamic-wind, which call your code from native frames, so "
+                "the fiber cannot suspend and the event loop can never run "
+                "to settle it. Await it in the fiber body directly, outside "
+                "that form. (guard is fine — it compiles inline.)";
             return StepResult::Error;
           }
           // Pump the whole scheduler, not just this future's fiber: what

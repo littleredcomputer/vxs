@@ -103,9 +103,13 @@
 ;; search's state and nothing else can reach it.
 ;;
 ;; NOTE the shape: the guard wraps ONLY the attempt, and the yield sits
-;; outside it. (yield) inside guard cannot work — guard's continuation
-;; includes native frames, so the fiber cannot suspend through it. That is
-;; a real constraint on this design, not an incidental style choice.
+;; outside it. This began as a constraint — (yield) inside guard used to
+;; be impossible, because guard ran its body through a native call the
+;; fiber could not suspend through. It compiles inline now, so the shape
+;; is a CHOICE, and still the right one: a guard that stayed open across
+;; the yield would also be open while the consumer runs, and a failure
+;; token raised out there would be read as this search failing. Scoping
+;; the handler to the attempt says what is meant.
 (define (solutions proc)
   (let ((path '())
         (plan '())

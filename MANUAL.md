@@ -121,9 +121,10 @@ Break it and the fiber dies with:
 
 ```
 [VM Error] touch: cannot await a host-settled future here. This touch is
-inside guard/map/apply/for-each/load, whose continuation includes native
-frames, so the fiber cannot suspend and the event loop can never run to
-settle it. Await it in the fiber body directly, outside that form.
+inside map/apply/for-each/load/force or dynamic-wind, which call your code
+from native frames, so the fiber cannot suspend and the event loop can
+never run to settle it. Await it in the fiber body directly, outside that
+form. (guard is fine — it compiles inline.)
 ```
 
 ### The table
@@ -270,10 +271,11 @@ The boundary is **synchronous vs. asynchronous**, not JS vs. Scheme. What
 *successful* host await fails there too, which is the giveaway that the
 rule was never about exceptions.
 
-### ⚠️ Native VM errors are NOT catchable
+### What `guard` does not see
 
-A real, unfixed gap. Contract violations raised by VM primitives blow
-straight past `guard` to the top level:
+`guard` catches **raised conditions** — `raise`, `error`, and anything a
+library signals through them. It does not catch **contract violations**
+from VM primitives:
 
 ```scheme
 (guard (e (#t 'caught)) (car '()))
@@ -281,9 +283,42 @@ straight past `guard` to the top level:
 ;; [VM Error] car: contract violation, expected pair, got ()
 ```
 
-Same for `vector-ref` out of bounds and friends. If you need to survive
-these, check before you call. `guard` is for `raise`, `error`, and
-primitives that go through `raise_contract`.
+Same for `vector-ref` out of bounds and friends. This is a **boundary, not
+a gap**, and the line it draws is the one R6RS draws between `&violation`
+(the program broke a rule — a bug) and `&error` (the world misbehaved).
+R7RS-small draws it too, in what it chose to omit: the only error
+predicates it standardizes are `file-error?` and `read-error?`, both
+environmental. Neither standard offers a way to ask "was that a bad
+argument to `car`?", because the answer does not help you.
+
+Mechanically the difference is that a contract violation never raises at
+all. It sets the fiber's error state and returns a sentinel; the dispatch
+loop notices and stops the fiber. There is no condition to catch.
+
+#### Crossing the boundary deliberately
+
+A dead fiber is still **observable from outside**. Whoever touches its
+future gets the failure, and there `guard` works normally:
+
+```scheme
+(guard (e (#t (report e)))
+  (touch (future (eval user-form))))
+```
+
+That catches everything, contract violations included, at the cost of one
+fiber. It is the right shape for an `eval` boundary — a REPL, a livecoding
+page loading a file someone just typed — where the whole point is that a
+bug in the input must not take down the host. Use `touch/or-error` for the
+same thing without a handler.
+
+`unwind-protect` cleanups still run when a fiber dies this way, so
+resources are released on both paths.
+
+⚠️ What you get is an error object carrying a **string**. You can report
+it; you cannot dispatch on what kind of fault it was. Giving faults
+structure — R6RS's `&who`/`&message`/`&irritants` — would improve this
+supervision path without making them catchable in place. The two are
+independent, and only the first is worth wanting.
 
 ### ⚠️ Arithmetic does not type-check
 
@@ -872,42 +907,63 @@ Still to do, and the reason this is stage one of two:
 problem: they genuinely call closures from native code, so there is no
 body to compile inline.
 
-#### `guard` cannot catch native VM errors — **decided: worth fixing**
+#### Two contract-violation mechanisms — **decided: converge, but downward**
 
-Symptom in [§3](#3-errors-what-is-catchable). The cause is two error
-mechanisms that grew apart, not a design decision:
+This entry previously read "`guard` cannot catch native VM errors —
+decided: worth fixing", and proposed converging every site on the
+catchable path. **That conclusion is withdrawn.** The diagnosis it rested
+on was right; the remedy was backwards.
+
+The diagnosis stands: two mechanisms that grew apart.
 
 | | behaviour | catchable | sites |
 |---|---|---|---|
-| `raise_contract` (`vx_vm.h:686`) | error object → `in_flight_raises` → `throw RaiseEscape` | ✅ | 8 |
-| legacy | sets `current_fiber->state = Error`, writes `error_message`, returns unspecified | ❌ | 42 |
+| `raise_contract` (`vx_vm.h:741`) | error object → `in_flight_raises` → `throw RaiseEscape` | ✅ | 8 |
+| legacy | sets `current_fiber->state = Error`, writes `error_message`, returns unspecified | ❌ | ~36 |
 
-`subr_guard` catches `RaiseEscape`; the legacy path never throws, so `guard`
-is never involved and the fiber is simply marked dead underneath it.
+Drift rather than intent: `raise_contract` is used only by the most
+recently written primitives (bytes, views, vectors), the two print in
+different formats (`[VM Error] car: …` vs `bytes-view: …`), and the legacy
+sites are one five-line block copy-pasted — a template, not a judgement
+about what should be recoverable.
 
-Evidence it is drift rather than intent: `raise_contract` is used only by
-the most recently written primitives (bytes, views, GPU); the two print in
-different formats (`[VM Error] car: …` vs `bytes-view: …`); and the 42
-legacy sites are the same five-line block copy-pasted, which is a template,
-not per-primitive judgement about what should be recoverable.
+**Why the remedy reverses.** All eight `raise_contract` sites are contract
+violations: a negative length, a sealed buffer, an unknown type keyword, an
+index out of range. Every one is the same category as `(car '())` — R6RS's
+`&violation`, a bug in the calling program. [§3](#3-errors-what-is-catchable)
+argues those should not be catchable in place and that the crossing point
+is a fiber boundary. Converging *upward* would spread inline catchability
+to another 36 sites and make `(guard (e (#t #f)) …)` a plausible way to
+swallow real defects.
 
-**The work.** Each site collapses to `vm.raise_contract("car: …")`. Blast
-radius checked: no golden file and no test asserts on the `[VM Error]`
-prefix, and an uncaught `RaiseEscape` already reaches `step_fiber` and
-becomes `StepResult::Error`, so top-level reporting keeps working. One
-judgement call — add the `[VM Error]` prefix at the *reporting* site rather
-than in the message, so top-level output stays recognisable while
-`error-object-message` hands `guard` clean text.
+So: converge downward, and make the printed format consistent while doing
+it. The capability being removed has no principled users — a genuinely
+**environmental** fault (a device lost, a file missing) *should* be
+catchable, but no vxs primitive currently raises one. Those arrive through
+futures, where `touch/or-error` already handles them.
 
-**Why the cost is acceptable.** Throwing is dearer than setting a field,
-but this exception path is not performance sensitive, and no exception here
-has a control-flow application the way something like `StopIteration`
-would. `ContinuationEscape` (escape-only `call/cc`) is the one exception
-that *is* control flow — but it is a single throw site, and a program that
-put one in a hot loop would need redesigning rather than a cheaper throw.
-So the exception path stays outside the performance envelope by
-construction. `RaiseEscape`, the one this change multiplies, has no
-control-flow use at all.
+Not urgent. The inconsistent *message format* is the part that costs
+something today.
+
+#### Faults carry a string, not a structure
+
+`(touch child)` on a fiber that died from `(car '())` hands the supervisor
+an error object whose message is prose. You can report it; you cannot ask
+what kind of fault it was.
+
+R6RS names the shape worth copying: `&who`, `&message`, `&irritants` — the
+procedure, what happened, and with what. The blocker is not GC (`error`
+already allocates at its raise point, with its arguments rooted on the
+fiber's stack). It is that `Fiber::error_message` is a `std::string`, so
+there is nowhere to put an object, and that contract violations never
+raise at all — they set a flag and return a sentinel, which the dispatch
+loop notices at two sites.
+
+This is **independent of catchability**, and only this half is worth
+wanting: it improves supervision without making bugs catchable in place.
+One caveat if it is ever done — a fault site that allocates assumes the
+heap can still allocate, so the string wants keeping as a fallback for the
+case where the fault *is* exhaustion.
 
 #### The reader has no `#x` / `#b` / `#o` literals
 
