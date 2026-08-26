@@ -138,38 +138,54 @@ Verified by probe, not by reading the source.
 | named `let` loop | ✅ | ✅ |
 | a `lambda` you call yourself | ✅ | ✅ |
 | **`unwind-protect`** | ✅ | ✅ |
-| `guard` | ❌ dies | ❌ dies |
+| **`guard`** | ✅ | ✅ |
 | `dynamic-wind` | ❌ dies | ❌ dies |
 | `map`, `for-each`, `vector-map` | ❌ dies | ❌ dies |
 | `apply` | ❌ dies | ❌ dies |
 | `load`, `force` | ❌ dies | ❌ dies |
 
-`unwind-protect` being safe is not an accident and is worth knowing: it
-compiles inline, because a pending cleanup is just a value on a list.
-`guard` cannot, because it needs a real C++ `try`/`catch` scoped to a
-specific instruction pointer, and C++ exception handling is tied to
-call-stack depth. `dynamic-wind` is a subr, so it goes the same way.
+`unwind-protect` and `guard` are safe for the same reason: both compile
+**inline**, so their bodies run in the fiber's own dispatch loop with no
+C++ frames above them. A pending cleanup is a value on `Fiber::winders`; a
+live handler is a record on `Fiber::handlers`. Both are fiber state, so
+both survive a suspension.
+
+`guard` was in the ❌ column until it was compiled inline. It used to
+desugar to a subr that ran its body through `call_closure` inside a C++
+`try` — and `try`/`catch` really is tied to C++ call-stack depth, which is
+what made that look unavoidable. The way out was to stop needing one per
+guard: `raise` searches `Fiber::handlers` instead, and there is a single
+`catch` per **dispatch loop** rather than one per guarded call.
+
+The rest of the ❌ row is unchanged and is not the same problem. `map`,
+`apply`, `for-each`, `load` and `force` genuinely do call closures from
+native code; there is no body to compile inline. `dynamic-wind` is still a
+subr.
 
 ### Why
 
-`(guard (e …) body)` desugars to `(%guard (lambda (var) …) (lambda () body))`,
-and `%guard` is a native subr. Between the scheduler and your `touch`:
+Anything in the ❌ column calls a closure from native code:
 
 ```
 run_dispatch(stop_at_depth = 0)          ← the scheduler's loop
- └ call_subr(%guard)
-    └ subr_guard                          ← owns the C++ try/catch
-       └ call_closure(body-thunk)
-          └ run_dispatch(stop_at_depth = N)   ← RE-ENTERED
-             └ your OP_TOUCH
+ └ call_subr(map)
+    └ call_closure(your lambda)
+       └ run_dispatch(stop_at_depth = N)   ← RE-ENTERED
+          └ your OP_TOUCH
 ```
 
 To suspend, the fiber must return all the way out to the event loop.
 Returning from the inner dispatch only lands in `call_closure`, then
-`subr_guard` — C++ frames holding an active `try` block and saved
-stack/frame/winder sizes, none of which can be captured into the fiber's
-heap-allocated frames and restored later. **The continuation is partly in
-the C++ stack**, and those frames are not first-class here.
+`map` — C++ frames holding live local state that cannot be captured into
+the fiber's heap-allocated frames and restored later. **The continuation is
+partly in the C++ stack**, and those frames are not first-class here.
+
+`guard` used to appear in exactly this diagram, with `subr_guard` and its
+C++ `try` in place of `map`. The fix was not to make C++ frames
+suspendable — it was to stop creating them. `guard` compiles inline, and
+`raise` finds its handler by searching `Fiber::handlers`, with one `catch`
+per dispatch loop instead of one per guarded call. `map` has no such
+route: there is no body to compile inline, only a closure it must call.
 
 ### Fiber-backed futures are exempt
 
@@ -184,8 +200,9 @@ the C++ stack**, and those frames are not first-class here.
 Because that work lives inside the VM, the scheduler can be pumped in place
 rather than suspended. Only the host event loop is out of reach.
 
-So the rule is narrower than "no `touch` inside `guard`". It is: **no
-`touch` of a host-settled future inside `guard`.**
+So the rule is narrower than it looks: **no `touch` of a host-settled
+future inside `map`, `apply`, `for-each`, `load`, `force`, or
+`dynamic-wind`.** `guard` is no longer on that list.
 
 ### What to do instead
 
@@ -204,8 +221,9 @@ the top of the fiber, then loops below it:
 ```
 
 **Or use `touch/or-error`**, which returns the error object instead of
-raising, so it needs no handler, so it needs no native frame — and it still
-compiles inline, so it can still suspend:
+raising. Less essential than it was — `guard` can hold a host await now —
+but still the tidier shape when a failure is a value you want to branch on
+rather than an exception you want to escape with:
 
 ```scheme
 (let ((r (touch/or-error (gpu-compile device src))))
@@ -217,9 +235,8 @@ compiles inline, so it can still suspend:
       r))
 ```
 
-⚠️ `touch/or-error` is an **alternative to** `guard`, not something that
-works *inside* one. Putting it in a `guard` body dies exactly as `touch`
-does — the native frames are the problem, and they are still there.
+`touch/or-error` works inside a `guard` now, as does `touch` — both
+compile inline, and so does `guard`. Neither works inside `map`.
 
 ---
 
@@ -822,45 +839,38 @@ settled; the rest are candidates.
 
 ### Correctness gaps
 
-#### `guard` should be compiled inline, not called through `call_closure`
+#### ✅ `guard` is compiled inline — **done**
 
-The root of §2's whole table, and of the item below it.
+`guard` used to desugar to a subr that ran its body through `call_closure`
+inside a C++ `try`, putting native frames above the fiber so it could not
+suspend. It now compiles inline like `unwind-protect`: `OP_PUSH_HANDLER`
+parks a record on `Fiber::handlers`, the body runs in the fiber's own
+dispatch loop, and `raise` finds its handler by searching that stack, with
+one `catch` per **dispatch loop** rather than one per guarded call.
 
-`guard` macro-expands to `(%guard handler-thunk body-thunk)`, a subr that
-runs the body through `call_closure` inside a C++ `try`. That native frame
-is why neither `yield` nor a host-settled `touch` can cross it — the fiber
-physically cannot suspend through C++ stack frames. It is the first form
-anyone reaches for and the one that breaks everything else, which is
-backwards.
+What that bought: `(yield)` and a host-settled `(touch)` both work inside
+`guard`, closing §2's worst row — wrapping a GPU call in an error handler
+is the obvious thing to write and was exactly what could not work. Guarded
+code also got **39% faster** (0.503s → 0.308s on a tight loop), since
+there is no nested dispatch and one closure allocation per entry instead
+of two.
 
-`unwind-protect` shows it need not be: it compiles **inline**, parking its
-cleanup on `Fiber::winders` — fiber state, so it survives suspension — and
-`(yield)` inside it is legal. The same shape works here:
+Still to do, and the reason this is stage one of two:
 
-- `Fiber::handlers` beside `Fiber::winders`: `{handler ip, frame depth,
-  stack depth}`.
-- `OP_PUSH_HANDLER` / `OP_POP_HANDLER`, with the body compiled inline
-  rather than as a thunk.
-- `raise` stops being a C++ throw and becomes a search: find the innermost
-  handler, run intervening winders, truncate frames and stack to the saved
-  depths, set `ip`. Truncate-then-run is also exactly R7RS `guard` — the
-  clauses evaluate in the guard's dynamic environment, not the raise's.
-- **One** `try`/`catch` at the dispatch-loop boundary, not per call, to
-  turn throws out of native subrs into that same search.
+- **The single catch does not yet cover native VM errors.** A raise
+  becomes a C++ `RaiseEscape` and the dispatch loop catches it, so
+  anything routed through `raise`/`error` is found. Native contract
+  violations set `f.state = Error` and return `StepResult::Error`
+  instead, bypassing the handler search entirely — which is the item
+  below, now a much smaller change than it was.
+- **A handler at or below `stop_at_depth`** belongs to an outer dispatch,
+  with native frames between; the catch rethrows and the enclosing
+  dispatch resumes the search. Correct, but it means a raise crossing
+  `map` still unwinds through C++.
 
-That last point is the reason to want it beyond §2: it means anything that
-throws C++ becomes visible to `guard` by default, instead of each new
-mechanism needing its own carve-out. It subsumes the next item, and it is
-where the `raise_contract` migration below lands.
-
-Cost is honest: making `raise` stackless touches every error path, which is
-the riskiest edit in the VM. The exception path is not performance
-sensitive, and the happy path gets faster — `guard` stops allocating two
-closures per entry.
-
-`map`/`for-each`/`force` are separable and not equal. `apply` is nearly
-free as an opcode. `map`/`for-each` would have to become prelude-level
-Scheme to lose their native frames, at a speed cost — not worth it.
+`map`/`for-each`/`force`/`dynamic-wind` are unchanged and are not the same
+problem: they genuinely call closures from native code, so there is no
+body to compile inline.
 
 #### `guard` cannot catch native VM errors — **decided: worth fixing**
 

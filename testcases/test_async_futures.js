@@ -162,23 +162,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       'fake-device', fakeDevice.name);
 
   // ---- awaiting from inside a native call ---------------------------
-  // guard/map/apply/for-each/load run their body through call_closure, so
-  // the fiber's continuation includes C++ frames and it cannot suspend.
-  // A host-settled future can therefore never be awaited there — the event
-  // loop would have to run, and we cannot return to it.
+  // guard used to be a subr running its body through call_closure, so the
+  // fiber's continuation included C++ frames and it could not suspend. A
+  // host-settled future could therefore never be awaited there — the event
+  // loop would have to run, and we could not return to it. That was the
+  // case that broke the first GPU page, and wrapping a GPU call in an
+  // error handler is the obvious thing to write.
   //
-  // The earlier "guard catches a failed future" test passes only because it
-  // settles BEFORE pumping, so touch takes the already-completed path. This
-  // is the case it misses, and the one that broke the first GPU page.
+  // guard is compiled inline now: the body runs in the fiber's own
+  // dispatch loop and a raise finds its handler by searching the fiber's
+  // handler stack, so there is nothing to suspend through. This asserts
+  // the case that used to be impossible.
   console.log('\n=== AWAIT INSIDE A NATIVE CALL ===');
 
   VXS.cwrap('vxs_clear_fibers', null, [])();
   ev(`(define g 'pending)
       (future (set! g (guard (e (#t 'caught)) (touch (sleep 20)))))`);
   await pump(600);
-  chk('a pending host-settled future cannot be awaited inside guard',
-      'pending', ev('g'));
-  chk('and the fiber does not survive it', 0, VXS._vxs_active_fibers_count());
+  chk('a pending host-settled future CAN be awaited inside guard',
+      '20.0', ev('g'));
+  chk('and the fiber completes normally', 0, VXS._vxs_active_fibers_count());
+
+  // The guard is not decorative: a failure across that same suspension
+  // reaches the handler, which is the whole reason to want it there.
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define gf 'pending)
+      (future (set! gf (guard (e (#t 'caught)) (touch (sleep 20)) (raise 'x))))`);
+  await pump(600);
+  chk('and a raise after that suspension is still caught', 'caught', ev('gf'));
+
+  // map/apply/for-each/load are unchanged: they genuinely call closures
+  // from native code, and only guard was restructured.
+  VXS.cwrap('vxs_clear_fibers', null, [])();
+  ev(`(define m 'pending)
+      (future (set! m (car (map (lambda (x) (touch (sleep 20))) (list 1)))))`);
+  await pump(600);
+  chk('map still cannot await a host-settled future', 'pending', ev('m'));
 
   // The same await, moved out of the guard into the fiber body, works.
   VXS.cwrap('vxs_clear_fibers', null, [])();

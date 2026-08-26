@@ -71,6 +71,15 @@ enum Opcode : uint8_t {
   OP_YIELD_VALUE,
   OP_PUSH_RESUME,
 
+  // guard, compiled inline. OP_PUSH_HANDLER carries a u16 offset to the
+  // catch target, exactly as the jumps do, and parks a handler record on
+  // the fiber; OP_POP_HANDLER drops it when the body finishes normally.
+  // Fiber state, not C++ state — which is the whole point, since it is
+  // what lets the body (yield) and lets a raise find its handler without
+  // a nested dispatch to unwind.
+  OP_PUSH_HANDLER,
+  OP_POP_HANDLER,
+
   // unwind-protect support: push a cleanup closure onto the fiber's
   // winder list / pop it back onto the operand stack (to be called).
   // The winder list lives on the Fiber — not the C++ stack — which is
@@ -201,6 +210,23 @@ private:
 //=============================================================================
 // Fiber (Cooperative Coroutine)
 //=============================================================================
+// A live `guard`, parked on the fiber that entered it.
+//
+// The depths are what a raise restores before running the handler. R7RS
+// says the clauses evaluate in the dynamic environment of the guard, not
+// of the raise, so unwinding FIRST is not an optimisation — it is the
+// semantics. They are recorded rather than recomputed because by the time
+// a raise is looking for them, the frames that knew are gone.
+struct Handler {
+  Value handler;            // (lambda (var) (cond clause...))
+  const uint8_t *catch_ip;  // where to resume, once unwound
+  size_t frame_depth;
+  size_t stack_depth;
+  size_t winder_depth;
+  size_t temp_roots;
+  size_t temp_obj_roots;
+};
+
 struct Fiber {
   enum class State {
     Ready,
@@ -225,6 +251,13 @@ struct Fiber {
   // loud, and not a control transfer. Tying cleanup to fiber liveness
   // would be the guardian/finalizer tar pit by another name.
   std::vector<Value> winders;
+
+  // Live `guard`s, innermost last — the same shape as `winders`, and for
+  // the same reason: a guarded body may suspend, and the handler has to
+  // outlive that. This is what replaced a C++ try/catch scoped to a
+  // nested call_closure, and with it the rule that a guarded body could
+  // not yield.
+  std::vector<Handler> handlers;
 
   // Continuation snapshot for call/cc
   std::vector<Value> saved_continuation;

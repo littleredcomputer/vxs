@@ -617,15 +617,52 @@ private:
             cond_clauses = built;
           }
 
-          // (%guard (lambda (var) (cond clause...))
-          //         (lambda ()    body...))
+          // Compiled INLINE, like unwind-protect and for the same payoff:
+          // the body runs in the fiber's own dispatch loop, so it may
+          // (yield) and may await a host-settled future. The handler is
+          // still a (lambda (var) (cond clause...)) — that inherits
+          // cond's `=>` support for free, since the clauses genuinely
+          // are a cond — but it is parked on the fiber rather than held
+          // by a C++ frame.
+          //
+          //     <handler closure>
+          //     OP_PUSH_HANDLER  -> catch
+          //     <body>
+          //     OP_POP_HANDLER
+          //     OP_JUMP          -> end
+          //   catch:             ; raise leaves closure and value here
+          //     OP_CALL 1
+          //   end:
+          //
+          // The body is not in tail position, which is true of every
+          // finally-like form: the handler must come off the fiber
+          // before the value is the guard's own.
           Value cond_form      = call_form(sym(vm.sym.s_cond), cond_clauses);
           Value handler_lambda = list(sym(vm.sym.s_lambda), list(var), cond_form);
-          Value thunk_lambda   = call_form(sym(vm.sym.s_lambda),
-                                           cons(Value::nil(), body));
-          Value guard_call     = list(sym(vm.sym.s_guard_impl),
-                                      handler_lambda, thunk_lambda);
-          compile_expr(guard_call, chunk, is_tail);
+          compile_expr(handler_lambda, chunk, false);
+
+          size_t push_ix = chunk.code.size();
+          chunk.code.push_back(OP_PUSH_HANDLER);
+          chunk.code.push_back(0); // placeholder: offset to catch
+          chunk.code.push_back(0);
+
+          compile_expr(cons(sym(vm.sym.s_begin), body), chunk, false);
+          chunk.code.push_back(OP_POP_HANDLER);
+
+          size_t jump_ix = chunk.code.size();
+          chunk.code.push_back(OP_JUMP);
+          chunk.code.push_back(0);
+          chunk.code.push_back(0);
+
+          size_t catch_target = chunk.code.size();
+          patch_jump(push_ix + 1,
+                     static_cast<uint16_t>(catch_target - (push_ix + 3)), chunk);
+          chunk.code.push_back(OP_CALL);
+          chunk.code.push_back(1);
+
+          size_t end_target = chunk.code.size();
+          patch_jump(jump_ix + 1,
+                     static_cast<uint16_t>(end_target - (jump_ix + 3)), chunk);
           return;
         }
 

@@ -234,6 +234,10 @@ void Heap::mark_fiber(Fiber *f) {
   for (Value v : f->winders) {
     mark_value(v);
   }
+  // A parked guard's clauses are a live closure nothing else roots.
+  for (const Handler &h : f->handlers) {
+    mark_value(h.handler);
+  }
 }
 
 void Heap::blacken_obj(Obj *obj) {
@@ -512,6 +516,27 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
   const BytecodeChunk *chunk = frame->closure->chunk.get();
 
   size_t count = 0;
+
+// ONE catch per dispatch loop, not one per guarded call. That is the whole
+// difference: `guard` used to be a subr whose body ran through
+// call_closure inside a C++ try, so the fiber had native frames above it
+// and physically could not suspend — no (yield), no host-settled (touch).
+// Compiled inline, the body runs right here, and a raise finds its handler
+// by searching f.handlers instead of by unwinding C++.
+//
+// The throw is still a throw: `raise` and `error` are subrs, and a subr
+// must return through its C++ caller. What changed is how far it travels —
+// to this loop, rather than to a try that only exists because someone
+// called a closure to make one.
+//
+// stop_at_depth is the boundary this loop may not cross. A handler at or
+// below it belongs to an OUTER dispatch, with native C++ frames in
+// between that only a rethrow can unwind; the rethrow reaches that
+// dispatch's own catch, which resumes the search at its level.
+//
+// Zero-cost on the happy path: no runtime penalty until something throws.
+restart:
+  try {
   while (count < max_instructions) {
     ++count;
     // Wall-clock backstop, sampled every 1024 instructions (bitmask, not
@@ -959,6 +984,23 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         break;
       }
 
+      case OP_PUSH_HANDLER: {
+        uint16_t offset = read_u16(ip);
+        Value h = f.pop();
+        // Depths recorded AFTER the pop, so unwinding restores the stack
+        // to what the guard form itself found, not one deeper.
+        f.handlers.push_back(Handler{h, ip + offset, f.frames.size(),
+                                     f.stack.size(), f.winders.size(),
+                                     temp_roots.size(), temp_obj_roots.size()});
+        break;
+      }
+
+      case OP_POP_HANDLER: {
+        assert(!f.handlers.empty() && "OP_POP_HANDLER with no live handler");
+        f.handlers.pop_back();
+        break;
+      }
+
       case OP_PUSH_WINDER: {
         f.winders.push_back(f.pop());
         break;
@@ -1128,6 +1170,44 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
         f.error_message = "[VM Error] Unknown opcode: " + std::to_string(op);
         return StepResult::Error;
     }
+  }
+  } catch (RaiseEscape &) {
+    // Is there a live guard this loop may serve? One at or below
+    // stop_at_depth belongs to an outer dispatch, with native C++ frames
+    // between here and it that only a rethrow can unwind.
+    if (f.handlers.empty() || f.handlers.back().frame_depth <= stop_at_depth) {
+      throw;
+    }
+    Handler h = f.handlers.back();
+    f.handlers.pop_back();
+
+    // Whichever raise got us here pushed exactly one value; it is ours to
+    // pop (see in_flight_raises' note on LIFO nesting).
+    Value raised = in_flight_raises.back();
+    in_flight_raises.pop_back();
+    push_temp_root(&raised);
+    // Unwinding skipped every pop_temp_root between the throw and here,
+    // and each skipped one leaves the collector a pointer to a dead
+    // stack local.
+    truncate_temp_roots(h.temp_roots);
+    truncate_temp_obj_roots(h.temp_obj_roots);
+
+    // Unwind FIRST, then run the clauses: R7RS says they evaluate in the
+    // dynamic environment of the guard, not of the raise.
+    f.frames.resize(h.frame_depth);
+    f.stack.resize(h.stack_depth);
+    run_pending_winders(f, h.winder_depth);
+    pop_temp_root();
+
+    // The catch site is a bare OP_CALL 1, so leave it what a call wants:
+    // the closure, then its argument.
+    f.push(h.handler);
+    f.push(raised);
+
+    frame = &f.frames.back();
+    chunk = frame->closure->chunk.get();
+    ip = h.catch_ip;
+    goto restart;
   }
 
   // Fell off the counted loop: the opt-in instruction cap was exhausted.

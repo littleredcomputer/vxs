@@ -250,15 +250,28 @@
 (assert-equal "generator? distinguishes them from futures"
               '(#t #f #f) (list (generator? mixed) (generator? (future 1)) (generator? 5)))
 
-;; A KNOWN BOUNDARY, pinned so it is a documented limit rather than a
-;; surprise: (yield) inside guard fails in a generator for exactly the
-;; reason (touch) does — guard's continuation includes native C++ frames,
-;; so the fiber cannot suspend through it. Anything driving a generator
-;; must keep its yields outside guard, which is a real constraint on how
-;; a backtracking search built on this has to be shaped.
+;; This was a KNOWN BOUNDARY for about an hour: (yield) inside guard used
+;; to fail for the reason a host-settled (touch) does, because guard was a
+;; subr whose body ran through call_closure inside a C++ try, putting
+;; native frames above the fiber. Compiled inline, the body runs in the
+;; fiber's own dispatch loop and there is nothing to suspend through.
+;;
+;; Kept as an assertion rather than deleted, because it is the property
+;; the whole inline-guard change exists to provide.
 (define guarded (generator (lambda () (guard (e (#t 'c)) (yield 'x)) 'end)))
-(assert-equal "yielding from inside guard is refused, not silently wrong"
-              'raised (guard (e (#t 'raised)) (resume guarded)))
+(assert-equal "a generator may yield from inside guard" 'x (resume guarded))
+(assert-equal "and carry on afterwards" 'end (resume guarded))
+
+;; A raise AFTER a suspension, caught by the guard the fiber was already
+;; inside when it suspended. The handler record outlived the yield, which
+;; is what putting it on the fiber rather than the C++ stack buys.
+(define late (generator (lambda ()
+                          (guard (e (#t (list 'caught e)))
+                            (yield 'first)
+                            (raise 'afterwards)))))
+(assert-equal "the guard is still live across a yield" 'first (resume late))
+(assert-equal "and catches what is raised after it" '(caught afterwards)
+              (resume late))
 
 ;; Abandoned mid-run, and therefore collected with a live fiber inside.
 ;; The generator OWNS that fiber — unlike a future, whose fiber the
