@@ -33,7 +33,8 @@ enum class ObjType : uint8_t {
   Port,
   Handle,
   Bytes,
-  View
+  View,
+  Generator
 };
 
 // Base object header for all heap-allocated objects
@@ -227,6 +228,50 @@ struct ObjFuture : Obj {
   inline explicit ObjFuture(Fiber *f)
       : Obj(ObjType::Future), fiber(f), result(Value::unspecified()),
         is_completed(false), is_error(false), external(false) {}
+};
+
+//-----------------------------------------------------------------------------
+// 7b. Generator — a coroutine driven by hand, not by the scheduler
+//-----------------------------------------------------------------------------
+// The other thing a fiber can be. A future is UNDIRECTED and settles
+// ONCE: whoever wants the value blocks, the scheduler runs the fiber
+// whenever it likes, and the result is memoised forever. A generator is
+// DIRECTED and many-shot: exactly one party resumes it, does so
+// deliberately, and gets a different value each time.
+//
+// Those are different enough that overloading `touch` to do both would
+// have had to make a settled future un-settle, so this is its own type
+// with its own verb.
+//
+// OWNERSHIP is the substantive difference from ObjFuture. A generator's
+// fiber is NOT in active_fibers — nothing round-robins it, and it makes
+// no progress unless someone resumes it. That means nothing else will
+// ever free it, so this object owns it outright and the destructor
+// deletes it.
+//
+// A generator abandoned mid-run is therefore collected with its fiber
+// suspended, and its pending unwind-protect cleanups do NOT run. That is
+// not an oversight: it is the same custodian rule vxs_clear_fibers
+// already follows, on the reasoning that teardown should be explicit and
+// loud rather than a control transfer scheduled by the collector.
+struct ObjGenerator : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Generator;
+
+  Fiber *fiber;        // owned; nullptr once it has finished
+  Value result;        // the thunk's return value, once done
+  bool done;
+  bool is_error;
+  // True only while this generator is being resumed. A generator that
+  // resumes itself, directly or through a chain, would re-enter a fiber
+  // already running on the C++ stack below — the same class of bug
+  // is_dispatching exists to stop for futures.
+  bool running;
+
+  inline explicit ObjGenerator(Fiber *f)
+      : Obj(ObjType::Generator), fiber(f), result(Value::unspecified()),
+        done(false), is_error(false), running(false) {}
+
+  ~ObjGenerator();
 };
 
 //-----------------------------------------------------------------------------
@@ -592,6 +637,16 @@ public:
     return Value::from_ptr(fut);
   }
 
+  // Deliberately takes nullptr and is filled in afterwards: this call can
+  // collect, and a Fiber built BEFORE it would be reachable from nothing
+  // at the moment the collector ran. Building the object first, then the
+  // fiber (which allocates nothing the collector manages), leaves no
+  // window.
+  inline Value make_generator(Fiber *fiber) {
+    ObjGenerator *g = allocate<ObjGenerator>(fiber);
+    return Value::from_ptr(g);
+  }
+
   // A sealed buffer of n zeroed bytes — fixed size, ready to be viewed.
   inline Value make_bytes(size_t n) {
     ObjBytes *b = allocate<ObjBytes>(ObjBytes::Residency::Sealed);
@@ -660,6 +715,10 @@ public:
 
   static inline bool is_future(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Future;
+  }
+
+  static inline bool is_generator(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Generator;
   }
 
   static inline bool is_upvalue(Value v) {
@@ -752,6 +811,7 @@ public:
       case ObjType::Handle:  return sizeof(ObjHandle);
       case ObjType::Bytes:   return sizeof(ObjBytes) + static_cast<ObjBytes*>(obj)->data.capacity();
       case ObjType::View:    return sizeof(ObjView);
+      case ObjType::Generator: return sizeof(ObjGenerator);
     }
     return sizeof(Obj);
   }
@@ -809,6 +869,9 @@ private:
       case ObjType::Handle:  break;  // trivially destructible
       case ObjType::Bytes:   static_cast<ObjBytes*>(obj)->~ObjBytes(); break;
       case ObjType::View:    break;  // trivially destructible
+      // A generator OWNS its fiber — unlike a future, whose fiber the
+      // scheduler owns and reaps. Nothing else can free it, so this must.
+      case ObjType::Generator: static_cast<ObjGenerator*>(obj)->~ObjGenerator(); break;
     }
     std::free(obj);
   }

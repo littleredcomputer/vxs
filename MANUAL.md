@@ -55,6 +55,48 @@ A host-settled future is backed by a JS promise. Only the browser (or Node)
 can complete it, and it can only do that when vxs **returns control to the
 event loop**. That single fact generates every rule in the next section.
 
+### Generators — a fiber driven by hand
+
+The other thing a fiber can be, and not a future with an extra argument.
+
+| | future | generator |
+|---|---|---|
+| who resumes it | the scheduler, whenever | exactly one caller, deliberately |
+| how many results | **one**, memoised forever | a different one each time |
+| runs on its own | yes, round-robin | **no** — only when resumed |
+
+```scheme
+(define g (generator (lambda ()
+                       (let loop ((got (yield 'ready)))
+                         (loop (yield (list 'saw got)))))))
+
+(resume g)          ; => ready
+(resume g 'apple)   ; => (saw apple)
+```
+
+`(yield v)` is an **expression**: its value is whatever the resumer passed
+to `(resume g v)`, or unspecified when the ordinary scheduler resumed it.
+That is what makes the two halves able to talk rather than just take turns.
+
+The last `resume` returns the thunk's **return** value, not a yielded one.
+`(generator-live? g)` afterwards is what tells them apart — asked after,
+not before, since the call that finishes it is the one that returns.
+
+A generator is not in the scheduler's ring, so it makes no progress
+between resumes, and it owns its fiber outright. Abandoning one mid-run
+collects it with its fiber — and, per the same rule `vxs-clear-fibers`
+follows, **without running its pending `unwind-protect` cleanups**.
+
+Two things it refuses rather than hangs on: resuming a generator that is
+already running (directly or round a chain), and `touch`ing a future from
+inside one — nothing will ever settle it, because nothing but `resume`
+will ever run that fiber.
+
+`testcases/amb.scm` builds backtracking search on this: a fiber suspends
+but does not **rewind**, so search re-executes from the top with a
+different answer from an oracle at each choice point, and yields each
+solution as it is found.
+
 ---
 
 ## 2. Where you may suspend
@@ -767,6 +809,46 @@ settled; the rest are candidates.
 
 
 ### Correctness gaps
+
+#### `guard` should be compiled inline, not called through `call_closure`
+
+The root of §2's whole table, and of the item below it.
+
+`guard` macro-expands to `(%guard handler-thunk body-thunk)`, a subr that
+runs the body through `call_closure` inside a C++ `try`. That native frame
+is why neither `yield` nor a host-settled `touch` can cross it — the fiber
+physically cannot suspend through C++ stack frames. It is the first form
+anyone reaches for and the one that breaks everything else, which is
+backwards.
+
+`unwind-protect` shows it need not be: it compiles **inline**, parking its
+cleanup on `Fiber::winders` — fiber state, so it survives suspension — and
+`(yield)` inside it is legal. The same shape works here:
+
+- `Fiber::handlers` beside `Fiber::winders`: `{handler ip, frame depth,
+  stack depth}`.
+- `OP_PUSH_HANDLER` / `OP_POP_HANDLER`, with the body compiled inline
+  rather than as a thunk.
+- `raise` stops being a C++ throw and becomes a search: find the innermost
+  handler, run intervening winders, truncate frames and stack to the saved
+  depths, set `ip`. Truncate-then-run is also exactly R7RS `guard` — the
+  clauses evaluate in the guard's dynamic environment, not the raise's.
+- **One** `try`/`catch` at the dispatch-loop boundary, not per call, to
+  turn throws out of native subrs into that same search.
+
+That last point is the reason to want it beyond §2: it means anything that
+throws C++ becomes visible to `guard` by default, instead of each new
+mechanism needing its own carve-out. It subsumes the next item, and it is
+where the `raise_contract` migration below lands.
+
+Cost is honest: making `raise` stackless touches every error path, which is
+the riskiest edit in the VM. The exception path is not performance
+sensitive, and the happy path gets faster — `guard` stops allocating two
+closures per entry.
+
+`map`/`for-each`/`force` are separable and not equal. `apply` is nearly
+free as an opcode. `map`/`for-each` would have to become prelude-level
+Scheme to lose their native frames, at a speed cost — not worth it.
 
 #### `guard` cannot catch native VM errors — **decided: worth fixing**
 

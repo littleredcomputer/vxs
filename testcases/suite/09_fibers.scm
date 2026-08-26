@@ -179,4 +179,93 @@
 (assert-equal "with twenty siblings churning underneath" 99 (touch g4))
 (run-fibers)
 
+
+;;--- generators: a fiber driven by hand ---------------------------------
+;; The other thing a fiber can be. A future is undirected and settles
+;; ONCE; a generator is directed and many-shot. They share a Fiber and
+;; almost nothing else, which is why `touch` was not given a second
+;; argument to do this job.
+
+(define g (generator (lambda () (yield 1) (yield 2) 'done)))
+(assert-equal "a generator yields its first value" 1 (resume g))
+(assert-equal "and its second" 2 (resume g))
+(assert-equal "it is live until the thunk returns" #t (generator-live? g))
+(assert-equal "the last resume gives the RETURN value" 'done (resume g))
+(assert-equal "and then it is finished" #f (generator-live? g))
+(assert-equal "resuming a finished generator is an error"
+              'raised (guard (e (#t 'raised)) (resume g)))
+
+;; Nothing round-robins a generator: it is not in active_fibers, so it
+;; makes no progress at all unless someone resumes it. Without that, a
+;; (run-fibers) between resumes would advance it behind the caller's back.
+(define counter 0)
+(define quiet (generator (lambda () (set! counter 1) (yield 'a) (set! counter 2) 'b)))
+(run-fibers)
+(assert-equal "an unresumed generator has not started" 0 counter)
+(resume quiet)
+(run-fibers)
+(assert-equal "and does not advance on its own between resumes" 1 counter)
+
+;; The half that makes it a conversation rather than a pump: (yield v) is
+;; an EXPRESSION, and its value is whatever the resumer passed back.
+(define echo (generator (lambda ()
+                          (let loop ((got (yield 'ready)))
+                            (loop (yield (list 'saw got)))))))
+(assert-equal "the first resume gets what the generator offered"
+              'ready (resume echo))
+(assert-equal "and a value sent in comes back out"
+              '(saw apple) (resume echo 'apple))
+(assert-equal "again, with a different value"
+              '(saw pear) (resume echo 'pear))
+(assert-equal "a resume with no value leaves yield unspecified"
+              #t (let ((r (resume echo))) (equal? r (list 'saw (if #f #f)))))
+
+;; Bare (yield) still works and still means "hand out nothing" — the
+;; demos are full of it, and it must not start seeing a stale value from
+;; some earlier yield.
+(define mixed (generator (lambda () (yield 7) (yield) 'end)))
+(assert-equal "a valued yield hands out its value" 7 (resume mixed))
+(assert-equal "a bare yield hands out nothing"
+              #t (equal? (resume mixed) (if #f #f)))
+
+;; Failure modes. Each of these would otherwise be a hang or a crash.
+(define self #f)
+(set! self (generator (lambda () (resume self) 'never)))
+(assert-equal "a generator cannot resume itself"
+              'raised (guard (e (#t 'raised)) (resume self)))
+
+(define boom (generator (lambda () (yield 1) (car '()) 2)))
+(resume boom)
+(assert-equal "an error in the body reaches the resumer"
+              'raised (guard (e (#t 'raised)) (resume boom)))
+(assert-equal "and finishes the generator" #f (generator-live? boom))
+
+;; A generator is driven only by resume, so nothing will ever settle a
+;; future it waits on. That is a hang, not a suspension, and it is worth
+;; more than the stale unspecified the naive reading would return.
+(define blocked (generator (lambda () (touch (future 42)))))
+(assert-equal "waiting on a future from a generator is refused"
+              'raised (guard (e (#t 'raised)) (resume blocked)))
+
+(assert-equal "generator? distinguishes them from futures"
+              '(#t #f #f) (list (generator? mixed) (generator? (future 1)) (generator? 5)))
+
+;; A KNOWN BOUNDARY, pinned so it is a documented limit rather than a
+;; surprise: (yield) inside guard fails in a generator for exactly the
+;; reason (touch) does — guard's continuation includes native C++ frames,
+;; so the fiber cannot suspend through it. Anything driving a generator
+;; must keep its yields outside guard, which is a real constraint on how
+;; a backtracking search built on this has to be shaped.
+(define guarded (generator (lambda () (guard (e (#t 'c)) (yield 'x)) 'end)))
+(assert-equal "yielding from inside guard is refused, not silently wrong"
+              'raised (guard (e (#t 'raised)) (resume guarded)))
+
+;; Abandoned mid-run, and therefore collected with a live fiber inside.
+;; The generator OWNS that fiber — unlike a future, whose fiber the
+;; scheduler reaps — so a leak here would be silent and unbounded.
+(do ((i 0 (+ i 1))) ((= i 3000))
+  (generator (lambda () (yield i) i)))
+(assert-equal "three thousand abandoned generators do not exhaust memory"
+              #t #t)
+
 (suite-summary)

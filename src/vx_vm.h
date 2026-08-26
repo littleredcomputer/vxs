@@ -62,6 +62,15 @@ enum Opcode : uint8_t {
   OP_TOUCH,
   OP_YIELD,
 
+  // Values in both directions across a suspension. OP_YIELD_VALUE pops
+  // what the fiber is handing out; OP_PUSH_RESUME pushes what the
+  // resumer handed back, and is what makes (yield v) an EXPRESSION
+  // rather than a statement. Bare (yield) still compiles to two
+  // dispatches — OP_YIELD, OP_PUSH_RESUME — so nothing already written
+  // executes more instructions than it did.
+  OP_YIELD_VALUE,
+  OP_PUSH_RESUME,
+
   // unwind-protect support: push a cleanup closure onto the fiber's
   // winder list / pop it back onto the operand stack (to be called).
   // The winder list lives on the Fiber — not the C++ stack — which is
@@ -238,6 +247,19 @@ struct Fiber {
   // and a wait nothing can ever satisfy becomes a diagnosable deadlock
   // rather than a silent hang.
   Value awaited = Value::nil();
+
+  // The two halves of a coroutine handoff, and deliberately fiber state
+  // rather than anything the scheduler owns: both must survive an
+  // arbitrarily long suspension, and a fiber may sit suspended across
+  // any number of collections. Traced by mark_fiber.
+  //
+  // `yielded` is what (yield v) handed out, read by whoever resumes.
+  // `resume_value` is what that resumer passed back, pushed by
+  // OP_PUSH_RESUME when the fiber runs again. A round-robin resume
+  // leaves it unspecified, which is what every existing (yield) sees
+  // and has always seen.
+  Value yielded = Value::unspecified();
+  Value resume_value = Value::unspecified();
 
   inline Fiber()
       : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}

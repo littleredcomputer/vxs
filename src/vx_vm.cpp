@@ -141,6 +141,12 @@ std::string VM::format_value(Value v) const {
         ObjSubr *subr = obj->as<ObjSubr>();
         return "#<primitive:" + std::string(subr->name) + ">";
       }
+      case ObjType::Generator: {
+        ObjGenerator *g = obj->as<ObjGenerator>();
+        if (!g->done) return "#<generator (live)>";
+        if (g->is_error) return "#<generator (failed)>";
+        return "#<generator (finished: " + format_value(g->result) + ")>";
+      }
       case ObjType::Future: {
         ObjFuture *fut = obj->as<ObjFuture>();
         if (fut->is_completed) {
@@ -202,6 +208,9 @@ void VM::display_value(Value v, std::ostream &os) const {
 // Mark-and-Sweep Garbage Collector Implementation
 //=============================================================================
 
+// Out of line because Fiber is only forward-declared in vx_heap.h.
+ObjGenerator::~ObjGenerator() { delete fiber; }
+
 void Heap::mark_fiber(Fiber *f) {
   if (!f) return;
   for (size_t i = 0; i < f->stack.size(); ++i) {
@@ -215,6 +224,8 @@ void Heap::mark_fiber(Fiber *f) {
   mark_value(f->result);
   mark_value(f->backing_future);
   mark_value(f->awaited);
+  mark_value(f->yielded);
+  mark_value(f->resume_value);
   for (Value v : f->saved_continuation) {
     mark_value(v);
   }
@@ -266,6 +277,18 @@ void Heap::blacken_obj(Obj *obj) {
       mark_value(fut->result);
       if (fut->fiber) {
         mark_fiber(fut->fiber);
+      }
+      break;
+    }
+    // The ONLY root for a suspended generator's fiber. It is not in
+    // active_fibers, so if this object is unreachable so is everything
+    // its fiber holds — which is the intended behaviour, and also why
+    // the marking has to be here and not left to the scheduler.
+    case ObjType::Generator: {
+      auto *g = static_cast<ObjGenerator *>(obj);
+      mark_value(g->result);
+      if (g->fiber) {
+        mark_fiber(g->fiber);
       }
       break;
     }
@@ -909,10 +932,31 @@ VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_a
       }
 
       case OP_YIELD: {
+        // Bare (yield) hands out nothing. Cleared rather than left alone,
+        // so a generator resumed after a valueless yield cannot observe
+        // the value from some EARLIER yield.
+        f.yielded = Value::unspecified();
         frame->ip = ip;
         f.state = Fiber::State::Suspended;
         ++total_yields;
         return StepResult::Yielded;
+      }
+
+      case OP_YIELD_VALUE: {
+        f.yielded = f.pop();
+        frame->ip = ip;
+        f.state = Fiber::State::Suspended;
+        ++total_yields;
+        return StepResult::Yielded;
+      }
+
+      case OP_PUSH_RESUME: {
+        // Consumed, not merely read: leaving it in place would let a
+        // fiber that yields twice without being handed anything the
+        // second time see the first resumer's value again.
+        f.push(f.resume_value);
+        f.resume_value = Value::unspecified();
+        break;
       }
 
       case OP_PUSH_WINDER: {
@@ -1318,6 +1362,16 @@ static std::string format_raised_value(const VM &vm, Value v) {
     return "[Scheme Error] " + oss.str();
   }
   return "uncaught exception: " + vm.format_value(v);
+}
+
+// Raise from inside a generator primitive, by the same route `error`
+// takes, so the text and the guard-ability match every other error.
+[[noreturn]] static void generator_fault(VM &vm, const std::string &msg) {
+  Value err = vm.heap.make_error_object(vm.heap.make_string(msg),
+                                        std::vector<Value>());
+  std::string text = format_raised_value(vm, err);
+  vm.in_flight_raises.push_back(err);
+  throw RaiseEscape(text);
 }
 
 // Tries filename, then testcases/filename, ../testcases/filename,
@@ -3982,6 +4036,114 @@ void VM::init_primitives() {
   // produces the identical "[Scheme Error] reason irritant..." text,
   // and RaiseEscape derives from std::exception, so main.cpp's top-level
   // catch (and vx_wasm.cpp's) need no changes at all.
+  //--- generators -------------------------------------------------------
+  // A fiber driven by hand. See ObjGenerator for why this is not a future
+  // with an extra argument.
+
+  def_global("generator", heap.make_subr("generator", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_closure(args[0])) {
+      generator_fault(vm, "generator: expected a thunk");
+    }
+    ObjClosure *closure = args[0].as_ptr<ObjClosure>();
+    if (closure->arity != 0 || closure->is_variadic) {
+      generator_fault(vm, "generator: the thunk takes no arguments");
+    }
+    // Object first, fiber second — see make_generator. args[0] keeps the
+    // closure rooted on the caller's stack across the allocation.
+    Value gen_val = vm.heap.make_generator(nullptr);
+    ObjGenerator *g = gen_val.as_ptr<ObjGenerator>();
+
+    Fiber *child = new Fiber();
+    child->push(args[0]);
+    child->stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
+    child->frames.push_back({closure, closure->chunk->code.data(), 0});
+    // NOT pushed to active_fibers, and that is the whole point: nothing
+    // round-robins a generator. It makes progress only when resumed, so
+    // a generator nobody resumes costs nothing but memory.
+    g->fiber = child;
+    return gen_val;
+  }, 1, 1));
+
+  // (resume g) / (resume g value) — run to the next yield and hand back
+  // what it yielded. The optional value becomes the result of the (yield)
+  // expression inside, which is the half that makes this a conversation
+  // rather than a pump.
+  def_global("resume", heap.make_subr("resume", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!Heap::is_generator(args[0])) {
+      generator_fault(vm, "resume: not a generator");
+    }
+    ObjGenerator *g = args[0].as_ptr<ObjGenerator>();
+    if (g->done || !g->fiber) {
+      generator_fault(vm, "resume: this generator has already finished");
+    }
+    // Self-resumption, directly or round a chain, would re-enter a fiber
+    // already running further down the C++ stack — the same hazard
+    // is_dispatching guards for futures, in the form this type can hit.
+    if (g->running) {
+      generator_fault(vm, "resume: this generator is already running");
+    }
+
+    g->fiber->resume_value = (argc > 1) ? args[1] : Value::unspecified();
+    g->running = true;
+    StepResult res;
+    try {
+      // Preemption is not a yield and must not be reported as one: the
+      // wall-clock backstop can cut a long-running body off mid-flight,
+      // and resume's contract is "to the next yield", so it keeps going.
+      do {
+        res = vm.step_fiber(*g->fiber);
+      } while (res == StepResult::Preempted);
+    } catch (...) {
+      g->running = false;
+      throw;
+    }
+    g->running = false;
+
+    if (res == StepResult::Yielded) {
+      // A generator is not in active_fibers, so nothing will ever settle
+      // a future on its behalf or step it again. Blocking on one is a
+      // hang, not a suspension, and saying so beats returning the stale
+      // unspecified that `yielded` would hold.
+      if (!g->fiber->awaited.is_nil()) {
+        generator_fault(vm, "resume: this generator is waiting on a future, "
+                            "which nothing will settle — a generator is driven "
+                            "only by resume");
+      }
+      return g->fiber->yielded;
+    }
+
+    // Finished, one way or the other. The fiber is freed here rather than
+    // left for the destructor: a long-lived generator that ran to
+    // completion should not keep a whole stack alive.
+    g->done = true;
+    if (res == StepResult::Error) {
+      g->is_error = true;
+      std::string msg = g->fiber->error_message;
+      delete g->fiber;
+      g->fiber = nullptr;
+      generator_fault(vm, msg);
+    }
+    g->result = g->fiber->result;
+    delete g->fiber;
+    g->fiber = nullptr;
+    return g->result;
+  }, 1, 2));
+
+  def_global("generator?", heap.make_subr("generator?", [](VM &, uint32_t, Value *args) -> Value {
+    return Heap::is_generator(args[0]) ? Value::boolean_true() : Value::boolean_false();
+  }, 1, 1));
+
+  // False once the thunk has returned. The idiom is to resume, use the
+  // value, then ask — because the LAST resume returns the thunk's return
+  // value, not a yielded one, and only this can tell them apart.
+  def_global("generator-live?", heap.make_subr("generator-live?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_generator(args[0])) {
+      generator_fault(vm, "generator-live?: not a generator");
+    }
+    return args[0].as_ptr<ObjGenerator>()->done ? Value::boolean_false()
+                                                : Value::boolean_true();
+  }, 1, 1));
+
   def_global("error", heap.make_subr("error", [](VM &vm, uint32_t argc, Value *args) -> Value {
     std::vector<Value> irritants(args + 1, args + argc);
     Value err_obj = vm.heap.make_error_object(args[0], irritants);

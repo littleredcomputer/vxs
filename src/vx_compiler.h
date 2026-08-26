@@ -515,10 +515,26 @@ private:
           return;
         }
 
-        // (yield)
+        // (yield) / (yield value)
+        //
+        // An EXPRESSION in both spellings: its value is whatever the
+        // resumer passed to (resume g v), or unspecified when the
+        // scheduler resumed it in the ordinary round-robin way. That is
+        // what makes a generator's two halves able to talk rather than
+        // just take turns.
+        //
+        // Bare (yield) keeps its two dispatches — OP_YIELD followed by
+        // OP_PUSH_RESUME where it used to be OP_UNSPECIFIED — so the
+        // demos that yield once a frame per fiber execute exactly the
+        // instruction count they did before.
         if (op_name == "yield") {
-          chunk.code.push_back(OP_YIELD);
-          chunk.code.push_back(OP_UNSPECIFIED);
+          if (rest.is_nil()) {
+            chunk.code.push_back(OP_YIELD);
+          } else {
+            compile_expr(Heap::car(rest), chunk, false);
+            chunk.code.push_back(OP_YIELD_VALUE);
+          }
+          chunk.code.push_back(OP_PUSH_RESUME);
           return;
         }
 

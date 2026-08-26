@@ -24,7 +24,8 @@
 	       #f)))))                          ; unequal characters: lose.
 
 (define testcases '("r4rstest" "pi" "scheme" "dynamic" "earley" "maze" 
-                    "dderiv" "boyer" "puzzle" "ack" "sieve" "cf" "series"))
+                    "dderiv" "boyer" "puzzle" "ack" "sieve" "cf" "series"
+                    "amb"))
 
 (define (run-testcase t)                        ; run one testcase
   (gc)                                          ; give each test a clean start
