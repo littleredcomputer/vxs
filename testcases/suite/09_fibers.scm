@@ -294,4 +294,56 @@
 (assert-equal "and they are genuinely reclaimed"
               #t (< (stat 'live-bytes) (* 4 1024 1024)))
 
+
+;;--- the current ports are fiber-local ----------------------------------
+;; They used to be one slot on the VM, and with-output-to-string's
+;; save-rebind-restore dance is meaningless when another fiber can
+;; interleave between the save and the restore. Two fibers, both
+;; redirecting, NOTHING dying:
+;;
+;;   A: prev := stdout,  set A-port,  yields
+;;   B: prev := A-port,  set B-port,  yields     <- captured A's binding
+;;   A: writes to B-port, restores stdout
+;;   B: writes to stdout, restores A-port        <- global now a dead port
+;;
+;; Every winder fired correctly and the result was still wrong, which is
+;; the point: unwind-protect restores what it saved, and what it saved was
+;; not this fiber's to own. Before the fix the whole assertion below
+;; printed into a string nobody reads.
+
+(define wa (future (with-output-to-string
+                     (lambda () (display "A1") (yield) (display "A2")))))
+(define wb (future (with-output-to-string
+                     (lambda () (display "B1") (yield) (display "B2")))))
+(run-fibers)
+(assert-equal "two fibers redirecting at once do not corrupt each other"
+              '("A1A2" "B1B2") (list (touch wa) (touch wb)))
+
+;; Captured at SPAWN, which is what dynamic binding means: a fiber started
+;; inside a redirection belongs to it.
+(assert-equal "a fiber spawned inside a redirection writes there"
+              "parent:child"
+              (with-output-to-string
+                (lambda ()
+                  (display "parent:")
+                  (let ((f (future (display "child")))) (run-fibers) (touch f)))))
+
+;; And it does not leak outward: the redirection is the fiber's own.
+(define leaked (future (with-output-to-string (lambda () (display "hidden")))))
+(run-fibers)
+(touch leaked)
+(assert-equal "and does not leak the binding to anyone else"
+              "still-mine" (with-output-to-string (lambda () (display "still-mine"))))
+
+;; The reason this stopped needing a cleanup at all: a generator abandoned
+;; mid-redirection used to leave the VM's port pointing at its string, so
+;; every later display vanished. Now the binding dies with the fiber.
+(define swallower
+  (generator (lambda () (with-output-to-string (lambda () (yield 'inside))))))
+(resume swallower)
+(set! swallower #f)
+(gc)
+(assert-equal "an abandoned generator cannot swallow everyone's output"
+              "visible" (with-output-to-string (lambda () (display "visible"))))
+
 (suite-summary)

@@ -294,6 +294,26 @@ struct Fiber {
   Value yielded = Value::unspecified();
   Value resume_value = Value::unspecified();
 
+  // Current ports, PER FIBER. They used to be one slot on the VM, which
+  // is wrong the moment two fibers redirect at once: with-output-to-string
+  // saves the previous port, rebinds, and restores on the way out, and if
+  // another fiber rebinds in between it captures the FIRST one's binding
+  // as its "previous". Both cleanups then run, in the wrong order, and the
+  // global is left pointing at a string port belonging to a finished
+  // fiber — after which every display in the VM goes somewhere nobody
+  // reads. Every winder fired correctly; the state being restored was
+  // simply not the restoring fiber's to own.
+  //
+  // Captured at spawn from whatever the parent was using, which is what
+  // dynamic binding means: a fiber started inside a redirection belongs to
+  // it, and one that redirects itself does not leak that outward.
+  //
+  // Unspecified means "no override, use the VM's" — the state a fiber
+  // created before the ports exist is in, and the state all code outside
+  // any fiber is in.
+  Value out_port = Value::unspecified();
+  Value in_port = Value::unspecified();
+
   inline Fiber()
       : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}
 
@@ -438,11 +458,33 @@ struct VM {
   Value current_in_port = Value::unspecified();
   Value current_out_port = Value::unspecified();
 
+  // The fiber's own binding when it has one, the VM's otherwise. Every
+  // reader of "the current port" must come through these two, or it will
+  // see one fiber's redirection from inside another.
+  inline Value effective_out_port() const {
+    if (current_fiber && !current_fiber->out_port.is_unspecified())
+      return current_fiber->out_port;
+    return current_out_port;
+  }
+  inline Value effective_in_port() const {
+    if (current_fiber && !current_fiber->in_port.is_unspecified())
+      return current_fiber->in_port;
+    return current_in_port;
+  }
+  // Rebinding follows the same rule: inside a fiber it is the fiber's, so
+  // it cannot outlive it or be seen by a sibling.
+  inline void set_out_port(Value p) {
+    if (current_fiber) current_fiber->out_port = p; else current_out_port = p;
+  }
+  inline void set_in_port(Value p) {
+    if (current_fiber) current_fiber->in_port = p; else current_in_port = p;
+  }
+
   inline std::ostream &out_stream() const {
-    return *current_out_port.as_ptr<ObjPort>()->out;
+    return *effective_out_port().as_ptr<ObjPort>()->out;
   }
   inline std::istream &in_stream() const {
-    return *current_in_port.as_ptr<ObjPort>()->in;
+    return *effective_in_port().as_ptr<ObjPort>()->in;
   }
 
   // Hook for error diagnostics

@@ -209,7 +209,7 @@ static Value g_console_port = Value::unspecified();
 // Ports from open-output-sink are the caller's to flush with
 // flush-output-port, or they flush themselves when collected.
 static void flush_default_sinks(VM &vm) {
-  Value ports[3] = {vm.current_out_port, g_terminal_port, g_console_port};
+  Value ports[3] = {vm.effective_out_port(), g_terminal_port, g_console_port};
   for (Value p : ports) {
     if (Heap::is_port(p)) {
       ObjPort *op = p.as_ptr<ObjPort>();

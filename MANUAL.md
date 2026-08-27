@@ -55,6 +55,41 @@ A host-settled future is backed by a JS promise. Only the browser (or Node)
 can complete it, and it can only do that when vxs **returns control to the
 event loop**. That single fact generates every rule in the next section.
 
+### The current ports are fiber-local
+
+`current-output-port` and `current-input-port` are **per fiber**, captured
+at spawn from whatever the parent was using. A fiber that redirects its own
+output does not affect anyone else, and one started inside a redirection
+writes there:
+
+```scheme
+(with-output-to-string
+  (lambda ()
+    (display "parent:")
+    (let ((f (future (display "child")))) (run-fibers) (touch f))))
+;; => "parent:child"
+```
+
+This has to be fiber state rather than one VM slot, and the reason is worth
+knowing because it is not about fibers dying. `with-output-to-string` saves
+the current port, rebinds, and restores under `unwind-protect`. If another
+fiber rebinds between the save and the restore, it captures the *first*
+one's binding as its "previous":
+
+```
+A: prev := stdout,  set A-port,  yields
+B: prev := A-port,  set B-port,  yields      ← captured A's binding
+A: writes to B-port, restores stdout
+B: writes to stdout, restores A-port         ← global left on a dead port
+```
+
+Every cleanup ran, in the right order, and the result was still wrong —
+after which every `display` in the VM went into a string nobody reads.
+`unwind-protect` restores what it saved; what it saved was not that
+fiber's to own. Making the binding fiber-local is what makes the restore
+meaningful, and it also means an abandoned fiber's redirection dies with
+it rather than needing a cleanup to run at all.
+
 ### Generators — a fiber driven by hand
 
 The other thing a fiber can be, and not a future with an extra argument.

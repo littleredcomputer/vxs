@@ -226,6 +226,8 @@ void Heap::mark_fiber(Fiber *f) {
   mark_value(f->awaited);
   mark_value(f->yielded);
   mark_value(f->resume_value);
+  mark_value(f->out_port);
+  mark_value(f->in_port);
   for (Value v : f->saved_continuation) {
     mark_value(v);
   }
@@ -1024,6 +1026,9 @@ restart:
         ObjClosure *closure = closure_val.as_ptr<ObjClosure>();
 
         Fiber *child = new Fiber();
+        // Dynamic binding: the child starts where the parent stands.
+        child->out_port = effective_out_port();
+        child->in_port = effective_in_port();
         child->push(closure_val);
         child->stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
         child->frames.push_back({closure, closure->chunk->code.data(), 0});
@@ -2568,7 +2573,7 @@ void VM::init_primitives() {
   // now a language feature, not a C++ RAII pattern reinvented per call
   // site).
   def_global("%set-current-output-port!", heap.make_subr("%set-current-output-port!", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (Heap::is_port(args[0])) vm.current_out_port = args[0];
+    if (Heap::is_port(args[0])) vm.set_out_port(args[0]);
     return Value::unspecified();
   }, 1, 1));
 
@@ -2900,11 +2905,11 @@ void VM::init_primitives() {
   }, 1, 1));
 
   def_global("current-input-port", heap.make_subr("current-input-port", [](VM &vm, uint32_t, Value *) -> Value {
-    return vm.current_in_port;
+    return vm.effective_in_port();
   }, 0, 0));
 
   def_global("current-output-port", heap.make_subr("current-output-port", [](VM &vm, uint32_t, Value *) -> Value {
-    return vm.current_out_port;
+    return vm.effective_out_port();
   }, 0, 0));
 
   def_global("close-input-port", heap.make_subr("close-input-port", [](VM &, uint32_t, Value *args) -> Value {
@@ -4137,6 +4142,11 @@ void VM::init_primitives() {
     ObjGenerator *g = gen_val.as_ptr<ObjGenerator>();
 
     Fiber *child = new Fiber();
+    // Same dynamic binding as `future`: a generator created inside a
+    // redirection writes there, and one that redirects itself does not
+    // leak that to whoever resumes it.
+    child->out_port = vm.effective_out_port();
+    child->in_port = vm.effective_in_port();
     child->push(args[0]);
     child->stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
     child->frames.push_back({closure, closure->chunk->code.data(), 0});
