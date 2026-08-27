@@ -897,6 +897,33 @@ reading the diff** — that is what these are for.
 
 ---
 
+## 5b. Driving the REPL from an editor
+
+`vx-scheme` runs its interactive loop when stdin is a terminal, and
+evaluates stdin as a script otherwise. `--repl` (or `-i`) forces the
+interactive loop regardless — for an editor's inferior process, a wrapper
+script, or a harness.
+
+Worth knowing because the default's failure is **silent**: a REPL that
+reads to EOF before answering is indistinguishable from a hang.
+
+Emacs works today with no vxs change, since `make-comint` allocates a pty:
+
+```elisp
+(setq scheme-program-name "/path/to/vxs/src/vx-scheme")
+(require 'cmuscheme)
+(setq comint-prompt-regexp "^\\(vxs\\|\\.\\.\\.\\)> *")
+```
+
+`M-x run-scheme`, then `C-x C-e`, `C-M-x`, `C-c C-r`, and `C-c C-l` — the
+last works because `load` is real. Anything connecting by pipe instead
+wants `--repl`.
+
+⚠️ Errors carry no `file:line`, so `next-error` has nothing to parse. See
+§6.
+
+---
+
 ## 6. Known gaps and open work
 
 What is wrong, what is missing, and what was decided about each. Kept here

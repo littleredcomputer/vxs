@@ -408,9 +408,13 @@ int main(int argc, char **argv) {
   // are parsed BEFORE the VM is constructed, because the prelude is
   // evaluated during construction — there is no later point at which
   // "don't run it" is still an option.
+  //
+  // --repl / -i: run the interactive loop even when stdin is not a
+  // terminal. For an editor's inferior process, a wrapper, or a harness.
   static std::vector<char *> filtered;
   filtered.push_back(argv[0]);
   bool with_prelude = true;
+  bool force_repl = false;
   unsigned long long gc_threshold = 0;  // 0 = leave the default alone
   for (int i = 1; i < argc; ++i) {
     std::string flag = argv[i];
@@ -419,6 +423,8 @@ int main(int argc, char **argv) {
       ++i;
     } else if (flag == "--no-prelude") {
       with_prelude = false;
+    } else if (flag == "--repl" || flag == "-i") {
+      force_repl = true;
     } else {
       filtered.push_back(argv[i]);
     }
@@ -514,8 +520,16 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  // Non-interactive piped / redirected stdin (e.g. ./vx-scheme < script.scm)
-  if (!isatty(STDIN_FILENO)) {
+  // Non-interactive piped / redirected stdin (e.g. ./vx-scheme < script.scm).
+  //
+  // --repl / -i overrides the isatty test, because a REPL driven by
+  // something other than a terminal is a real thing to want: an editor's
+  // inferior process, a wrapper script, a test harness. Emacs' comint
+  // allocates a pty and so is detected correctly, but anything that
+  // connects by PIPE gets this branch instead — and its failure is
+  // silent, since a REPL that reads to EOF before answering is
+  // indistinguishable from a hang.
+  if (!isatty(STDIN_FILENO) && !force_repl) {
     std::stringstream buf;
     buf << std::cin.rdbuf();
     bool ok = false;
@@ -531,7 +545,8 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  // Interactive REPL
+  // Interactive REPL — reached when stdin is a terminal, or when --repl
+  // was given and it is not.
   run_repl(vm);
   return 0;
 }

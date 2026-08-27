@@ -85,7 +85,7 @@ wasm: vx_vm.cpp vx_wasm.cpp vx_value.h vx_heap.h vx_vm.h vx_reader.h vx_compiler
 buildstamp:
 	@echo "$(BUILDSTAMP)"
 
-test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-ports test-async test-gpu test-aot test-r4rs
+test: vx-scheme wasm test-suite test-gc test-unit test-wasm test-ports test-async test-gpu test-aot test-repl test-r4rs
 	@echo ""
 	@echo "════════════════════════════════════════════════════════════════"
 	@echo "  ✨ ALL TEST PHASES PASSED ✨"
@@ -168,6 +168,30 @@ test-aot: vx-scheme
 	  diff ack_aot.out ../testcases/good/ack.good || true; \
 	  rm -f ack_bin ack_aot.out; \
 	  exit 1; \
+	fi
+
+# The REPL over a PIPE. Worth a test because its failure mode is silent:
+# without --repl a non-tty stdin is slurped to EOF and evaluated as a
+# script, so a REPL driven by anything that is not a terminal — an
+# editor's inferior process, a wrapper, a harness — looks like a hang
+# rather than an error. Emacs' comint allocates a pty and is fine; a pipe
+# is not, and that difference is invisible until someone hits it.
+test-repl: vx-scheme
+	@echo "=== VERIFYING --repl OVER A PIPE (editor inferior process) ==="
+	@out=$$(printf '(+ 1 2)\n(car (list 7 8))\n' | ./vx-scheme --repl 2>&1); \
+	if echo "$$out" | grep -q '=> 3' && echo "$$out" | grep -q '=> 7' \
+	   && echo "$$out" | grep -q 'vxs>'; then \
+	  echo "  ✅ [PASS] prompts and values over a pipe"; \
+	else \
+	  echo "  ❌ [FAIL] --repl did not drive the interactive loop"; \
+	  echo "$$out"; exit 1; \
+	fi
+	@out=$$(printf '(display "batch")\n' | ./vx-scheme 2>&1); \
+	if [ "$$out" = "batch" ]; then \
+	  echo "  ✅ [PASS] and without the flag a pipe is still a script"; \
+	else \
+	  echo "  ❌ [FAIL] piped stdin without --repl changed behaviour"; \
+	  echo "$$out"; exit 1; \
 	fi
 
 # AddressSanitizer. Deliberately NOT part of `test` — it needs its own -O0
