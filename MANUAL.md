@@ -897,6 +897,30 @@ reading the diff** — that is what these are for.
 
 ---
 
+### `case-lambda`
+
+R7RS-small (originally SRFI 16), now in the prelude. Several declared
+arities, dispatching on the count:
+
+```scheme
+(case-lambda
+  ((op)   …)      ; (d 'form)
+  ((op v) …))     ; (d 'sample r)
+```
+
+The reason to reach for it over a rest argument is that a rest argument is
+**permissive**: `(lambda (op . rest) …)` accepts any count and silently
+drops the extras, so one argument too many gets no complaint.
+`case-lambda` names the shapes it accepts and refuses the rest.
+
+Clauses are tried in order, so put specific ones first — a clause with a
+rest argument accepts every larger count and shadows anything after it.
+
+Still missing from R7RS-small: `raise-continuable` and
+`with-exception-handler`.
+
+---
+
 ## 5a. Distributions on the host
 
 `lib/dist.scm` is a faithful port of `lib/stat.wgsl`, over a native

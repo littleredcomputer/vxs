@@ -81,6 +81,44 @@
                     (list f acc)))
               (cdr fs)))))
 
+;;--- case-lambda --------------------------------------------------------
+;; R7RS-small (originally SRFI 16, also in R6RS). A procedure with several
+;; declared arities, dispatching on how many arguments it was given.
+;;
+;; The reason to want it over a rest argument is that a rest argument is
+;; PERMISSIVE: (lambda (op . rest) ...) accepts anything and silently
+;; ignores the extras. case-lambda names the shapes it accepts and refuses
+;; the rest, which is the difference between an interface and a suggestion.
+;;
+;; Clauses are tried in order, so put the specific ones first — a clause
+;; with a rest argument accepts every larger count and would shadow
+;; anything after it.
+;;
+;; EXPLICIT GENSYMS rather than the sym# convention, and it is not a
+;; stylistic choice: auto-gensym rewrites within ONE backquote template,
+;; and the clause tests below are built by a second, nested one. Written
+;; as n#, the binding and the references would land on different symbols —
+;; which fails as an unbound-variable error at expansion, loudly, but only
+;; once someone calls the macro.
+(defmacro (case-lambda . clauses)
+  (let ((args (gensym)) (n (gensym)))
+    `(lambda ,args
+       (let ((,n (length ,args)))
+         (cond
+           ,@(map (lambda (clause)
+                    (let* ((formals (car clause))
+                           (body    (cdr clause))
+                           ;; (a b) accepts exactly 2; (a . r) accepts 1 or
+                           ;; more; a bare symbol accepts anything.
+                           (spec (let loop ((f formals) (k 0))
+                                   (cond ((null? f)   (list '= k))
+                                         ((symbol? f) (list '>= k))
+                                         (else (loop (cdr f) (+ k 1)))))))
+                      (list (list (car spec) n (cadr spec))
+                            (list 'apply (cons 'lambda (cons formals body)) args))))
+                  clauses)
+           (else (error "case-lambda: no clause accepts this many arguments" ,n)))))))
+
 ;;--- file and string port wrappers --------------------------------------
 ;; These are Scheme rather than C++ subrs because unwind-protect provides
 ;; exactly the restore-on-every-exit guarantee they need, so the C++-RAII

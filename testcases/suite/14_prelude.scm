@@ -114,4 +114,45 @@
 (assert-equal "assert passes a true expression" #t
               (begin (assert (= 1 1)) #t))
 
+
+;;--- case-lambda --------------------------------------------------------
+;; R7RS-small, and wanted here for a specific reason rather than
+;; conformance: a rest argument is PERMISSIVE. (lambda (op . rest) ...)
+;; accepts any count and silently drops the extras, so a caller passing
+;; one argument too many gets no complaint. case-lambda names the shapes
+;; it accepts and refuses the rest.
+
+(define cl2 (case-lambda ((a) (list 'one a)) ((a b) (list 'two a b))))
+(assert-equal "dispatches on one argument"  '(one 9)   (cl2 9))
+(assert-equal "and on two"                  '(two 9 8) (cl2 9 8))
+(assert-equal "and REFUSES a count no clause declares"
+              'raised (guard (e (#t 'raised)) (cl2 1 2 3)))
+
+;; The refusal is the whole point, so contrast it with what a rest
+;; argument does with the same call.
+(define permissive (lambda (a . rest) (list 'took a)))
+(assert-equal "where a rest argument would have accepted it silently"
+              '(took 1) (permissive 1 2 3))
+
+(define cl-rest (case-lambda (() 'none) ((a . r) (list a r))))
+(assert-equal "an empty clause matches no arguments" 'none (cl-rest))
+(assert-equal "a rest clause matches one"      '(1 ())    (cl-rest 1))
+(assert-equal "and matches more"               '(1 (2 3)) (cl-rest 1 2 3))
+
+(define cl-any (case-lambda ((a) 'exactly-one) (whatever (list 'any whatever))))
+(assert-equal "a bare symbol formal accepts anything"
+              '(any (1 2 3)) (cl-any 1 2 3))
+(assert-equal "but an earlier specific clause still wins"
+              'exactly-one (cl-any 1))
+
+;; Expansion uses explicit gensyms, not the sym# convention: auto-gensym
+;; rewrites within one backquote template and the clause tests are built
+;; by a nested one, so sym# would bind and reference different symbols.
+;; This asserts the macro can be used twice in one scope without the two
+;; expansions colliding.
+(define cl-a (case-lambda ((x) (* x 2))))
+(define cl-b (case-lambda ((x) (* x 3))))
+(assert-equal "two expansions in one scope do not collide"
+              '(10 15) (list (cl-a 5) (cl-b 5)))
+
 (suite-summary)
