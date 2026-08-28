@@ -1462,6 +1462,44 @@ static std::string format_raised_value(const VM &vm, Value v) {
   throw RaiseEscape(text);
 }
 
+// erfc and its inverse, from lib/stat.wgsl — Press NR 3ed's low-order
+// Chebyshev fit, and the Mimir Games inverse with one Newton refinement.
+//
+// Native for the same reason Threefry is: measurement. random-normal is
+// inverse-CDF, so every normal draw evaluates inv_erf, which evaluates
+// erfc, which is a nine-term Horner plus an exp. In bytecode that is the
+// whole cost of a normal — bulk normals ran at ~1M/s against 185M/s for
+// bulk uniforms, a 185x gap that is entirely this polynomial.
+//
+// The coefficients are duplicated from lib/dist.scm's erfc-coefficients,
+// which layer 22 reads back out of the .wgsl text. This copy is pinned to
+// that one by asserting the two agree across a range — the same chain of
+// custody the native Threefry has to lib/threefry.scm.
+static const double VXS_ERFC_C[9] = {
+  1.00002368, 0.37409196, 0.09678418, -0.18628806, 0.27886807,
+  -1.13520398, 1.48851587, -0.82215223, 0.17087277};
+
+static inline double vxs_erfc(double x) {
+  double z = std::fabs(x);
+  double t = 2.0 / (2.0 + z);
+  double acc = 0.0;
+  for (int i = 8; i >= 0; --i) acc = VXS_ERFC_C[i] + t * acc;
+  double ans = t * std::exp(-z * z - 1.26551223 + t * acc);
+  return x >= 0.0 ? ans : 2.0 - ans;
+}
+
+static inline double vxs_inv_erfc(double x) {
+  double pp = (x < 1.0) ? x : 2.0 - x;
+  double t = std::sqrt(-2.0 * std::log(pp / 2.0));
+  double r = -0.70711 * ((2.30753 + t * 0.27061) /
+                         (1.0 + t * (0.99229 + t * 0.04481)) - t);
+  double er = vxs_erfc(r) - pp;
+  r += er / (1.12837916709551257 * std::exp(-r * r) - r * er);
+  return x > 1.0 ? -r : r;
+}
+
+static inline double vxs_inv_erf(double x) { return vxs_inv_erfc(1.0 - x); }
+
 // Small integers arrive as ints and everything else as doubles, so a
 // primitive that wants a number has to ask which — the same two-line dance
 // view-set! does.
@@ -2660,6 +2698,70 @@ void VM::init_primitives() {
     }
     return vm.heap.make_bytes(static_cast<size_t>(args[0].as_int()));
   }, 1, 1));
+
+  //--- erfc and friends ---------------------------------------------------
+  // See vxs_erfc above for why these are native. lib/dist.scm keeps a
+  // Scheme transcription beside the WGSL as the readable reference; layer
+  // 22 asserts the two agree.
+
+  def_global("erfc", heap.make_subr("erfc", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) vm.raise_contract("erfc: expected a number");
+    return Value::from_double(vxs_erfc(vxs_as_num(args[0])));
+  }, 1, 1));
+
+  def_global("inv-erfc", heap.make_subr("inv-erfc", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) vm.raise_contract("inv-erfc: expected a number");
+    return Value::from_double(vxs_inv_erfc(vxs_as_num(args[0])));
+  }, 1, 1));
+
+  def_global("inv-erf", heap.make_subr("inv-erf", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) vm.raise_contract("inv-erf: expected a number");
+    return Value::from_double(vxs_inv_erf(vxs_as_num(args[0])));
+  }, 1, 1));
+
+  // Bulk normals, the whole loop native. Consumes exactly one uniform per
+  // draw and transforms it exactly as random_normal does on the device:
+  //   u = max(-1, 2a - 1)        random_uniform(-1, 1)
+  //   n = loc + scale * sqrt(2) * inv_erf(u)
+  // Deviating from that order would break the correspondence this file
+  // exists to preserve, however tempting a cheaper transform looks.
+  def_global("rng-fill-normal!", heap.make_subr("rng-fill-normal!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-fill-normal!: expected an rng");
+    if (!Heap::is_view(args[1]))  vm.raise_contract("rng-fill-normal!: expected a view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-normal!: not an rng state buffer");
+    ObjView *view = args[1].as_ptr<ObjView>();
+    for (int i = 2; i < 6; ++i) {
+      if (!args[i].is_number()) {
+        vm.raise_contract("rng-fill-normal!: expected (rng view start count loc scale)");
+      }
+    }
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long count = static_cast<long>(vxs_as_num(args[3]));
+    double loc = vxs_as_num(args[4]), scale = vxs_as_num(args[5]);
+    if (start < 0 || count < 0 ||
+        static_cast<long>(start + count) > static_cast<long>(view->count)) {
+      vm.raise_contract("rng-fill-normal!: range out of bounds for this view");
+    }
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
+    static const double kSqrt2 = 1.4142135623730951;
+    for (long i = 0; i < count; ++i) {
+      double m = static_cast<double>(vxs_rng_u32(w) >> 9);
+      double a = m / 8388608.0;
+      if (a < 5.9604645e-8) a = 5.9604645e-8;
+      double u = 2.0 * a - 1.0;
+      if (u < -1.0) u = -1.0;
+      double n = loc + scale * kSqrt2 * vxs_inv_erf(u);
+      uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
+      switch (view->elem) {
+        case ElemType::F32: { float x = static_cast<float>(n); std::memcpy(p, &x, 4); break; }
+        case ElemType::F64: { std::memcpy(p, &n, 8); break; }
+        default: vm.raise_contract("rng-fill-normal!: needs an :f32 or :f64 view");
+      }
+    }
+    return Value::unspecified();
+  }, 6, 6));
 
   //--- Threefry-4x32-13, natively -----------------------------------------
   // The same generator as lib/threefry.scm and lib/rng.wgsl, in C++ because

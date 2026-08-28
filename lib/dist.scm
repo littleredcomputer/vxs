@@ -44,7 +44,14 @@
   (* t (let loop ((cs (reverse cs)) (acc 0.0))
          (if (null? cs) acc (loop (cdr cs) (+ (car cs) (* t acc)))))))
 
-(define (erfc x)
+;; THE REFERENCE, not the implementation. `erfc`, `inv-erfc` and `inv-erf`
+;; are native primitives — see vxs_erfc in src/vx_vm.cpp for why: every
+;; normal draw is inverse-CDF, so this polynomial IS the cost of a normal,
+;; and bulk normals ran 185x slower than bulk uniforms entirely because of
+;; it. These transcriptions stay because they are readable beside
+;; lib/stat.wgsl and because layer 22 asserts the native versions against
+;; them — the same arrangement lib/threefry.scm has with the native core.
+(define (erfc/reference x)
   (let* ((z   (abs x))
          (t   (/ 2.0 (+ 2.0 z)))
          (ans (* t (exp (+ (- (* z z)) -1.26551223 (erfc-poly t erfc-coefficients))))))
@@ -52,17 +59,17 @@
 
 ;; http://www.mimirgames.com/articles/programming/approximations-of-the-inverse-error-function/
 ;; One Newton refinement; the WGSL comments out a second, so this does too.
-(define (inv-erfc x)
+(define (inv-erfc/reference x)
   (let* ((pp (if (< x 1.0) x (- 2.0 x)))
          (t  (sqrt (* -2.0 (log (/ pp 2.0)))))
          (r0 (* -0.70711 (- (/ (+ 2.30753 (* t 0.27061))
                                (+ 1.0 (* t (+ 0.99229 (* t 0.04481)))))
                             t)))
-         (er (- (erfc r0) pp))
+         (er (- (erfc/reference r0) pp))
          (r  (+ r0 (/ er (- (* 1.12837916709551257 (exp (- (* r0 r0)))) (* r0 er))))))
     (if (> x 1.0) (- r) r)))
 
-(define (inv-erf x) (inv-erfc (- 1.0 x)))
+(define (inv-erf/reference x) (inv-erfc/reference (- 1.0 x)))
 
 ;;--- samplers -----------------------------------------------------------
 ;; Every one of these takes the generator explicitly. On the device it is
@@ -148,16 +155,12 @@
 ;; cycle, while a bytes buffer is opaque to it. Measured: a 1M-element
 ;; vector costs 262us per collection, the equivalent buffer 2.75us.
 ;;
-;; rng-fill-unit! is native and fills in one call — 185M draws/second
-;; against 9.9M for a Scheme loop calling rng-unit!. Anything that is just
-;; uniforms should use it. The transformed samplers below are a Scheme
-;; loop by necessity, and land around 1M/second, which is the honest cost
-;; of erfc in bytecode.
+;; Both fills are native and do the whole loop in C++ — no per-draw
+;; dispatch, no per-draw allocation. fill-normal! consumes exactly one
+;; uniform per draw and transforms it exactly as random_normal does on the
+;; device, because deviating from that order would forfeit the
+;; correspondence this file exists to preserve.
 
 (define (fill-uniform! r view start count) (rng-fill-unit! r view start count))
-
 (define (fill-normal! r view start count loc scale)
-  (let loop ((i 0))
-    (if (< i count)
-        (begin (view-set! view (+ start i) (random-normal r loc scale))
-               (loop (+ i 1))))))
+  (rng-fill-normal! r view start count loc scale))

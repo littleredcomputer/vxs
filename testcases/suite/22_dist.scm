@@ -289,4 +289,62 @@
                 (rng-u32! r))
               (rng-u32! sp))
 
+
+;;--- native erfc against the Scheme reference ---------------------------
+;; Same arrangement as the Threefry core: the native version is the
+;; implementation, the Scheme transcription beside lib/stat.wgsl is the
+;; readable reference, and this is the chain between them. The constants
+;; are asserted against the .wgsl text above, so agreeing here puts all
+;; three in step.
+
+(define (agrees-across? native reference lo hi steps tol)
+  (let loop ((i 0))
+    (cond ((> i steps) #t)
+          (else (let ((x (+ lo (* (- hi lo) (/ i steps)))))
+                  (if (> (abs (- (native x) (reference x))) tol) #f
+                      (loop (+ i 1))))))))
+
+(assert-equal "native erfc matches the Scheme reference across [-3, 3]"
+              #t (agrees-across? erfc erfc/reference -3.0 3.0 200 1e-12))
+(assert-equal "native inv-erf matches it across (-1, 1)"
+              #t (agrees-across? inv-erf inv-erf/reference -0.999 0.999 200 1e-9))
+
+;;--- bulk normals -------------------------------------------------------
+;; 50M draws/second against 508K for the same loop in bytecode, which is
+;; why this exists. A fast path that drew DIFFERENT numbers would be worse
+;; than no fast path, so it is checked against the one-at-a-time sampler.
+
+(define nb (make-bytes (* 32 4)))
+(define nv (bytes-view nb :f32))
+(rng-fill-normal! (rng-make 0 1234 0) nv 0 32 0.0 1.0)
+(assert-equal "bulk normals match drawing one at a time"
+              #t (let ((r (rng-make 0 1234 0)))
+                   (let loop ((i 0))
+                     (cond ((= i 32) #t)
+                           ((> (abs (- (view-ref nv i) (random-normal r 0.0 1.0))) 1e-6) #f)
+                           (else (loop (+ i 1)))))))
+
+;; One uniform per normal, so a fill leaves the generator where the same
+;; number of individual draws would. If the bulk path consumed a different
+;; amount, mixing it with individual draws would silently desynchronise
+;; the stream — and nothing about the values would look wrong.
+(define fr (rng-make 0 55 0))
+(rng-fill-normal! fr nv 0 32 0.0 1.0)
+(assert-equal "a fill of 32 advances the generator by exactly 32 draws"
+              (let ((r (rng-make 0 55 0)))
+                (let loop ((i 0)) (if (< i 32) (begin (rng-unit! r) (loop (+ i 1)))))
+                (rng-unit! r))
+              (rng-unit! fr))
+
+;; loc and scale must be applied, not ignored — an easy thing to drop in a
+;; loop that is mostly about the transform.
+(define sb (make-bytes (* 4000 4)))
+(define sv (bytes-view sb :f32))
+(rng-fill-normal! (rng-make 0 31415 0) sv 0 4000 10.0 2.0)
+(assert-equal "a filled batch honours loc and scale"
+              #t (let loop ((i 0) (s 0.0))
+                   (if (= i 4000)
+                       (< (abs (- (/ s 4000) 10.0)) 0.15)
+                       (loop (+ i 1) (+ s (view-ref sv i))))))
+
 (suite-summary)

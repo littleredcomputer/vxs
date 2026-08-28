@@ -988,9 +988,18 @@ remains an additive change rather than a rewrite.
 
 | | rate |
 |---|---|
-| `rng-fill-unit!` (native, fills a view) | **185 M/s** |
+| `rng-fill-unit!` (native) | **185 M/s** |
+| `rng-fill-normal!` (native) | **50 M/s** |
 | `rng-unit!` in a Scheme loop | 9.9 M/s |
+| normals in a Scheme loop, native `erfc` | 3.9 M/s |
 | Threefry in Scheme (`lib/threefry.scm`) | 0.55 M/s |
+| normals with `erfc` in bytecode too | 0.51 M/s |
+
+`erfc`, `inv-erfc` and `inv-erf` are native as well. Every normal is
+inverse-CDF, so that polynomial *is* the cost of a normal — it was the
+whole 185× gap between bulk uniforms and bulk normals. `lib/dist.scm`
+keeps Scheme transcriptions as `erfc/reference` and friends, readable
+beside the WGSL and asserted against the natives by layer 22.
 
 Fill a typed buffer rather than building a list: a million-element vector
 costs 262 µs per collection because every slot might be a pointer, while
