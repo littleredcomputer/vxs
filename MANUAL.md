@@ -934,6 +934,32 @@ arithmetic.
 number** from `rng-unit!`, and using it where you meant a device-matching
 draw is silent.
 
+### Splitting
+
+```scheme
+(rng-split! r)   ; consume one block from r, return a generator keyed on it
+```
+
+This is what `jax.random.split` does, and for the same reason: **split *is*
+Threefry** — the parent's output words become the child's key. Coordinates
+and splitting are one primitive with two ergonomics, not rival designs.
+
+Use coordinates when you know the address (a point index, a particle).
+Use split when descending into something that should not need to know what
+its parent or siblings did — a nested generative function, say.
+
+What split buys: a child is insulated from its siblings' **draw counts**.
+Change how many values one sub-computation consumes and the others do not
+move. Threading one generator through gives you the opposite, and editing
+one submodel silently reshuffles every later one.
+
+⚠️ What it does **not** buy: a child's key still depends on how many splits
+came *before* it, so adding a sub-computation moves every later sibling.
+Hashing an address into the counter would fix that and is strictly
+stronger — at the cost of deciding how address paths hash into 32 bits and
+what happens on collision. Split is the smaller commitment, and addressing
+remains an additive change rather than a rewrite.
+
 ### Bulk draws
 
 | | rate |

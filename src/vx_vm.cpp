@@ -2699,6 +2699,46 @@ void VM::init_primitives() {
     return bv;
   }, 3, 3));
 
+  // (rng-split! r) -> a new generator, keyed on four words drawn from r.
+  //
+  // This is what jax.random.split does, and for the same reason: split IS
+  // Threefry — the parent's output words become the child's key. So the
+  // two ways of getting independent randomness here, coordinates and
+  // splitting, are one primitive with two ergonomics rather than rival
+  // designs.
+  //
+  // What splitting buys over threading one generator down: a child is
+  // insulated from its siblings' DRAW COUNTS. Change how many values one
+  // sub-computation consumes and the others do not move. It does not
+  // insulate a child from its siblings' EXISTENCE — the child's key still
+  // depends on how many splits came before it — which is the difference
+  // between this and hashing an address, and the reason addressing is
+  // strictly stronger if it is ever wanted.
+  //
+  // Consumes exactly one block, so the parent's counter advances by one
+  // and the child gets a full four-word key that rng-make cannot express
+  // (rng-make takes a single u32 and pads).
+  def_global("rng-split!", heap.make_subr("rng-split!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-split!: expected an rng");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-split!: not an rng state buffer");
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    // Drawn BEFORE allocating: make_bytes can collect, and while args[0]
+    // stays rooted on the caller's stack, keeping the draws in locals
+    // means the order of these two steps cannot matter.
+    uint32_t k0 = vxs_rng_u32(w);
+    uint32_t k1 = vxs_rng_u32(w);
+    uint32_t k2 = vxs_rng_u32(w);
+    uint32_t k3 = vxs_rng_u32(w);
+    Value nv = vm.heap.make_bytes(13 * 4);
+    uint32_t *n = reinterpret_cast<uint32_t *>(nv.as_ptr<ObjBytes>()->data.data());
+    n[0] = n[1] = n[2] = n[3] = 0u;              // counter starts at the origin
+    n[4] = k0; n[5] = k1; n[6] = k2; n[7] = k3;  // key: the parent's four words
+    n[8] = n[9] = n[10] = n[11] = 0u;
+    n[12] = 0u;
+    return nv;
+  }, 1, 1));
+
   def_global("rng-u32!", heap.make_subr("rng-u32!", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-u32!: expected an rng");
     auto *b = args[0].as_ptr<ObjBytes>();

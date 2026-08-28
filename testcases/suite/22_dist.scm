@@ -231,4 +231,62 @@
 (assert-equal "and gives up on essentially none of 5000 draws"
               #t (< dist-failures 10))
 
+
+;;--- splitting ----------------------------------------------------------
+;; The same thing jax.random.split does, and for the same reason: split IS
+;; Threefry, with the parent's output words becoming the child's key. So
+;; coordinates and splitting are one primitive with two ergonomics, not
+;; rival designs — which is why both can be offered without either being
+;; a compromise.
+
+(define parent (rng-make 0 42 0))
+(define kid-a (rng-split! parent))
+(define kid-b (rng-split! parent))
+
+(assert-equal "two children of one parent draw differently"
+              #f (= (rng-unit! (rng-split! (rng-make 0 42 0)))
+                    (rng-unit! kid-b)))
+(assert-equal "and neither repeats the parent"
+              #f (= (rng-unit! kid-a) (rng-unit! (rng-make 0 42 0))))
+
+;; Splitting must be a pure function of the parent's state, or nothing
+;; downstream is reproducible from a seed.
+(assert-equal "splitting is deterministic"
+              (rng-unit! (rng-split! (rng-make 0 42 0)))
+              (rng-unit! (rng-split! (rng-make 0 42 0))))
+
+;; THE property split exists for. A child is insulated from its siblings'
+;; DRAW COUNTS: change how many values one sub-computation consumes and
+;; the others do not move. With a single generator threaded through, this
+;; is false, and editing one submodel silently reshuffles every later one.
+(define (sibling-b-after a-draws)
+  (let* ((par (rng-make 0 42 0))
+         (ca  (rng-split! par))
+         (cb  (rng-split! par)))
+    (let loop ((i 0)) (if (< i a-draws) (begin (rng-unit! ca) (loop (+ i 1)))))
+    (rng-unit! cb)))
+(assert-equal "a sibling's draw count does not move the other"
+              (sibling-b-after 0) (sibling-b-after 25))
+
+;; What split does NOT insulate against, stated so it is a known limit
+;; rather than a surprise: the child's key depends on how many splits came
+;; before it, so adding a sub-GF moves every later sibling. Hashing an
+;; address would fix that, and is strictly stronger for exactly this
+;; reason — see MANUAL section 5a.
+(define (second-child-of splits-before)
+  (let ((par (rng-make 0 42 0)))
+    (let loop ((i 0)) (if (< i splits-before) (begin (rng-split! par) (loop (+ i 1)))))
+    (rng-unit! (rng-split! par))))
+(assert-equal "but adding an earlier sibling DOES move it"
+              #f (= (second-child-of 0) (second-child-of 1)))
+
+;; A split consumes exactly one block, so the parent advances by four.
+(define sp (rng-make 0 7 0))
+(rng-split! sp)
+(assert-equal "a split costs the parent exactly four words"
+              (let ((r (rng-make 0 7 0)))
+                (rng-u32! r) (rng-u32! r) (rng-u32! r) (rng-u32! r)
+                (rng-u32! r))
+              (rng-u32! sp))
+
 (suite-summary)
