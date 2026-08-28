@@ -1462,6 +1462,65 @@ static std::string format_raised_value(const VM &vm, Value v) {
   throw RaiseEscape(text);
 }
 
+// Small integers arrive as ints and everything else as doubles, so a
+// primitive that wants a number has to ask which — the same two-line dance
+// view-set! does.
+static inline double vxs_as_num(Value v) {
+  return v.is_int() ? static_cast<double>(v.as_int()) : v.as_real();
+}
+
+// Threefry-4x32-13. Must stay bit-identical to lib/threefry.scm (which the
+// nine published known-answer vectors in layer 13 pin) and to
+// threefry4x32 in lib/rng.wgsl. Three implementations of one algorithm is
+// two too many in principle; in practice one is the portable reference,
+// one runs on the GPU, and this one is here because measurement said the
+// round loop was the cost. Layer 22 asserts this against the reference.
+static inline void vxs_threefry13(const uint32_t ctr[4], const uint32_t key[4],
+                                  uint32_t out[4]) {
+  static const uint32_t rot[16] = {10, 26, 11, 21, 13, 27, 23, 5,
+                                    6, 20, 17, 11, 25, 10, 18, 20};
+  const uint32_t parity = 0x1BD11BDAu;
+  uint32_t ks[5] = {key[0], key[1], key[2], key[3],
+                    parity ^ key[0] ^ key[1] ^ key[2] ^ key[3]};
+  uint32_t x0 = ctr[0] + ks[0], x1 = ctr[1] + ks[1];
+  uint32_t x2 = ctr[2] + ks[2], x3 = ctr[3] + ks[3];
+  for (uint32_t r = 0; r < 13u; ++r) {
+    if (r > 0u && (r % 4u) == 0u) {
+      uint32_t sN = r / 4u;
+      x0 += ks[(sN + 0u) % 5u];
+      x1 += ks[(sN + 1u) % 5u];
+      x2 += ks[(sN + 2u) % 5u];
+      x3 += ks[(sN + 3u) % 5u] + sN;
+    }
+    uint32_t i = 2u * (r % 8u), p = rot[i], q = rot[i + 1u];
+    // Rotations are all in 5..27, so neither shift is by the full width —
+    // which would be undefined, exactly as the WGSL note says.
+    if ((r % 2u) == 0u) {
+      x0 += x1; x1 = ((x1 << p) | (x1 >> (32u - p))) ^ x0;
+      x2 += x3; x3 = ((x3 << q) | (x3 >> (32u - q))) ^ x2;
+    } else {
+      x0 += x3; x3 = ((x3 << p) | (x3 >> (32u - p))) ^ x0;
+      x2 += x1; x1 = ((x1 << q) | (x1 >> (32u - q))) ^ x2;
+    }
+  }
+  out[0] = x0; out[1] = x1; out[2] = x2; out[3] = x3;
+}
+
+// One word from the state buffer, refilling the block when it runs dry.
+// Mirrors rng_u32 in lib/rng.wgsl including the counter advance: it is
+// ctr.y that increments, so the stream and point coordinates stay put.
+static inline uint32_t vxs_rng_u32(uint32_t *w) {
+  if (w[12] == 0u) {
+    vxs_threefry13(&w[0], &w[4], &w[8]);
+    w[1] += 1u;          // ctr.y
+    w[12] = 4u;
+  }
+  uint32_t v = w[8];
+  w[8] = w[9]; w[9] = w[10]; w[10] = w[11]; w[11] = 0u;
+  w[12] -= 1u;
+  return v;
+}
+
 // Tries filename, then testcases/filename, ../testcases/filename,
 // ../filename — the same search order `load` already used, so scripts
 // run from either the repo root or src/ can find testcases/ files.
@@ -2601,6 +2660,108 @@ void VM::init_primitives() {
     }
     return vm.heap.make_bytes(static_cast<size_t>(args[0].as_int()));
   }, 1, 1));
+
+  //--- Threefry-4x32-13, natively -----------------------------------------
+  // The same generator as lib/threefry.scm and lib/rng.wgsl, in C++ because
+  // it is the one piece of the sampling path that is hot. Measured before
+  // this existed: 100,000 uniforms took 0.181s through the Scheme version,
+  // and only a quarter of that was subr dispatch — the rest was the round
+  // loop's quotient/modulo/vector-ref in bytecode. Moving the CORE down
+  // removes all of it while leaving every distribution in Scheme, next to
+  // lib/stat.wgsl where the correspondence is readable.
+  //
+  // State is an ordinary sealed bytes buffer of 13 u32 words:
+  //   [0..3] counter   [4..7] key   [8..11] block   [12] words available
+  // Deliberately not a new heap type: nothing here needs tracing, a bytes
+  // object is already sealed against moving, and the layout is inspectable
+  // from Scheme through a :u32 view when something looks wrong.
+
+  def_global("rng-make", heap.make_subr("rng-make", [](VM &vm, uint32_t, Value *args) -> Value {
+    for (int i = 0; i < 3; ++i) {
+      if (!args[i].is_number()) {
+        vm.raise_contract("rng-make: expected three integers (ptnum seed stream)");
+      }
+    }
+    Value bv = vm.heap.make_bytes(13 * 4);
+    auto *b = bv.as_ptr<ObjBytes>();
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    // Matches rng_init in lib/rng.wgsl exactly: ptnum separates points,
+    // stream separates independent uses within one point, seed separates
+    // runs. Getting this wrong is silent — the draws stay well-formed and
+    // simply stop matching the device.
+    uint32_t ptnum  = static_cast<uint32_t>(vxs_as_num(args[0]));
+    uint32_t seed   = static_cast<uint32_t>(vxs_as_num(args[1]));
+    uint32_t stream = static_cast<uint32_t>(vxs_as_num(args[2]));
+    w[0] = ptnum; w[1] = 0u; w[2] = stream; w[3] = 0u;   // counter
+    w[4] = seed;  w[5] = 0u; w[6] = 0u;     w[7] = 0u;   // key
+    w[8] = w[9] = w[10] = w[11] = 0u;                    // block
+    w[12] = 0u;                                          // none available
+    return bv;
+  }, 3, 3));
+
+  def_global("rng-u32!", heap.make_subr("rng-u32!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-u32!: expected an rng");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-u32!: not an rng state buffer");
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    return Value::from_double(static_cast<double>(vxs_rng_u32(w)));
+  }, 1, 1));
+
+  // A double in (0,1), built the way rng_unit does on the device: the top
+  // 23 bits pasted under a fixed exponent, which is arithmetically
+  // m / 2^23 and exact in both f32 and f64 — so this is one of the few
+  // values that IS bit-identical across host and device.
+  //
+  // The clamp is load bearing, not defensive. The construction yields
+  // exactly 0.0 for the 512 smallest words out of 2^32, and a zero here
+  // becomes random_uniform(-1,1) = -1, inv_erf(-1) = inv_erfc(2), log(0),
+  // and finally a NaN out of random_normal — an element poisoned with no
+  // diagnostic. See the note in lib/rng.wgsl.
+  def_global("rng-unit!", heap.make_subr("rng-unit!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-unit!: expected an rng");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-unit!: not an rng state buffer");
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    double m = static_cast<double>(vxs_rng_u32(w) >> 9);
+    double u = m / 8388608.0;                 // 2^23, exact
+    return Value::from_double(u < 5.9604645e-8 ? 5.9604645e-8 : u);
+  }, 1, 1));
+
+  // Fill a :f32 view with `count` uniforms starting at `start`. The whole
+  // point of having the core native: no per-draw dispatch, no per-draw
+  // allocation, and the block's four words all used rather than three
+  // thrown away.
+  def_global("rng-fill-unit!", heap.make_subr("rng-fill-unit!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-fill-unit!: expected an rng");
+    if (!Heap::is_view(args[1])) vm.raise_contract("rng-fill-unit!: expected a view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-unit!: not an rng state buffer");
+    ObjView *view = args[1].as_ptr<ObjView>();
+    if (!args[2].is_number() || !args[3].is_number()) {
+      vm.raise_contract("rng-fill-unit!: expected (rng view start count)");
+    }
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long count = static_cast<long>(vxs_as_num(args[3]));
+    if (start < 0 || count < 0 ||
+        static_cast<long>(start + count) > static_cast<long>(view->count)) {
+      vm.raise_contract("rng-fill-unit!: range out of bounds for this view");
+    }
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
+    for (long i = 0; i < count; ++i) {
+      double m = static_cast<double>(vxs_rng_u32(w) >> 9);
+      double u = m / 8388608.0;
+      if (u < 5.9604645e-8) u = 5.9604645e-8;
+      uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
+      switch (view->elem) {
+        case ElemType::F32: { float x = static_cast<float>(u); std::memcpy(p, &x, 4); break; }
+        case ElemType::F64: { std::memcpy(p, &u, 8); break; }
+        default:
+          vm.raise_contract("rng-fill-unit!: needs an :f32 or :f64 view");
+      }
+    }
+    return Value::unspecified();
+  }, 4, 4));
 
   def_global("open-byte-sink", heap.make_subr("open-byte-sink", [](VM &vm, uint32_t, Value *) -> Value {
     return vm.heap.make_byte_sink();

@@ -897,6 +897,64 @@ reading the diff** — that is what these are for.
 
 ---
 
+## 5a. Distributions on the host
+
+`lib/dist.scm` is a faithful port of `lib/stat.wgsl`, over a native
+Threefry core.
+
+```scheme
+(define r (rng-make ptnum seed stream))   ; mirrors rng_init
+(random-uniform r 0.0 1.0)
+(random-normal  r 0.0 1.0)
+(random-exponential r lambda)
+(random-gamma   r alpha lambda)
+(flip r p)
+(logpdf-normal v loc scale)               ; and -flip, -uniform
+```
+
+The generator is explicit. On the device it is per-invocation private
+state and so implicit; here many streams may be alive at once, and hiding
+which one a draw came from is the confusion the whole design avoids.
+
+### Why a port and not a better design
+
+Threefry is a pure function of (counter, key), so a host draw at a given
+counter is the draw the *device* makes at that counter. That makes the CPU
+path an **oracle** for the shader — run a model both places and the
+answers should agree. An improved algorithm would forfeit exactly that.
+
+**How close is "agree":** the uniform stream is bit-identical, because
+`rng-unit!` is `m / 2²³` for `m` the top 23 bits, which is exact in f32
+and f64 alike. Everything downstream is not — the device evaluates these
+polynomials in f32 and the host in f64 — so samplers agree to about f32
+precision. A larger discrepancy is a bug; a last-few-bits one is
+arithmetic.
+
+⚠️ `lib/threefry.scm`'s `u32->unit` divides by 2³². That is a **different
+number** from `rng-unit!`, and using it where you meant a device-matching
+draw is silent.
+
+### Bulk draws
+
+| | rate |
+|---|---|
+| `rng-fill-unit!` (native, fills a view) | **185 M/s** |
+| `rng-unit!` in a Scheme loop | 9.9 M/s |
+| Threefry in Scheme (`lib/threefry.scm`) | 0.55 M/s |
+
+Fill a typed buffer rather than building a list: a million-element vector
+costs 262 µs per collection because every slot might be a pointer, while
+the equivalent `bytes` buffer costs 2.75 µs because the collector doesn't
+walk it at all.
+
+Only the RNG **core** is native. Measurement is why: of the 0.181 s the
+Scheme version took for 100k draws, only a quarter was subr dispatch — the
+rest was the round loop's `quotient`/`modulo`/`vector-ref` in bytecode. So
+the core moved down and every distribution stayed in Scheme, next to the
+WGSL it mirrors.
+
+---
+
 ## 5b. Driving the REPL from an editor
 
 `vx-scheme` runs its interactive loop when stdin is a terminal, and
