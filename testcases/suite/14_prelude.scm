@@ -185,6 +185,24 @@
 (assert-equal "same shape, different types" '(#f #f)
               (list (point? (make-pair2 1 2)) (pair2? pt)))
 
+;; NOT ASSERTED, and worth saying why rather than leaving a gap: the
+;; constructor spec is checked at EXPANSION time, so a bad one is a
+;; compile failure, and provoking that from inside a test would need
+;; `eval` — which vxs does not have (it is R7RS's separate (scheme eval)
+;; library). Verified by hand:
+;;
+;;   (define-record-type <g> (make-g f . rest) g? (f g-f))
+;;   [Macro Error in define-record-type] constructor takes a proper list
+;;   of field names, not a rest argument
+;;
+;;   (define-record-type <h> (make-h a b) h? (a h-a))
+;;   [Macro Error in define-record-type] constructor names a field that
+;;   was not declared: b
+;;
+;; Both used to be accepted and then quietly do the wrong thing — a rest
+;; argument produced a constructor whose extra arguments went nowhere, and
+;; an undeclared name became a parameter that was never stored.
+
 ;; A field left out of the constructor is #f, not garbage.
 (define-record-type <partial> (make-partial a) partial? (a p-a) (b p-b set-p-b!))
 (assert-equal "an omitted field starts #f" #f (p-b (make-partial 1)))

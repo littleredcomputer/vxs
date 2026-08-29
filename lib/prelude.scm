@@ -113,6 +113,23 @@
   (let* ((ctor-name   (car ctor-spec))
          (ctor-args   (cdr ctor-spec))
          (field-names (map car field-specs))
+         ;; R7RS's constructor spec is a PROPER list of field names. A rest
+         ;; argument silently produced a constructor whose extra arguments
+         ;; went nowhere — (make-gf f . args) accepted (make-gf m 1 2) and
+         ;; left args as #f — so it is refused rather than half-supported.
+         (_ (let check ((a ctor-args))
+              (cond ((null? a) #t)
+                    ((not (pair? a))
+                     (error "define-record-type: constructor takes a proper list of field names, not a rest argument"
+                            ctor-spec))
+                    (else (check (cdr a))))))
+         ;; And every constructor argument must BE a declared field, or it
+         ;; would be accepted as a parameter and then dropped on the floor.
+         (__ (for-each (lambda (a)
+                         (if (not (memq a field-names))
+                             (error "define-record-type: constructor names a field that was not declared"
+                                    a)))
+                       ctor-args))
          (r (gensym)) (v (gensym))
          (index-of (lambda (f)
                      (let loop ((fs field-names) (i 0))

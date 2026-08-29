@@ -945,6 +945,12 @@ The two compose rather than compete: a record whose field *is* a dispatch
 closure gives you both — `predicate?` for identity, the closure for
 behaviour, open to extension without touching the record.
 
+⚠️ The constructor spec is a **proper list of declared field names**, as
+R7RS says. A rest argument (`(make-g f . rest)`) or a name that isn't a
+declared field is refused at expansion time — both used to be accepted and
+then quietly misbehave, the rest arguments going nowhere and the
+undeclared name becoming a parameter that was never stored.
+
 These began as tagged vectors — the classic portable trick, and what a
 shim on someone else's Scheme has to do. The leaks were real rather than
 theoretical: `vector?` said `#t` so a `vector?` branch shadowed the
