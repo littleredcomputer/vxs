@@ -48,6 +48,24 @@ static std::string format_double(double d) {
 }
 
 // Format Value as S-expression string
+// format_double's contract, for a float. to_chars is overloaded on the
+// argument type, so passing a float asks for the shortest decimal that
+// round-trips as a FLOAT — about seven digits rather than seventeen.
+//
+// That matters beyond brevity: printing an f32 through its f64 widening
+// shows precision that is not there, and invites comparing host and
+// device values digit by digit past the point where they can agree.
+static std::string format_float(float x) {
+  char buf[32];
+  auto res = std::to_chars(buf, buf + sizeof(buf), x);
+  std::string s(buf, res.ptr);
+  if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+      !std::isnan(x) && !std::isinf(x)) {
+    s += ".0";
+  }
+  return s;
+}
+
 std::string VM::format_value(Value v) const {
   if (v.is_int()) {
     return std::to_string(v.as_int());
@@ -200,7 +218,54 @@ std::string VM::format_value(Value v) const {
           case ElemType::F32: n = "f32"; break;
           case ElemType::F64: n = "f64"; break;
         }
-        return std::string("#<view ") + n + " x" + std::to_string(vw->count) + ">";
+        std::string out = std::string("#<view ") + n + " ✕" +
+                          std::to_string(vw->count) + " [";
+
+        // TRUNCATED, and it costs nothing to truncate because #<...> has no
+        // read syntax. A printed representation that `read` cannot consume
+        // is already not a faithful transcription of the object, so it is
+        // under no obligation to show every element — Colin's point, and
+        // the reason this needs no apology.
+        //
+        // *view-print-length* is the Lisp answer to exactly this problem
+        // (Common Lisp's *print-length*, Emacs's print-length), so it is
+        // spelled the way people already expect. #f means no limit, for
+        // when you have asked for it on purpose.
+        long limit = 8;
+        Value lv = get_global("*view-print-length*");
+        if (lv.is_number()) {
+          limit = static_cast<long>(lv.is_int() ? static_cast<double>(lv.as_int())
+                                                : lv.as_real());
+          if (limit < 0) limit = 0;
+        } else if (lv.is_false()) {
+          limit = -1;                       // #f: show everything
+        }
+
+        long shown = static_cast<long>(vw->count);
+        bool clipped = false;
+        if (limit >= 0 && shown > limit) { shown = limit; clipped = true; }
+
+        const uint8_t *base =
+            vw->bytes.as_ptr<ObjBytes>()->data.data() + vw->offset;
+        for (long i = 0; i < shown; ++i) {
+          if (i) out += " ";
+          const uint8_t *p = base + static_cast<size_t>(i) * vw->stride;
+          switch (vw->elem) {
+            case ElemType::U8:  out += std::to_string(static_cast<unsigned>(*p)); break;
+            case ElemType::I32: { int32_t x;  std::memcpy(&x, p, 4); out += std::to_string(x); break; }
+            case ElemType::U32: { uint32_t x; std::memcpy(&x, p, 4); out += std::to_string(x); break; }
+            // An f32 holds about seven significant digits, so printing the
+            // seventeen its f64 widening produces shows precision that is
+            // not there — and invites comparing host and device values
+            // digit by digit past the point where they can agree.
+            case ElemType::F32: { float x; std::memcpy(&x, p, 4);
+                                  out += format_float(x); break; }
+            case ElemType::F64: { double x; std::memcpy(&x, p, 8);
+                                  out += format_value(Value::from_double(x)); break; }
+          }
+        }
+        if (clipped) out += (shown ? " …" : "…");
+        return out + "]>";
       }
     }
   }

@@ -1094,6 +1094,27 @@ mechanism, so a Gen-ish layer above will rename these into whatever
 clothing it likes; the point of the regularity is that it can do so
 mechanically.
 
+### Printing a view
+
+```
+#<view f32 ✕10 [0.49221453 1.9817239 1.7200769 0.87194514 …]>
+#<view f64 ✕10 [0.4922145237111392 1.981723895011878 …]>
+#<view f32 ✕0 []>
+```
+
+Truncated at `*view-print-length*` (default 8; `#f` shows everything).
+Truncating costs nothing because `#<…>` has **no read syntax** — a printed
+form `read` cannot consume was never a faithful transcription, so it is
+under no obligation to show every element. What it *is* obliged to do is
+not flood a REPL with a million floats.
+
+An `:f32` view prints at **f32 precision** — the shortest decimal that
+round-trips as a float, via `to_chars`' float overload. Its f64 widening
+would show ten digits of precision that aren't in the storage, and invite
+comparing host and device values past the digit where they can agree.
+
+---
+
 ### Buffer reductions
 
 ```scheme

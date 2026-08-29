@@ -139,4 +139,55 @@
 (assert-equal "a view needing more bytes than exist is empty"
               0 (view-length (bytes-view (make-bytes 2) :f32)))
 
+
+;;--- printing a view ----------------------------------------------------
+;; Truncated by default, because a view can hold a million elements and a
+;; printed form has no obligation to transcribe all of them: #<...> has no
+;; read syntax, so it was never something `read` could consume anyway.
+
+(define pv (bytes-view (make-bytes (* 6 8)) :f64))
+(let loop ((i 0)) (if (< i 6) (begin (view-set! pv i (+ i 1)) (loop (+ i 1)))))
+
+(define (shown x) (with-output-to-string (lambda () (display x))))
+
+(assert-equal "a short view shows its elements"
+              "#<view f64 ✕6 [1.0 2.0 3.0 4.0 5.0 6.0]>" (shown pv))
+(assert-equal "an empty view still shows brackets"
+              "#<view f32 ✕0 []>" (shown (bytes-view (make-bytes 0) :f32)))
+
+;; *view-print-length* is the Common Lisp knob under the Common Lisp name.
+(set! *view-print-length* 3)
+(assert-equal "the limit truncates and says so"
+              "#<view f64 ✕6 [1.0 2.0 3.0 …]>" (shown pv))
+(set! *view-print-length* #f)
+(assert-equal "#f shows everything"
+              "#<view f64 ✕6 [1.0 2.0 3.0 4.0 5.0 6.0]>" (shown pv))
+(set! *view-print-length* 0)
+(assert-equal "zero shows the count and nothing else"
+              "#<view f64 ✕6 […]>" (shown pv))
+(set! *view-print-length* 8)
+
+;; An f32 view prints at f32 precision. Its seventeen-digit f64 widening
+;; would show ten digits of precision that are not in the storage — and
+;; would invite comparing host and device values past the digit where they
+;; can agree.
+(define f32v (bytes-view (make-bytes 8) :f32))
+(define f64v (bytes-view (make-bytes 16) :f64))
+(view-set! f32v 0 0.1) (view-set! f64v 0 0.1)
+(assert-equal "an f32 element prints as the shortest float that round-trips"
+              "#<view f32 ✕2 [0.1 0.0]>" (shown f32v))
+(assert-equal "while an f64 element keeps its full precision"
+              "#<view f64 ✕2 [0.1 0.0]>" (shown f64v))
+;; The case where they visibly differ: 1/3 is not representable in either,
+;; but f32 needs far fewer digits to pin down.
+(view-set! f32v 0 (/ 1.0 3.0)) (view-set! f64v 0 (/ 1.0 3.0))
+(assert-equal "and a third needs fewer digits as an f32"
+              #t (< (string-length (shown f32v)) (string-length (shown f64v))))
+
+;; Integer views print as integers, not as floats.
+(define u8v (bytes-view (make-bytes 3) :u8))
+(view-set! u8v 0 65) (view-set! u8v 1 66) (view-set! u8v 2 67)
+(assert-equal "a u8 view prints whole numbers"
+              "#<view u8 ✕3 [65 66 67]>" (shown u8v))
+
 (suite-summary)

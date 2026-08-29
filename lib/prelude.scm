@@ -40,6 +40,18 @@
 (defmacro (assert expr)
   `(if (not ,expr) (error 'assert "assertion failed:" ',expr)))
 
+;;--- printing ------------------------------------------------------------
+;; How many elements of a view to show. #f shows all of them.
+;;
+;; Truncating costs nothing, because #<...> has no read syntax: a printed
+;; form that `read` cannot consume is already not a faithful transcription
+;; of the object, so it is under no obligation to show every element. What
+;; it IS obliged to do is not flood a REPL with a million floats.
+;;
+;; Named the way Common Lisp's *print-length* and Emacs's print-length are
+;; named, because it is the same knob for the same reason.
+(define *view-print-length* 12)
+
 ;;--- threading macros ---------------------------------------------------
 ;; Clojure's -> and ->>. Pure syntactic rearrangement: every subform
 ;; appears exactly once, in source order, evaluated once, so there is no
