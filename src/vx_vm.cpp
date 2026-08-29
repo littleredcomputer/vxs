@@ -1931,36 +1931,56 @@ void VM::init_primitives() {
   };
   def_global("set-cdr!", heap.make_subr("set-cdr!", subr_set_cdr, 2, 2));
 
+// The compound accessors used to return nil when a step hit a non-pair,
+// which is wrong twice over: R7RS defines (cadr x) as (car (cdr x)), so
+// (cadr '(1)) is (car '()) and must fail — and car itself DOES fail here,
+// so the two disagreed. A short list silently yielded () and the mistake
+// surfaced somewhere else entirely.
+//
+// Fails the way car does (fiber error state, not raise_contract), because
+// a contract violation is a violation whichever procedure notices it. See
+// MANUAL section 6 on the two mechanisms and which way they converge.
+#define CXR_STEP(name, v) \
+  if (!Heap::is_cons(v)) { \
+    if (vm.current_fiber) { \
+      vm.current_fiber->state = Fiber::State::Error; \
+      vm.current_fiber->error_message = \
+          "[VM Error] " #name ": contract violation, expected a pair at every " \
+          "step, got " + vm.format_value(v); \
+    } \
+    return Value::unspecified(); \
+  }
+
 #define DEF_CXR2(name, op1, op2) \
-  def_global(#name, heap.make_subr(#name, [](VM &, uint32_t, Value *args) -> Value { \
+  def_global(#name, heap.make_subr(#name, [](VM &vm, uint32_t, Value *args) -> Value { \
     Value v = args[0]; \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op2(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     return Heap::op1(v); \
   }, 1, 1));
 
 #define DEF_CXR3(name, op1, op2, op3) \
-  def_global(#name, heap.make_subr(#name, [](VM &, uint32_t, Value *args) -> Value { \
+  def_global(#name, heap.make_subr(#name, [](VM &vm, uint32_t, Value *args) -> Value { \
     Value v = args[0]; \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op3(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op2(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     return Heap::op1(v); \
   }, 1, 1));
 
 #define DEF_CXR4(name, op1, op2, op3, op4) \
-  def_global(#name, heap.make_subr(#name, [](VM &, uint32_t, Value *args) -> Value { \
+  def_global(#name, heap.make_subr(#name, [](VM &vm, uint32_t, Value *args) -> Value { \
     Value v = args[0]; \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op4(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op3(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     v = Heap::op2(v); \
-    if (!Heap::is_cons(v)) return Value::nil(); \
+    CXR_STEP(name, v) \
     return Heap::op1(v); \
   }, 1, 1));
 

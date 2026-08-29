@@ -81,6 +81,34 @@
 (assert-equal "cadr" 2 (cadr '(1 2 3)))
 (assert-equal "caddr" 3 (caddr '(1 2 3)))
 (assert-equal "caar" 1 (caar '((1 2) 3)))
+
+;; The compound accessors must FAIL on a short list, not return nil.
+;; R7RS defines (cadr x) as (car (cdr x)), so (cadr '(1)) is (car '()) and
+;; must raise — and car itself does, so returning nil made the two
+;; disagree. A short list silently yielded () and the mistake surfaced
+;; somewhere else entirely, which is the worst way to find a destructuring
+;; error.
+;;
+;; A contract violation is a native VM error and guard cannot catch it
+;; (MANUAL section 3), so these are checked across a FIBER boundary, which
+;; is the documented way to observe one.
+(define (fails? thunk)
+  (let ((f (future (thunk))))
+    (run-fibers)
+    (error-object? (touch/or-error f))))
+
+(assert-equal "cadr of a one-element list fails"   #t (fails? (lambda () (cadr '(1)))))
+(assert-equal "caddr of a two-element list fails"  #t (fails? (lambda () (caddr '(1 2)))))
+(assert-equal "cadddr of a three-element list fails" #t (fails? (lambda () (cadddr '(1 2 3)))))
+(assert-equal "caar of a flat list fails"          #t (fails? (lambda () (caar '(1 2)))))
+(assert-equal "cddr of a one-element list fails"   #t (fails? (lambda () (cddr '(1)))))
+(assert-equal "and on a non-list entirely"         #t (fails? (lambda () (cadr 5))))
+
+;; The valid cases still work, so the fix did not simply make them strict
+;; about the wrong thing.
+(assert-equal "cddr still returns the tail" '(3) (cddr '(1 2 3)))
+(assert-equal "cdar still works"            '(2) (cdar '((1 2) 3)))
+(assert-equal "cadddr still works"          4    (cadddr '(1 2 3 4)))
 (assert-equal "cdar" '(2) (cdar '((1 2) 3)))
 (assert-equal "list length" 4 (length '(a b c d)))
 (assert-equal "list reverse" '(4 3 2 1) (reverse '(1 2 3 4)))
