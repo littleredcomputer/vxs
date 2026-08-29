@@ -324,6 +324,18 @@ struct ObjRecord : Obj {
 //-----------------------------------------------------------------------------
 // 8. Associative Map (Key-Value Dict)
 //-----------------------------------------------------------------------------
+// What a lookup yields when the key is absent and the caller supplied no
+// default. #f rather than '(), and the reason is Scheme's truthiness: only
+// #f is false, so '() is TRUE and (if (map-ref m k) ...) — the obvious
+// idiom — took the present branch for an absent key.
+//
+// This does NOT disambiguate: a key whose stored value IS #f looks the
+// same as an absent one, and nothing can fix that but map-has?. What it
+// does is make the common shorthand behave the way its shape promises,
+// and make the remaining ambiguity the one people already expect from
+// every other language's nil-returning lookup.
+inline Value map_missing() { return Value::boolean_false(); }
+
 struct ObjMap : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Map;
   std::vector<std::pair<Value, Value>> entries;
@@ -332,7 +344,7 @@ struct ObjMap : Obj {
   inline explicit ObjMap(std::vector<std::pair<Value, Value>> kvs)
       : Obj(ObjType::Map), entries(std::move(kvs)) {}
 
-  inline Value get(Value key, Value default_val = Value::nil()) const {
+  inline Value get(Value key, Value default_val = map_missing()) const {
     for (const auto &p : entries) {
       if (p.first == key) return p.second;
     }

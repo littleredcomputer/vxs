@@ -897,6 +897,29 @@ reading the diff** — that is what these are for.
 
 ---
 
+### Maps: a missing key is `#f`
+
+```scheme
+(map-ref m :absent)          ; => #f
+(:absent m)                  ; => #f      keyword-as-procedure
+(map-ref m :absent 'DEFAULT) ; => DEFAULT
+(:absent m 'DEFAULT)         ; => DEFAULT
+```
+
+`#f` rather than `'()`, because only `#f` is false in Scheme — `'()` is
+**true**, so `(if (map-ref m k) …)` took the *present* branch for an absent
+key. The keyword shorthand is borrowed from Clojure, where `(:y m)` is
+`nil` and nil is falsy; the spelling came across without the truthiness
+that made it safe.
+
+⚠️ This does **not** disambiguate. A key whose stored value *is* `#f` is
+indistinguishable from an absent one, and nothing fixes that but
+`map-has?`. Use the bare two-argument form only where you know the key is
+present or `#f` isn't a possible value; otherwise pass a default you chose,
+or ask `map-has?`.
+
+---
+
 ### Maps: copy and delete
 
 ```scheme

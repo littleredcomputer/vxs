@@ -193,6 +193,35 @@
              (< (live-bytes) (+ alloc-baseline 100000)))
 
 
+;;--- what a missing key gives back -------------------------------------
+;; #f, not '(), and the reason is Scheme's truthiness: only #f is false,
+;; so '() is TRUE and (if (map-ref m k) ...) — the obvious idiom — took
+;; the PRESENT branch for an absent key. Borrowed from Clojure, where
+;; (:y m) is nil and nil is falsy, so the shorthand is safe there; the
+;; spelling came across without the truthiness that made it work.
+
+(define mm {:x 1 :k #f})
+(assert-equal "a missing key is #f, not '()" #f (map-ref mm :y))
+(assert-equal "and through the keyword shorthand too" #f (:y mm))
+(assert-equal "so the obvious test now behaves"
+              'absent (if (map-ref mm :y) 'present 'absent))
+(assert-equal "a present key is unaffected" 1 (map-ref mm :x))
+(assert-equal "and so is the keyword form"   1 (:x mm))
+
+;; An explicit default still wins, which is the way to be unambiguous
+;; without map-has?.
+(assert-equal "an explicit default overrides it"
+              'MISSING (map-ref mm :y 'MISSING))
+(assert-equal "including through the keyword form"
+              'MISSING (:y mm 'MISSING))
+
+;; ⚠️ This does NOT disambiguate, and the test says so: a key whose stored
+;; value IS #f is indistinguishable from an absent one. Nothing can fix
+;; that but map-has?, which is why it exists.
+(assert-equal "a stored #f still looks missing" #f (map-ref mm :k))
+(assert-equal "and only map-has? can tell them apart"
+              '(#t #f) (list (map-has? mm :k) (map-has? mm :y)))
+
 ;;--- map-copy and map-delete! -------------------------------------------
 ;; Scheme's convention is that aggregates are mutable and you copy
 ;; explicitly — vector-copy, string-copy, list-copy. Maps had no -copy,

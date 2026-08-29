@@ -769,7 +769,7 @@ restart:
             return StepResult::Error;
           }
           Value target = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = def_val;
           if (Heap::is_map(target)) {
             res = target.as_ptr<ObjMap>()->get(callee, def_val);
@@ -785,7 +785,7 @@ restart:
           }
           ObjMap *m = callee.as_ptr<ObjMap>();
           Value key = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = m->get(key, def_val);
           f.stack.resize(f.stack.size() - argc - 1);
           f.push(res);
@@ -798,7 +798,7 @@ restart:
           }
           ObjVector *v = callee.as_ptr<ObjVector>();
           Value ix_val = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = def_val;
           if (ix_val.is_int()) {
             int32_t ix = ix_val.as_int();
@@ -899,7 +899,7 @@ restart:
           chunk = frame->closure->chunk.get();
         } else if (callee.is_keyword()) {
           Value target = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = def_val;
           if (Heap::is_map(target)) {
             res = target.as_ptr<ObjMap>()->get(callee, def_val);
@@ -908,13 +908,13 @@ restart:
         } else if (Heap::is_map(callee)) {
           ObjMap *m = callee.as_ptr<ObjMap>();
           Value key = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = m->get(key, def_val);
           if (!return_tail_val(res)) return StepResult::Completed;
         } else if (Heap::is_vector(callee)) {
           ObjVector *v = callee.as_ptr<ObjVector>();
           Value ix_val = f.stack[f.stack.size() - argc];
-          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : Value::nil();
+          Value def_val = argc > 1 ? f.stack[f.stack.size() - argc + 1] : map_missing();
           Value res = def_val;
           if (ix_val.is_int()) {
             int32_t ix = ix_val.as_int();
@@ -3812,7 +3812,7 @@ void VM::init_primitives() {
       return Value::unspecified();
     }
     ObjMap *m = args[0].as_ptr<ObjMap>();
-    Value def_val = argc > 2 ? args[2] : Value::nil();
+    Value def_val = argc > 2 ? args[2] : map_missing();
     return m->get(args[1], def_val);
   };
   def_global("map-ref", heap.make_subr("map-ref", subr_map_ref, 2, 3));
@@ -3918,7 +3918,7 @@ void VM::init_primitives() {
   auto subr_get = [](VM &vm, uint32_t argc, Value *args) -> Value {
     Value coll = args[0];
     Value key = args[1];
-    Value def_val = argc > 2 ? args[2] : Value::nil();
+    Value def_val = argc > 2 ? args[2] : map_missing();
     if (Heap::is_map(coll)) {
       return coll.as_ptr<ObjMap>()->get(key, def_val);
     }
