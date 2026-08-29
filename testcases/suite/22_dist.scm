@@ -387,8 +387,18 @@
 (assert-equal "logpdf-sum-uniform is n * -log(width)"
               #t (< (abs (- (logpdf-sum-uniform uv 0 4 0.0 1.0) 0.0)) 1e-12))
 (view-set! uv 3 2.0)
-(assert-equal "one value outside the support sinks the whole sum"
-              #t (< (logpdf-sum-uniform uv 0 4 0.0 1.0) -1e29))
+;; -inf, the same as the scalar logpdf-uniform and the same as the device.
+;; A fast path that reported a merely-very-negative number would disagree
+;; with the function it accelerates, and would claim two impossible
+;; candidates were equally likely where -inf correctly gives NaN.
+(assert-equal "one value outside the support sinks the whole sum to -inf"
+              #t (infinite? (logpdf-sum-uniform uv 0 4 0.0 1.0)))
+(assert-equal "and it agrees with the scalar version"
+              #t (infinite? (logpdf-uniform 2.0 0.0 1.0)))
+(assert-equal "which exponentiates to exactly zero probability"
+              0.0 (exp (logpdf-sum-uniform uv 0 4 0.0 1.0)))
+(assert-equal "logpdf-exponential is -inf below its support too"
+              #t (infinite? (logpdf-exponential -1.0 2.0)))
 
 ;; Flip counts ones and takes two logs, rather than a log per element —
 ;; the sum is exactly n1*log(p) + n0*log1p(-p).

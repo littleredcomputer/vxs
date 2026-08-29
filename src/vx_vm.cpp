@@ -2834,10 +2834,20 @@ void VM::init_primitives() {
   }, 5, 5));
 
   // (logpdf-sum-uniform view start count low high) -> scalar
-  // Anything outside the support makes the whole sum -inf, which is
-  // reported as a large negative rather than an actual infinity: a real
-  // -inf propagates into every later arithmetic as NaN, and a weight that
-  // is NaN poisons a normalisation silently.
+  //
+  // Anything outside the support makes the whole sum -inf, and a REAL
+  // -inf is returned. The first version of this returned -1e30 on the
+  // theory that an infinity propagates as NaN — which was wrong three
+  // ways. The scalar logpdf-uniform already returns -inf (it is log(0)),
+  // so a fast path returning anything else disagrees with the function it
+  // accelerates; lib/stat.wgsl returns -inf too, so it broke the
+  // host/device correspondence; and -inf behaves correctly wherever a
+  // log-weight is actually used — (+ -inf x) is -inf and (exp -inf) is 0,
+  // so an impossible candidate gets exactly zero probability.
+  //
+  // Where the two differ, -inf minus -inf is NaN and that is the HONEST
+  // answer: the ratio of two impossibilities is undefined, while -1e30
+  // would have quietly reported them as equally likely.
   def_global("logpdf-sum-uniform", heap.make_subr("logpdf-sum-uniform", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-uniform: expected a view");
     ObjView *v = args[0].as_ptr<ObjView>();
@@ -2851,7 +2861,9 @@ void VM::init_primitives() {
     double sum = 0.0;
     for (long i = 0; i < count; ++i) {
       double x = vxs_view_load(v, static_cast<size_t>(start + i));
-      if (x < low || x > high) return Value::from_double(-1e30);
+      if (x < low || x > high) {
+        return Value::from_double(-std::numeric_limits<double>::infinity());
+      }
       sum += d;
     }
     return Value::from_double(sum);
@@ -2897,7 +2909,9 @@ void VM::init_primitives() {
     if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
       vm.raise_contract("logsumexp: range out of bounds for this view");
     }
-    if (count == 0) return Value::from_double(-1e30);
+    // The sum of nothing is zero, whose log is -inf — the identity that
+    // makes logsumexp over an empty range compose with a non-empty one.
+    if (count == 0) return Value::from_double(-std::numeric_limits<double>::infinity());
     double mx = vxs_view_load(v, static_cast<size_t>(start));
     for (long i = 1; i < count; ++i) {
       double x = vxs_view_load(v, static_cast<size_t>(start + i));

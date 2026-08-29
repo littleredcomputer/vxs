@@ -1028,10 +1028,12 @@ small. The naive form overflows above ~709 and underflows to zero below
 logsumexp  -799.56          naive  -inf
 ```
 
-⚠️ Out-of-support values make `logpdf-sum-uniform` return a large negative
-rather than a true `-inf`, because a real infinity propagates into every
-later arithmetic as NaN, and a NaN weight poisons a normalisation
-silently.
+Out-of-support values give a true `-inf`, matching the scalar `logpdf-*`
+and the device. That is the right answer downstream: `(+ -inf x)` is
+`-inf` and `(exp -inf)` is `0`, so an impossible candidate gets exactly
+zero probability. Where `-inf` differs from a merely-large negative —
+`-inf` minus `-inf` is NaN — the NaN is honest, since the ratio of two
+impossibilities is undefined.
 
 The generator is explicit. On the device it is per-invocation private
 state and so implicit; here many streams may be alive at once, and hiding

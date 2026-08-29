@@ -149,7 +149,11 @@
 ;; here first because the host is where scoring happens; the device wants
 ;; the same function whenever a kernel needs to weight one.
 (define (logpdf-exponential v lambda)
-  (if (< v 0.0) -1e30 (- (log lambda) (* lambda v))))
+  ;; -inf below the support, not a large negative: that is what log(0) is,
+  ;; it is what every other logpdf here returns off-support, and it behaves
+  ;; correctly downstream — (exp -inf) is 0, so an impossible value gets
+  ;; exactly zero probability rather than an extremely small one.
+  (if (< v 0.0) (log 0.0) (- (log lambda) (* lambda v))))
 
 (define (logpdf-uniform v low high)
   (let* ((outside? (or (< v low) (> v high)))
