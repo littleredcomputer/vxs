@@ -1520,6 +1520,20 @@ static inline double vxs_inv_erfc(double x) {
 
 static inline double vxs_inv_erf(double x) { return vxs_inv_erfc(1.0 - x); }
 
+// Read element i of a view as a double. Buffer reductions all need this
+// and none of them should care whether the buffer is f32 or f64.
+static inline double vxs_view_load(ObjView *v, size_t i) {
+  const uint8_t *p = v->bytes.as_ptr<ObjBytes>()->data.data() + v->offset + i * v->stride;
+  switch (v->elem) {
+    case ElemType::F32: { float x;    std::memcpy(&x, p, 4); return static_cast<double>(x); }
+    case ElemType::F64: { double x;   std::memcpy(&x, p, 8); return x; }
+    case ElemType::I32: { int32_t x;  std::memcpy(&x, p, 4); return static_cast<double>(x); }
+    case ElemType::U32: { uint32_t x; std::memcpy(&x, p, 4); return static_cast<double>(x); }
+    case ElemType::U8:  return static_cast<double>(*p);
+  }
+  return 0.0;
+}
+
 // Small integers arrive as ints and everything else as doubles, so a
 // primitive that wants a number has to ask which — the same two-line dance
 // view-set! does.
@@ -2789,6 +2803,111 @@ void VM::init_primitives() {
     }
     rec->fields[static_cast<size_t>(i)] = args[2];
     return Value::unspecified();
+  }, 3, 3));
+
+  //--- buffer reductions ---------------------------------------------------
+  // The shape inference actually has: M candidates, each scored against N
+  // observations. That is M sums over N, NOT an M-by-N matrix — the matrix
+  // is reduced along N immediately, so materialising it would cost 40MB at
+  // M=1000, N=10000 and evict the cache for nothing. The outer dimension
+  // stays an ordinary Scheme loop; only the inner one comes down here.
+
+  // (logpdf-sum-normal view start count loc scale) -> scalar
+  def_global("logpdf-sum-normal", heap.make_subr("logpdf-sum-normal", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-normal: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double loc = vxs_as_num(args[3]), scale = vxs_as_num(args[4]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-normal: range out of bounds for this view");
+    }
+    // Same expression as logpdf-normal, with log(scale) hoisted out of the
+    // loop — the one arrangement the scalar version cannot make.
+    const double k = 0.9189385175704956 + std::log(scale);
+    double sum = 0.0;
+    for (long i = 0; i < count; ++i) {
+      double f = (vxs_view_load(v, static_cast<size_t>(start + i)) - loc) / scale;
+      sum += -0.5 * f * f - k;
+    }
+    return Value::from_double(sum);
+  }, 5, 5));
+
+  // (logpdf-sum-uniform view start count low high) -> scalar
+  // Anything outside the support makes the whole sum -inf, which is
+  // reported as a large negative rather than an actual infinity: a real
+  // -inf propagates into every later arithmetic as NaN, and a weight that
+  // is NaN poisons a normalisation silently.
+  def_global("logpdf-sum-uniform", heap.make_subr("logpdf-sum-uniform", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-uniform: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double low = vxs_as_num(args[3]), high = vxs_as_num(args[4]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-uniform: range out of bounds for this view");
+    }
+    const double d = -std::log(high - low);
+    double sum = 0.0;
+    for (long i = 0; i < count; ++i) {
+      double x = vxs_view_load(v, static_cast<size_t>(start + i));
+      if (x < low || x > high) return Value::from_double(-1e30);
+      sum += d;
+    }
+    return Value::from_double(sum);
+  }, 5, 5));
+
+  // (logpdf-sum-flip view start count p) -> scalar
+  // Values are read as 1.0 for true and anything else for false, matching
+  // how a filled buffer of flips is written.
+  def_global("logpdf-sum-flip", heap.make_subr("logpdf-sum-flip", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-flip: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double p = vxs_as_num(args[3]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-flip: range out of bounds for this view");
+    }
+    // Counting first and taking two logs at the end, rather than a log per
+    // element: the sum is n1*log(p) + n0*log1p(-p) exactly.
+    long ones = 0;
+    for (long i = 0; i < count; ++i) {
+      if (vxs_view_load(v, static_cast<size_t>(start + i)) == 1.0) ++ones;
+    }
+    long zeros = count - ones;
+    double sum = 0.0;
+    if (ones  > 0) sum += static_cast<double>(ones)  * std::log(p);
+    if (zeros > 0) sum += static_cast<double>(zeros) * std::log1p(-p);
+    return Value::from_double(sum);
+  }, 4, 4));
+
+  // (logsumexp view start count) -> log(sum(exp(x_i)))
+  //
+  // Native for CORRECTNESS rather than speed — the counts here are small.
+  // The naive form overflows for anything above ~709 and underflows to
+  // zero below ~-745, and log-weights routinely live out there. Shifting
+  // by the maximum first is exact and cannot overflow, and it is precisely
+  // the step someone rewriting this from the formula leaves out.
+  def_global("logsumexp", heap.make_subr("logsumexp", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logsumexp: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logsumexp: range out of bounds for this view");
+    }
+    if (count == 0) return Value::from_double(-1e30);
+    double mx = vxs_view_load(v, static_cast<size_t>(start));
+    for (long i = 1; i < count; ++i) {
+      double x = vxs_view_load(v, static_cast<size_t>(start + i));
+      if (x > mx) mx = x;
+    }
+    double acc = 0.0;
+    for (long i = 0; i < count; ++i) {
+      acc += std::exp(vxs_view_load(v, static_cast<size_t>(start + i)) - mx);
+    }
+    return Value::from_double(mx + std::log(acc));
   }, 3, 3));
 
   //--- erfc and friends ---------------------------------------------------

@@ -154,7 +154,7 @@
 (assert-true "random_normal"     (string-contains? src "fn random_normal("))
 (assert-true "random_exponential" (string-contains? src "fn random_exponential("))
 (assert-true "random_gamma"      (string-contains? src "fn random_gamma("))
-(assert-true "flip"              (string-contains? src "fn flip("))
+(assert-true "random_flip"       (string-contains? src "fn random_flip("))
 ;; The log-densities are the half that turns particles into inference:
 ;; a sampler gives you a cloud, a sampler plus its log-density gives you
 ;; importance weights.

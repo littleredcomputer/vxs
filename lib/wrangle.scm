@@ -22,7 +22,7 @@
 ;;   pt_pos(i), pt_size(i), pt_colour(i)   read
 ;;   pt_write(i, pos, size, colour)        write
 ;;   the whole of lib/rng.wgsl and lib/stat.wgsl — random_normal,
-;;   random_uniform, random_gamma, flip, and the logpdf_* family
+;;   random_uniform, random_gamma, random_flip, and the logpdf_* family
 ;;   heat_colour(t), cool_colour(t) from lib/colour.wgsl — display ramps,
 ;;   not attributes
 ;;

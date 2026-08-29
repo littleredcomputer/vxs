@@ -80,7 +80,7 @@ fn random_uniform(low: f32, high: f32) -> f32 {
   return max(low, u);
 }
 
-fn flip(prob: f32) -> bool {
+fn random_flip(prob: f32) -> bool {
   return random_uniform(0.0, 1.0) < prob;
 }
 

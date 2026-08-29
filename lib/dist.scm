@@ -96,7 +96,7 @@
   (let ((u (- 1.0 (random-uniform r 0.0 1.0))))   ; u in (0, 1]
     (/ (- (log u)) lambda)))
 
-(define (flip r prob) (< (random-uniform r 0.0 1.0) prob))
+(define (random-flip r prob) (< (random-uniform r 0.0 1.0) prob))
 
 ;; Marsaglia-Tsang, https://dl.acm.org/doi/pdf/10.1145/358407.358414
 ;;
@@ -143,6 +143,13 @@
          (o (if (= k 0.0) 0.0 (* h k)))
          (s (if (= i 0.0) 0.0 (* i v))))
     (+ o s)))
+
+;; log(lambda) - lambda*v on the support, and -inf below it. Absent from
+;; lib/stat.wgsl, which has random_exponential and no score for it — added
+;; here first because the host is where scoring happens; the device wants
+;; the same function whenever a kernel needs to weight one.
+(define (logpdf-exponential v lambda)
+  (if (< v 0.0) -1e30 (- (log lambda) (* lambda v))))
 
 (define (logpdf-uniform v low high)
   (let* ((outside? (or (< v low) (> v high)))

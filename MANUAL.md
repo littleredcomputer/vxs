@@ -986,13 +986,52 @@ Threefry core.
 
 ```scheme
 (define r (rng-make ptnum seed stream))   ; mirrors rng_init
-(random-uniform r 0.0 1.0)
-(random-normal  r 0.0 1.0)
-(random-exponential r lambda)
-(random-gamma   r alpha lambda)
-(flip r p)
-(logpdf-normal v loc scale)               ; and -flip, -uniform
 ```
+
+| draw | score | summed over a buffer |
+|---|---|---|
+| `random-uniform r low high` | `logpdf-uniform v low high` | `logpdf-sum-uniform` |
+| `random-normal r loc scale` | `logpdf-normal v loc scale` | `logpdf-sum-normal` |
+| `random-flip r p` | `logpdf-flip v p` | `logpdf-sum-flip` |
+| `random-exponential r lambda` | `logpdf-exponential v lambda` | — |
+| `random-gamma r alpha lambda` | — (needs `lgamma`) | — |
+
+One family, `random-` / `logpdf-` / `logpdf-sum-`. There is no import
+mechanism, so a Gen-ish layer above will rename these into whatever
+clothing it likes; the point of the regularity is that it can do so
+mechanically.
+
+### Buffer reductions
+
+```scheme
+(logpdf-sum-normal view start count loc scale)   ; -> one scalar
+(logsumexp view start count)                     ; -> log(sum(exp(x)))
+```
+
+The shape that matters is M candidates each scored against N observations:
+**M sums over N, not an M×N matrix.** The matrix is reduced along N
+immediately, so materialising it would cost 40 MB at M=1000, N=10000 and
+evict the cache for nothing. Only the inner dimension is native; the outer
+stays an ordinary loop.
+
+| | |
+|---|---|
+| one candidate, 10k observations, in Scheme | 2.35 ms |
+| the same, `logpdf-sum-normal` | **9.8 µs** |
+| 1000 candidates × 10k observations | **7.4 ms** |
+
+`logsumexp` is native for **correctness**, not speed — the counts are
+small. The naive form overflows above ~709 and underflows to zero below
+~−745, and log-weights live out there routinely:
+
+```
+logsumexp  -799.56          naive  -inf
+```
+
+⚠️ Out-of-support values make `logpdf-sum-uniform` return a large negative
+rather than a true `-inf`, because a real infinity propagates into every
+later arithmetic as NaN, and a NaN weight poisons a normalisation
+silently.
 
 The generator is explicit. On the device it is per-invocation private
 state and so implicit; here many streams may be alive at once, and hiding

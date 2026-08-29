@@ -173,8 +173,8 @@
               1 (draws-taken (lambda (r) (random-normal r 0.0 1.0))))
 (assert-equal "random-exponential takes exactly one"
               1 (draws-taken (lambda (r) (random-exponential r 1.0))))
-(assert-equal "flip takes exactly one"
-              1 (draws-taken (lambda (r) (flip r 0.5))))
+(assert-equal "random-flip takes exactly one"
+              1 (draws-taken (lambda (r) (random-flip r 0.5))))
 
 ;;--- the samplers themselves --------------------------------------------
 
@@ -346,5 +346,95 @@
                    (if (= i 4000)
                        (< (abs (- (/ s 4000) 10.0)) 0.15)
                        (loop (+ i 1) (+ s (view-ref sv i))))))
+
+
+;;--- buffer reductions --------------------------------------------------
+;; The shape inference actually has is M candidates each scored against N
+;; observations: M sums over N, not an M-by-N matrix. The matrix is
+;; reduced along N immediately, so materialising it would cost 40MB at
+;; M=1000 N=10000 and evict the cache for nothing. Only the inner
+;; dimension is native; the outer stays an ordinary Scheme loop.
+
+(define RN 2000)
+(define rb (make-bytes (* RN 4)))
+(define rv (bytes-view rb :f32))
+(rng-fill-normal! (rng-make 0 7 0) rv 0 RN 0.0 1.0)
+
+(define (scalar-sum-normal loc scale)
+  (let loop ((i 0) (s 0.0))
+    (if (= i RN) s (loop (+ i 1) (+ s (logpdf-normal (view-ref rv i) loc scale))))))
+
+;; A fast path that gave a different answer would be worse than none.
+;; Compared at f32 tolerance because the native version hoists log(scale)
+;; out of the loop, so the two accumulate in a different order.
+(assert-equal "logpdf-sum-normal matches the scalar loop"
+              #t (< (abs (- (logpdf-sum-normal rv 0 RN 0.0 1.0) (scalar-sum-normal 0.0 1.0))) 1e-6))
+(assert-equal "and with a shifted, scaled distribution"
+              #t (< (abs (- (logpdf-sum-normal rv 0 RN 0.5 2.0) (scalar-sum-normal 0.5 2.0))) 1e-6))
+(assert-equal "a sub-range sums only that range"
+              #t (< (abs (- (logpdf-sum-normal rv 0 RN 0.0 1.0)
+                            (+ (logpdf-sum-normal rv 0 500 0.0 1.0)
+                               (logpdf-sum-normal rv 500 (- RN 500) 0.0 1.0))))
+                    1e-6))
+(assert-equal "an empty range sums to zero" 0.0 (logpdf-sum-normal rv 0 0 0.0 1.0))
+(assert-equal "a range past the end is refused"
+              'raised (guard (e (#t 'raised)) (logpdf-sum-normal rv 0 (+ RN 1) 0.0 1.0)))
+
+;; Uniform: inside the support every element contributes -log(width);
+;; ANYTHING outside makes the whole sum impossible.
+(define ub (make-bytes (* 4 4))) (define uv (bytes-view ub :f32))
+(view-set! uv 0 0.25) (view-set! uv 1 0.5) (view-set! uv 2 0.75) (view-set! uv 3 0.9)
+(assert-equal "logpdf-sum-uniform is n * -log(width)"
+              #t (< (abs (- (logpdf-sum-uniform uv 0 4 0.0 1.0) 0.0)) 1e-12))
+(view-set! uv 3 2.0)
+(assert-equal "one value outside the support sinks the whole sum"
+              #t (< (logpdf-sum-uniform uv 0 4 0.0 1.0) -1e29))
+
+;; Flip counts ones and takes two logs, rather than a log per element —
+;; the sum is exactly n1*log(p) + n0*log1p(-p).
+(define fb (make-bytes (* 4 4))) (define fv (bytes-view fb :f32))
+(view-set! fv 0 1.0) (view-set! fv 1 0.0) (view-set! fv 2 1.0) (view-set! fv 3 1.0)
+(assert-equal "logpdf-sum-flip matches three ones and a zero"
+              #t (< (abs (- (logpdf-sum-flip fv 0 4 0.3)
+                            (+ (* 3 (log 0.3)) (log 0.7))))
+                    1e-12))
+
+;;--- logsumexp ----------------------------------------------------------
+;; Native for CORRECTNESS, not speed: the counts are small. The naive form
+;; overflows above ~709 and underflows to zero below ~-745, and log-weights
+;; live out there routinely. Shifting by the maximum is exact — and it is
+;; exactly the step someone rewriting this from the formula omits.
+
+(define lb (make-bytes (* 4 8))) (define lv (bytes-view lb :f64))
+(view-set! lv 0 0.0) (view-set! lv 1 0.0) (view-set! lv 2 0.0) (view-set! lv 3 0.0)
+(assert-equal "logsumexp of four zeros is log 4"
+              #t (< (abs (- (logsumexp lv 0 4) (log 4.0))) 1e-12))
+
+(view-set! lv 0 1.0) (view-set! lv 1 2.0) (view-set! lv 2 3.0) (view-set! lv 3 4.0)
+(assert-equal "and agrees with the naive form where the naive form works"
+              #t (< (abs (- (logsumexp lv 0 4)
+                            (log (+ (exp 1.0) (exp 2.0) (exp 3.0) (exp 4.0)))))
+                    1e-12))
+
+;; THE case it exists for. Every one of these underflows exp to zero, so
+;; the naive version returns -inf and poisons every weight downstream.
+(view-set! lv 0 -800.0) (view-set! lv 1 -801.0) (view-set! lv 2 -802.0) (view-set! lv 3 -803.0)
+(assert-equal "the naive form underflows to -inf here"
+              #t (infinite? (log (+ (exp -800.0) (exp -801.0) (exp -802.0) (exp -803.0)))))
+(assert-equal "logsumexp does not"
+              #t (< (abs (- (logsumexp lv 0 4) -799.5598103014388)) 1e-9))
+
+;; And the other end: naive exp overflows to +inf above ~709.
+(view-set! lv 0 800.0) (view-set! lv 1 799.0) (view-set! lv 2 798.0) (view-set! lv 3 797.0)
+(assert-equal "nor does it overflow at the top"
+              #t (< (abs (- (logsumexp lv 0 4) 800.4401896985612)) 1e-9))
+
+;; Shifting every weight by a constant shifts the answer by that constant
+;; — the property normalisation depends on.
+(assert-equal "logsumexp shifts with its input"
+              #t (let ((before (logsumexp lv 0 4)))
+                   (view-set! lv 0 810.0) (view-set! lv 1 809.0)
+                   (view-set! lv 2 808.0) (view-set! lv 3 807.0)
+                   (< (abs (- (logsumexp lv 0 4) (+ before 10.0))) 1e-9)))
 
 (suite-summary)
