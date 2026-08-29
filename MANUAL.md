@@ -968,7 +968,8 @@ This is what `jax.random.split` does, and for the same reason: **split *is*
 Threefry** — the parent's output words become the child's key. Coordinates
 and splitting are one primitive with two ergonomics, not rival designs.
 
-Use coordinates when you know the address (a point index, a particle).
+Use coordinates when you know the address (a point index, a batch
+element).
 Use split when descending into something that should not need to know what
 its parent or siblings did — a nested generative function, say.
 
