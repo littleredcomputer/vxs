@@ -102,6 +102,35 @@
 (assert-equal "and a boolean"
               #t (fails? (lambda () (string-append "a" #t))))
 
+;; substring had the same shape of leniency, in five places at once.
+;; R7RS requires 0 <= start <= end <= length and calls a violation an
+;; error; each one used to be papered over into a plausible result.
+(assert-equal "substring refuses a non-string"
+              #t (fails? (lambda () (substring 5 0 1))))
+(assert-equal "an end past the end is not clamped"
+              #t (fails? (lambda () (substring "abc" 1 99))))
+(assert-equal "start after end is not silently empty"
+              #t (fails? (lambda () (substring "abc" 2 1))))
+(assert-equal "a negative start is not clamped to zero"
+              #t (fails? (lambda () (substring "abc" -3 2))))
+;; The one that decided it: as_int on a string reinterprets whatever bits
+;; the value holds, which for a heap object is a pointer. It happened to
+;; give 0.
+(assert-equal "and a string where an index belongs"
+              #t (fails? (lambda () (substring "abc" "x" 2))))
+(assert-equal "nor a fractional index"
+              #t (fails? (lambda () (substring "abc" 0 1.5))))
+
+;; Indices are any INTEGRAL number rather than strictly exact integers,
+;; because (/ 4 2) is inexact here and (substring s 0 (/ n 2)) is a
+;; reasonable thing to write.
+(assert-equal "an inexact but whole index is accepted"
+              "ab" (substring "abcd" 0 (/ 4 2)))
+(assert-equal "ordinary substrings are unaffected"
+              '("bcd" "abc" "") (list (substring "abcdef" 1 4)
+                                      (substring "abc" 0 3)
+                                      (substring "abc" 2 2)))
+
 ;; Symbols ARE still coerced. A deliberate extension rather than an
 ;; oversight — R7RS takes strings only — kept because it is lossless and
 ;; this codebase builds messages out of symbol names.

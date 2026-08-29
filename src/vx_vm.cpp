@@ -1541,6 +1541,35 @@ static inline double vxs_as_num(Value v) {
   return v.is_int() ? static_cast<double>(v.as_int()) : v.as_real();
 }
 
+// A contract violation reported the way car reports one — fiber error
+// state, not raise_contract — so every violation behaves alike whichever
+// procedure notices it. See MANUAL section 6 on the two mechanisms.
+static inline void vxs_fail(VM &vm, const std::string &msg) {
+  if (vm.current_fiber) {
+    vm.current_fiber->state = Fiber::State::Error;
+    vm.current_fiber->error_message = "[VM Error] " + msg;
+  }
+}
+
+// An index argument: any number with an integral value. Not strictly an
+// exact integer, because (/ 4 2) is inexact here and (substring s 0 (/ n 2))
+// is a reasonable thing to write. 2.5 is still refused.
+static inline bool vxs_index_arg(VM &vm, Value v, const char *who, double &out) {
+  if (!v.is_number()) {
+    vxs_fail(vm, std::string(who) + ": contract violation, expected an integer index, got " +
+                     vm.format_value(v));
+    return false;
+  }
+  out = vxs_as_num(v);
+  if (out != std::floor(out)) {
+    vxs_fail(vm, std::string(who) + ": index must be a whole number, got " +
+                     vm.format_value(v));
+    return false;
+  }
+  return true;
+}
+
+
 // Threefry-4x32-13. Must stay bit-identical to lib/threefry.scm (which the
 // nine published known-answer vectors in layer 13 pin) and to
 // threefry4x32 in lib/rng.wgsl. Three implementations of one algorithm is
@@ -4539,12 +4568,41 @@ void VM::init_primitives() {
     return vm.heap.make_string(res);
   }, 0, UINT32_MAX));
 
+  // R7RS requires 0 <= start <= end <= length, and a violation is an
+  // error. Every one of them used to be papered over instead:
+  //
+  //   (substring 5 0 1)        was ""      non-string, silently empty
+  //   (substring "abc" 1 99)   was "bc"    end past the end, clamped
+  //   (substring "abc" 2 1)    was ""      start after end
+  //   (substring "abc" -3 2)   was "ab"    negative start, clamped
+  //   (substring "abc" "x" 2)  was "ab"    as_int() on a STRING
+  //
+  // The last is the one that decided it: reading a non-number through
+  // as_int reinterprets whatever bits the value holds, which for a heap
+  // object is a pointer. It happened to yield 0.
+  //
+  // Indices are any INTEGRAL number rather than strictly exact integers:
+  // (/ 4 2) is inexact here, so (substring s 0 (/ n 2)) is a reasonable
+  // thing to write and demanding exactness would reject it. 2.5 is still
+  // refused.
   def_global("substring", heap.make_subr("substring", [](VM &vm, uint32_t, Value *args) -> Value {
-    if (!Heap::is_string(args[0])) return vm.heap.make_string("");
+    if (!Heap::is_string(args[0])) {
+      vxs_fail(vm, "substring: contract violation, expected a string, got " +
+                       vm.format_value(args[0]));
+      return Value::unspecified();
+    }
     std::string_view sv = args[0].as_ptr<ObjString>()->view();
-    int32_t start = std::max(0, args[1].as_int());
-    int32_t end = std::min<int32_t>(static_cast<int32_t>(sv.size()), args[2].as_int());
-    if (start >= end) return vm.heap.make_string("");
+    double ds, de;
+    if (!vxs_index_arg(vm, args[1], "substring", ds)) return Value::unspecified();
+    if (!vxs_index_arg(vm, args[2], "substring", de)) return Value::unspecified();
+    long start = static_cast<long>(ds), end = static_cast<long>(de);
+    long len = static_cast<long>(sv.size());
+    if (start < 0 || end > len || start > end) {
+      vxs_fail(vm, "substring: range out of bounds — need 0 <= start <= end <= " +
+                       std::to_string(len) + ", got start " + std::to_string(start) +
+                       " end " + std::to_string(end));
+      return Value::unspecified();
+    }
     return vm.heap.make_string(std::string(sv.substr(start, end - start)));
   }, 3, 3));
 
