@@ -141,6 +141,19 @@ std::string VM::format_value(Value v) const {
         ObjSubr *subr = obj->as<ObjSubr>();
         return "#<primitive:" + std::string(subr->name) + ">";
       }
+      case ObjType::Record: {
+        ObjRecord *rec = obj->as<ObjRecord>();
+        // R7RS spells type names <point>, and #<<point> 3 4> reads badly.
+        // Strip the brackets the convention adds rather than making every
+        // caller pass a second, undecorated name.
+        std::string nm = format_value(rec->name);
+        if (nm.size() > 2 && nm.front() == '<' && nm.back() == '>') {
+          nm = nm.substr(1, nm.size() - 2);
+        }
+        std::string out = "#<" + nm;
+        for (Value f : rec->fields) out += " " + format_value(f);
+        return out + ">";
+      }
       case ObjType::Generator: {
         ObjGenerator *g = obj->as<ObjGenerator>();
         if (!g->done) return "#<generator (live)>";
@@ -290,6 +303,13 @@ void Heap::blacken_obj(Obj *obj) {
     // active_fibers, so if this object is unreachable so is everything
     // its fiber holds — which is the intended behaviour, and also why
     // the marking has to be here and not left to the scheduler.
+    case ObjType::Record: {
+      auto *rec = static_cast<ObjRecord *>(obj);
+      mark_value(rec->tag);
+      mark_value(rec->name);
+      for (Value f : rec->fields) mark_value(f);
+      break;
+    }
     case ObjType::Generator: {
       auto *g = static_cast<ObjGenerator *>(obj);
       mark_value(g->result);
@@ -2698,6 +2718,58 @@ void VM::init_primitives() {
     }
     return vm.heap.make_bytes(static_cast<size_t>(args[0].as_int()));
   }, 1, 1));
+
+  //--- records ------------------------------------------------------------
+  // The primitives define-record-type expands into. Deliberately %-named
+  // (the reserved-name convention): nothing outside the prelude macro
+  // should be reaching for a field by index, because the whole point of a
+  // nominal type is that its layout is not part of its interface.
+
+  // (%record tag name field ...) — tag is a fresh object per record TYPE.
+  def_global("%record", heap.make_subr("%record", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    Value rv = vm.heap.make_record(args[0], args[1]);
+    auto *rec = rv.as_ptr<ObjRecord>();
+    // The fields are still on the caller's stack and therefore rooted,
+    // and a std::vector grows outside the collected heap, so nothing here
+    // can be collected out from under us.
+    rec->fields.reserve(argc - 2);
+    for (uint32_t i = 2; i < argc; ++i) rec->fields.push_back(args[i]);
+    return rv;
+  }, 2, UINT32_MAX));
+
+  def_global("record?", heap.make_subr("record?", [](VM &, uint32_t, Value *args) -> Value {
+    return Heap::is_record(args[0]) ? Value::boolean_true() : Value::boolean_false();
+  }, 1, 1));
+
+  // Identity, not shape: a record of a DIFFERENT type with the same field
+  // count is refused, which is the whole difference between a nominal
+  // type and a tagged vector.
+  def_global("%record-is?", heap.make_subr("%record-is?", [](VM &, uint32_t, Value *args) -> Value {
+    if (!Heap::is_record(args[0])) return Value::boolean_false();
+    return args[0].as_ptr<ObjRecord>()->tag == args[1] ? Value::boolean_true()
+                                                       : Value::boolean_false();
+  }, 2, 2));
+
+  def_global("%record-ref", heap.make_subr("%record-ref", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_record(args[0])) vm.raise_contract("%record-ref: not a record");
+    auto *rec = args[0].as_ptr<ObjRecord>();
+    long i = static_cast<long>(vxs_as_num(args[1]));
+    if (i < 0 || static_cast<size_t>(i) >= rec->fields.size()) {
+      vm.raise_contract("%record-ref: field index out of range");
+    }
+    return rec->fields[static_cast<size_t>(i)];
+  }, 2, 2));
+
+  def_global("%record-set!", heap.make_subr("%record-set!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_record(args[0])) vm.raise_contract("%record-set!: not a record");
+    auto *rec = args[0].as_ptr<ObjRecord>();
+    long i = static_cast<long>(vxs_as_num(args[1]));
+    if (i < 0 || static_cast<size_t>(i) >= rec->fields.size()) {
+      vm.raise_contract("%record-set!: field index out of range");
+    }
+    rec->fields[static_cast<size_t>(i)] = args[2];
+    return Value::unspecified();
+  }, 3, 3));
 
   //--- erfc and friends ---------------------------------------------------
   // See vxs_erfc above for why these are native. lib/dist.scm keeps a

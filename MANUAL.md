@@ -909,10 +909,11 @@ modifiers:
   (y point-y set-point-y!))
 ```
 
-A **tagged vector**, not a new heap type. The tag in slot 0 is a fresh
-object per definition, so identity is by `eq?` and two record types
-sharing a name stay distinct. Fields are fixed indices, so an accessor is
-a `vector-ref` rather than the linear scan a map lookup would be.
+A **distinct heap type**, `ObjRecord`. The tag is a fresh object per
+definition, so identity is by `eq?` and two record types sharing a name
+stay distinct. Fields are fixed indices, so an accessor is one indexed
+read rather than the linear scan a map lookup would be. Records print as
+`#<point 3 4>`.
 
 What it buys over a map or a closure is **nominal identity**. A map is
 anonymous — there is no `point?` to write. A closure carries behaviour but
@@ -924,10 +925,13 @@ The two compose rather than compete: a record whose field *is* a dispatch
 closure gives you both — `predicate?` for identity, the closure for
 behaviour, open to extension without touching the record.
 
-⚠️ Records are vectors, and `vector?` says so. R7RS wants record types
-disjoint from every other type; this representation leaks. It is the price
-of not adding a heap type, and matters only where something dispatches on
-`vector?` before checking the record predicate.
+These began as tagged vectors — the classic portable trick, and what a
+shim on someone else's Scheme has to do. The leaks were real rather than
+theoretical: `vector?` said `#t` so a `vector?` branch shadowed the
+predicate, `(vector-set! p 0 'x)` **destroyed the type** because the tag
+was public, and a record printed as `[(record-type <point>) 3 4]`. The
+second is what decided it — a type you can dismantle with an ordinary
+vector write is not a floor to build on.
 
 ---
 

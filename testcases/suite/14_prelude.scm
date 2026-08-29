@@ -191,11 +191,27 @@
 (assert-equal "and can be set afterwards"
               7 (let ((x (make-partial 1))) (set-p-b! x 7) (p-b x)))
 
-;; Known limitation of the tagged-vector representation, pinned so it is
-;; documented rather than discovered: records ARE vectors. R7RS wants them
-;; disjoint. This matters only where something dispatches on vector?
-;; before checking the record predicate.
-(assert-equal "records are vectors — the representation leaks"
-              #t (vector? pt))
+;; A DISTINCT TYPE, which these three assertions are the whole point of.
+;; Records began as tagged vectors — the portable trick — and every one of
+;; these failed: vector? said #t so a vector? branch shadowed the
+;; predicate, the tag sat in slot 0 where any vector-set! could destroy
+;; it, and the printed form exposed the machinery.
+(assert-equal "a record is not a vector" #f (vector? pt))
+(assert-equal "nor anything else it might be confused with"
+              '(#f #f #f) (list (pair? pt) (procedure? pt) (string? pt)))
+(assert-equal "record? recognises records generally" '(#t #f)
+              (list (record? pt) (record? (vector 1 2))))
+
+;; The representation is not reachable either — (vector-ref pt 0) is a
+;; contract violation rather than a peek at the tag. NOT asserted here:
+;; a contract violation is a native VM error and guard cannot catch it
+;; (MANUAL section 3), so testing it would need a fiber boundary — and it
+;; is really a statement about vector-ref rather than about records. The
+;; vector? assertion above is the one that carries the weight.
+
+;; And it prints as itself rather than as its innards. R7RS spells type
+;; names <point>; the brackets are stripped so this does not read #<<point>.
+(assert-equal "a record prints legibly"
+              "#<point 3 99>" (with-output-to-string (lambda () (display pt))))
 
 (suite-summary)

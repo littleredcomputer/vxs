@@ -34,7 +34,8 @@ enum class ObjType : uint8_t {
   Handle,
   Bytes,
   View,
-  Generator
+  Generator,
+  Record
 };
 
 // Base object header for all heap-allocated objects
@@ -288,6 +289,36 @@ struct ObjGenerator : Obj {
         done(false), is_error(false), running(false) {}
 
   ~ObjGenerator();
+};
+
+//-----------------------------------------------------------------------------
+// 7c. Record — a nominal type
+//-----------------------------------------------------------------------------
+// R7RS wants a record type distinct from every other type. The prelude
+// first built these as TAGGED VECTORS, which is the classic portable trick
+// and is what a shim on someone else's Scheme has to do. We are not a
+// shim, and the leaks were real rather than theoretical:
+//
+//   (vector? p)             was #t, so a vector? branch shadowed point?
+//   (vector-set! p 0 'x)    destroyed the type — the tag was public
+//   (display p)             printed [(record-type <point>) 3 4]
+//
+// The second is what decided it. A type you can dismantle with an ordinary
+// vector write is not a floor to build on, and records are about to be
+// load-bearing.
+//
+// `tag` is a fresh object per record TYPE, so identity is by eq? and two
+// types sharing a name stay distinct. `name` is carried separately rather
+// than parsed back out of the tag, so printing needs no cleverness.
+struct ObjRecord : Obj {
+  static constexpr ObjType TYPE_TAG = ObjType::Record;
+
+  Value tag;                    // identity of the record type
+  Value name;                   // a symbol, for printing
+  std::vector<Value> fields;
+
+  inline ObjRecord(Value t, Value n)
+      : Obj(ObjType::Record), tag(t), name(n) {}
 };
 
 //-----------------------------------------------------------------------------
@@ -658,6 +689,10 @@ public:
   // at the moment the collector ran. Building the object first, then the
   // fiber (which allocates nothing the collector manages), leaves no
   // window.
+  inline Value make_record(Value tag, Value name) {
+    return Value::from_ptr(allocate<ObjRecord>(tag, name));
+  }
+
   inline Value make_generator(Fiber *fiber) {
     ObjGenerator *g = allocate<ObjGenerator>(fiber);
     // The fiber this will own is invisible to the collector otherwise:
@@ -736,6 +771,10 @@ public:
 
   static inline bool is_future(Value v) {
     return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Future;
+  }
+
+  static inline bool is_record(Value v) {
+    return v.is_ptr() && v.as_ptr<Obj>()->type == ObjType::Record;
   }
 
   static inline bool is_generator(Value v) {
@@ -837,6 +876,7 @@ public:
       // object is swept even if resume() already freed the fiber, because
       // it is the sweep that credits it back.
       case ObjType::Generator: return sizeof(ObjGenerator) + ObjGenerator::FIBER_BASELINE_BYTES;
+      case ObjType::Record:  return sizeof(ObjRecord) + static_cast<ObjRecord*>(obj)->fields.capacity() * sizeof(Value);
     }
     return sizeof(Obj);
   }
@@ -897,6 +937,7 @@ private:
       // A generator OWNS its fiber — unlike a future, whose fiber the
       // scheduler owns and reaps. Nothing else can free it, so this must.
       case ObjType::Generator: static_cast<ObjGenerator*>(obj)->~ObjGenerator(); break;
+      case ObjType::Record:  static_cast<ObjRecord*>(obj)->~ObjRecord(); break;
     }
     std::free(obj);
   }
