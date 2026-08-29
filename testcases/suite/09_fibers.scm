@@ -346,4 +346,45 @@
 (assert-equal "an abandoned generator cannot swallow everyone's output"
               "visible" (with-output-to-string (lambda () (display "visible"))))
 
+
+;;--- a generator's procedure can take arguments -------------------------
+;; They have to be passed HERE rather than by the caller writing
+;; (generator (lambda () (apply proc args))), and the reason is section 2's
+;; table: `apply` calls a closure from native code, so a yield inside proc
+;; would be crossing a native frame and would die "yielded mid-call".
+;; Closing over LITERAL arguments is fine; a proc whose arguments arrive as
+;; a LIST has no way to spread them without apply.
+
+(define (two-arg a b) (list (yield (list 'want a)) b))
+(define ga (generator two-arg 1 2))
+(assert-equal "arguments reach the procedure" '(want 1) (resume ga))
+(assert-equal "and the rest of it runs" '(sent 2) (resume ga 'sent))
+
+;; THE case this exists for. apply on the SUBR generator is fine — it is
+;; apply on a closure that yields which cannot work — so a procedure whose
+;; arguments arrive as a list can still be lifted.
+(define gb (apply generator two-arg (list 3 4)))
+(assert-equal "and they can be spread from a list via apply"
+              '(want 3) (resume gb))
+(assert-equal "with the yield still crossing nothing" '(x 4) (resume gb 'x))
+
+;; The workaround that does NOT work, pinned so the reason stays visible.
+(define gc (generator (lambda () (apply two-arg (list 5 6)))))
+(assert-equal "while apply INSIDE the procedure still cannot yield"
+              'raised (guard (e (#t 'raised)) (resume gc)))
+
+(define (variadic a . rest) (list (yield a) rest))
+(define gd (generator variadic 1 2 3))
+(assert-equal "a variadic procedure gets its rest list" 1 (resume gd))
+(assert-equal "with the surplus arguments in it" '(y (2 3)) (resume gd 'y))
+
+(assert-equal "a zero-argument procedure still works unchanged"
+              '(1 2) (let ((g (generator (lambda () (yield 1) 2))))
+                       (list (resume g) (resume g))))
+
+(assert-equal "too few arguments is refused"
+              'raised (guard (e (#t 'raised)) (generator two-arg 1)))
+(assert-equal "and too many"
+              'raised (guard (e (#t 'raised)) (generator two-arg 1 2 3)))
+
 (suite-summary)

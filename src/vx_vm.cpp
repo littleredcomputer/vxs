@@ -4899,16 +4899,45 @@ void VM::init_primitives() {
   // A fiber driven by hand. See ObjGenerator for why this is not a future
   // with an extra argument.
 
-  def_global("generator", heap.make_subr("generator", [](VM &vm, uint32_t, Value *args) -> Value {
+  // (generator proc arg ...) — the arguments are passed to proc.
+  //
+  // They have to be passed HERE rather than by the caller writing
+  // (generator (lambda () (apply proc args))), because `apply` calls a
+  // closure from native code: a yield inside proc would then be crossing
+  // a native frame and would die with "yielded mid-call". Closing over
+  // LITERAL arguments works — (generator (lambda () (proc 1 2))) is
+  // fine — but a proc whose arguments arrive as a list has no way to
+  // spread them without apply. See MANUAL section 2.
+  //
+  // The frame is built exactly as OP_CALL builds one: the closure in slot
+  // 0, its arguments after it, then locals out to max_locals.
+  def_global("generator", heap.make_subr("generator", [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (!Heap::is_closure(args[0])) {
-      generator_fault(vm, "generator: expected a thunk");
+      generator_fault(vm, "generator: expected a procedure");
     }
     ObjClosure *closure = args[0].as_ptr<ObjClosure>();
-    if (closure->arity != 0 || closure->is_variadic) {
-      generator_fault(vm, "generator: the thunk takes no arguments");
+    uint32_t nargs = argc - 1;
+    if (closure->is_variadic ? (nargs < closure->arity) : (nargs != closure->arity)) {
+      generator_fault(vm, "generator: procedure expects " +
+                              std::to_string(closure->arity) +
+                              (closure->is_variadic ? " or more" : "") +
+                              " arguments, got " + std::to_string(nargs));
     }
     // Object first, fiber second — see make_generator. args[0] keeps the
     // closure rooted on the caller's stack across the allocation.
+    // A variadic procedure's surplus arguments become its rest list, the
+    // same as in OP_CALL. Built before the generator is allocated and
+    // rooted across it, since consing can collect.
+    Value rest_list = Value::nil();
+    uint32_t fixed = closure->arity;
+    if (closure->is_variadic) {
+      vm.push_temp_root(&rest_list);
+      for (uint32_t i = nargs; i > fixed; --i) {
+        rest_list = vm.heap.cons(args[i], rest_list);
+      }
+      vm.pop_temp_root();
+    }
+
     Value gen_val = vm.heap.make_generator(nullptr);
     ObjGenerator *g = gen_val.as_ptr<ObjGenerator>();
 
@@ -4919,15 +4948,22 @@ void VM::init_primitives() {
     child->out_port = vm.effective_out_port();
     child->in_port = vm.effective_in_port();
     child->driven_by_generator = true;
-    child->push(args[0]);
-    child->stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
+    child->push(args[0]);                       // slot 0: the closure
+    if (closure->is_variadic) {
+      for (uint32_t i = 1; i <= fixed; ++i) child->push(args[i]);
+      child->push(rest_list);
+    } else {
+      for (uint32_t i = 1; i < argc; ++i) child->push(args[i]);
+    }
+    child->stack.resize(std::max<size_t>(child->stack.size(), closure->max_locals),
+                        Value::unspecified());
     child->frames.push_back({closure, closure->chunk->code.data(), 0});
     // NOT pushed to active_fibers, and that is the whole point: nothing
     // round-robins a generator. It makes progress only when resumed, so
     // a generator nobody resumes costs nothing but memory.
     g->fiber = child;
     return gen_val;
-  }, 1, 1));
+  }, 1, UINT32_MAX));
 
   // (resume g) / (resume g value) — run to the next yield and hand back
   // what it yielded. The optional value becomes the result of the (yield)

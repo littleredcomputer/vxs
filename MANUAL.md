@@ -117,6 +117,24 @@ both — that is the distinction the predicate exists to draw.
 
 ### Generators — a fiber driven by hand
 
+```scheme
+(generator proc arg ...)   ; the arguments are passed to proc
+```
+
+The arguments go **here** rather than being closed over, and the reason is
+§2's table. `(generator (lambda () (apply proc args)))` fails — `apply`
+calls a closure from native code, so a `yield` inside `proc` crosses a
+native frame and dies with *"yielded mid-call"*. Closing over **literal**
+arguments is fine; a procedure whose arguments arrive as a **list** has no
+way to spread them without `apply`.
+
+```scheme
+(apply generator proc args)    ; ✅  apply on the SUBR is fine
+(generator (lambda () (apply proc args)))   ; ❌ apply on a yielding closure
+```
+
+Variadic procedures get their rest list. Arity is checked.
+
 The other thing a fiber can be, and not a future with an extra argument.
 
 | | future | generator |
