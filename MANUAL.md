@@ -1017,13 +1017,24 @@ Threefry core.
 (define r (rng-make ptnum seed stream))   ; mirrors rng_init
 ```
 
-| draw | score | summed over a buffer |
-|---|---|---|
-| `random-uniform r low high` | `logpdf-uniform v low high` | `logpdf-sum-uniform` |
-| `random-normal r loc scale` | `logpdf-normal v loc scale` | `logpdf-sum-normal` |
-| `random-flip r p` | `logpdf-flip v p` | `logpdf-sum-flip` |
-| `random-exponential r lambda` | `logpdf-exponential v lambda` | — |
-| `random-gamma r alpha lambda` | — (needs `lgamma`) | — |
+| draw | score | fill a buffer | sum over a buffer |
+|---|---|---|---|
+| `random-uniform r low high` | `logpdf-uniform` | `fill-uniform!` ᴺ | `logpdf-sum-uniform` |
+| `random-normal r loc scale` | `logpdf-normal` | `fill-normal!` ᴺ | `logpdf-sum-normal` |
+| `random-flip r p` | `logpdf-flip` | `fill-flip!` ᴺ | `logpdf-sum-flip` |
+| `random-exponential r lambda` | `logpdf-exponential` | `fill-exponential!` | — |
+| `random-gamma r alpha lambda` | — *(needs `lgamma`)* | `fill-gamma!` | — |
+
+ᴺ = native. The rest are derived by `generic-fill` from the scalar
+sampler — a fill is the same loop every time, so only the hot ones are
+written by hand and the others cost nothing to have. Every fill produces
+exactly what drawing one at a time produces, consuming one uniform per
+element in the same order; the tests assert that per distribution.
+
+⚠️ `fill-unit!` is the **RNG layer's** raw (0,1) fill and takes no bounds.
+`fill-uniform!` is the **distribution layer's** and takes the same
+`low`/`high` its scalar sampler does. Conflating the two is what made
+`fill-uniform!` silently ignore its bounds.
 
 One family, `random-` / `logpdf-` / `logpdf-sum-`. There is no import
 mechanism, so a Gen-ish layer above will rename these into whatever

@@ -172,6 +172,39 @@
 ;; device, because deviating from that order would forfeit the
 ;; correspondence this file exists to preserve.
 
-(define (fill-uniform! r view start count) (rng-fill-unit! r view start count))
+;; EVERY sampler has a fill, and most of them are derived rather than
+;; written. A fill is the same loop each time — draw, store, repeat — so
+;; only the ones measurement says are hot get a native version, and the
+;; rest cost nothing to have.
+;;
+;; That is also the shape a distribution object wants: supply `sample` and
+;; `score`, get `fill` for free, override it when there is a reason.
+(define (generic-fill sample)
+  (lambda (r view start count . args)
+    (let loop ((i 0))
+      (if (< i count)
+          (begin (view-set! view (+ start i) (apply sample r args))
+                 (loop (+ i 1)))))))
+
+;; Native, because these are the hot ones. Each consumes exactly ONE
+;; uniform per element and transforms it exactly as its scalar sampler
+;; does — a cheaper transform would break the correspondence with the
+;; device that this whole file exists to keep.
+(define (fill-uniform! r view start count low high)
+  (rng-fill-uniform! r view start count low high))
 (define (fill-normal! r view start count loc scale)
   (rng-fill-normal! r view start count loc scale))
+(define (fill-flip! r view start count p)
+  (rng-fill-flip! r view start count p))
+
+;; Derived. Gamma's rejection loop consumes a variable number of uniforms,
+;; so a native version would have to reproduce that exactly for no gain —
+;; it is the sampler least likely to be filled in bulk.
+(define fill-exponential! (generic-fill random-exponential))
+(define fill-gamma!       (generic-fill random-gamma))
+
+;; The raw generator operation, kept distinct: rng-fill-unit! is (0,1) and
+;; belongs to the RNG layer, while fill-uniform! takes the bounds its
+;; scalar sampler takes and belongs to the distribution layer. Conflating
+;; them is what made fill-uniform! silently ignore low and high.
+(define (fill-unit! r view start count) (rng-fill-unit! r view start count))

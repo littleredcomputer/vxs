@@ -2805,6 +2805,77 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 3, 3));
 
+  // (rng-fill-uniform! rng view start count low high)
+  // (rng-fill-flip!    rng view start count p)
+  //
+  // One uniform per element, transformed exactly as random_uniform and
+  // flip do on the device. rng-fill-unit! is the raw generator operation
+  // and stays (0,1); these are the DISTRIBUTION operations and take the
+  // same parameters their scalar samplers do.
+  def_global("rng-fill-uniform!", heap.make_subr("rng-fill-uniform!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-fill-uniform!: expected an rng");
+    if (!Heap::is_view(args[1]))  vm.raise_contract("rng-fill-uniform!: expected a view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-uniform!: not an rng state buffer");
+    ObjView *view = args[1].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long count = static_cast<long>(vxs_as_num(args[3]));
+    double low = vxs_as_num(args[4]), high = vxs_as_num(args[5]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(view->count)) {
+      vm.raise_contract("rng-fill-uniform!: range out of bounds for this view");
+    }
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
+    for (long i = 0; i < count; ++i) {
+      double m = static_cast<double>(vxs_rng_u32(w) >> 9);
+      double a = m / 8388608.0;
+      if (a < 5.9604645e-8) a = 5.9604645e-8;
+      double u = (high - low) * a + low;
+      if (u < low) u = low;               // random_uniform's max(low, u)
+      uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
+      switch (view->elem) {
+        case ElemType::F32: { float x = static_cast<float>(u); std::memcpy(p, &x, 4); break; }
+        case ElemType::F64: { std::memcpy(p, &u, 8); break; }
+        default: vm.raise_contract("rng-fill-uniform!: needs an :f32 or :f64 view");
+      }
+    }
+    return Value::unspecified();
+  }, 6, 6));
+
+  // Written as 1.0 / 0.0 rather than booleans, because the buffer is
+  // numeric and logpdf-sum-flip reads it back the same way. A view holds
+  // numbers; a Scheme boolean has nowhere to live in one.
+  def_global("rng-fill-flip!", heap.make_subr("rng-fill-flip!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-fill-flip!: expected an rng");
+    if (!Heap::is_view(args[1]))  vm.raise_contract("rng-fill-flip!: expected a view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-flip!: not an rng state buffer");
+    ObjView *view = args[1].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long count = static_cast<long>(vxs_as_num(args[3]));
+    double prob = vxs_as_num(args[4]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(view->count)) {
+      vm.raise_contract("rng-fill-flip!: range out of bounds for this view");
+    }
+    uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
+    uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
+    for (long i = 0; i < count; ++i) {
+      double m = static_cast<double>(vxs_rng_u32(w) >> 9);
+      double a = m / 8388608.0;
+      if (a < 5.9604645e-8) a = 5.9604645e-8;
+      // flip is random_uniform(0,1) < prob, and random_uniform(0,1) is
+      // max(0, a) which is a. Same one draw, same comparison.
+      double v = (a < prob) ? 1.0 : 0.0;
+      uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
+      switch (view->elem) {
+        case ElemType::F32: { float x = static_cast<float>(v); std::memcpy(p, &x, 4); break; }
+        case ElemType::F64: { std::memcpy(p, &v, 8); break; }
+        default: vm.raise_contract("rng-fill-flip!: needs an :f32 or :f64 view");
+      }
+    }
+    return Value::unspecified();
+  }, 5, 5));
+
   //--- buffer reductions ---------------------------------------------------
   // The shape inference actually has: M candidates, each scored against N
   // observations. That is M sums over N, NOT an M-by-N matrix — the matrix

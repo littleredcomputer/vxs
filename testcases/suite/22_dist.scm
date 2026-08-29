@@ -447,4 +447,73 @@
                    (view-set! lv 2 808.0) (view-set! lv 3 807.0)
                    (< (abs (- (logsumexp lv 0 4) (+ before 10.0))) 1e-9)))
 
+
+;;--- every sampler has a fill -------------------------------------------
+;; And every fill must produce exactly what drawing one at a time
+;; produces. That is the whole contract: a fast path is only useful if it
+;; is not a different path, and the draw ORDER is what makes it so —
+;; each of these consumes one uniform per element, in the same sequence
+;; its scalar sampler would.
+;;
+;; Three are native and two are derived from the scalar sampler by
+;; generic-fill. The test does not know or care which, which is the point:
+;; a distribution supplies sample and score, and gets fill for free unless
+;; measurement says otherwise.
+
+(define (fill-agrees? fill scalar . args)
+  (let ((v (bytes-view (make-bytes (* 32 8)) :f64))
+        (r1 (rng-make 0 99 0))
+        (r2 (rng-make 0 99 0)))
+    (apply fill (append (list r1 v 0 32) args))
+    (let loop ((i 0))
+      (cond ((= i 32) #t)
+            ((> (abs (- (view-ref v i) (apply scalar r2 args))) 1e-12) #f)
+            (else (loop (+ i 1)))))))
+
+(assert-equal "fill-uniform! matches random-uniform"
+              #t (fill-agrees? fill-uniform! random-uniform 10.0 20.0))
+(assert-equal "fill-normal! matches random-normal"
+              #t (fill-agrees? fill-normal! random-normal 5.0 2.0))
+(assert-equal "fill-flip! matches random-flip"
+              #t (fill-agrees? fill-flip!
+                               (lambda (r p) (if (random-flip r p) 1.0 0.0)) 0.3))
+(assert-equal "fill-exponential! matches random-exponential (derived)"
+              #t (fill-agrees? fill-exponential! random-exponential 2.0))
+(assert-equal "fill-gamma! matches random-gamma (derived)"
+              #t (fill-agrees? fill-gamma! random-gamma 2.0 1.0))
+
+;; fill-uniform! used to be rng-fill-unit! under another name, so it
+;; ignored low and high entirely and always filled (0,1) — a naming lie
+;; that would have gone unnoticed until a batched U(10,20) came out
+;; between 0 and 1.
+(define ub2 (bytes-view (make-bytes (* 64 8)) :f64))
+(fill-uniform! (rng-make 0 3 0) ub2 0 64 10.0 20.0)
+(assert-equal "fill-uniform! honours its bounds"
+              #t (let loop ((i 0))
+                   (cond ((= i 64) #t)
+                         ((or (< (view-ref ub2 i) 10.0) (> (view-ref ub2 i) 20.0)) #f)
+                         (else (loop (+ i 1))))))
+
+;; The RNG layer's raw fill is still (0,1) and still distinct — conflating
+;; the two layers is exactly what produced the bug above.
+(define ub3 (bytes-view (make-bytes (* 8 8)) :f64))
+(fill-unit! (rng-make 0 3 0) ub3 0 8)
+(assert-equal "fill-unit! is still the raw (0,1) generator operation"
+              #t (let loop ((i 0))
+                   (cond ((= i 8) #t)
+                         ((or (<= (view-ref ub3 i) 0.0) (>= (view-ref ub3 i) 1.0)) #f)
+                         (else (loop (+ i 1))))))
+
+;; A filled batch of flips is scored by its own logpdf-sum, and the two
+;; must agree about what a "1" is — the fill writes 1.0/0.0 and the sum
+;; reads 1.0/0.0.
+(define fb2 (bytes-view (make-bytes (* 500 8)) :f64))
+(fill-flip! (rng-make 0 11 0) fb2 0 500 0.25)
+(assert-equal "a filled batch of flips scores against its own sum"
+              #t (let ((native (logpdf-sum-flip fb2 0 500 0.25))
+                       (scalar (let loop ((i 0) (s 0.0))
+                                 (if (= i 500) s
+                                     (loop (+ i 1) (+ s (logpdf-flip (view-ref fb2 i) 0.25)))))))
+                   (< (abs (- native scalar)) 1e-9)))
+
 (suite-summary)
