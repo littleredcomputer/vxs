@@ -81,6 +81,71 @@
                     (list f acc)))
               (cdr fs)))))
 
+;;--- define-record-type -------------------------------------------------
+;; R7RS-small. A nominal type: a constructor, a predicate, accessors, and
+;; optional modifiers.
+;;
+;;   (define-record-type <point>
+;;     (make-point x y) point?
+;;     (x point-x)
+;;     (y point-y set-point-y!))
+;;
+;; A TAGGED VECTOR rather than a new heap type. The tag in slot 0 is a
+;; fresh object per definition, so identity is by eq? and two record types
+;; that happen to share a name are still distinct. Fields are fixed
+;; indices, so an accessor is a vector-ref rather than the linear scan a
+;; map lookup would be.
+;;
+;; ⚠️ Records are therefore vectors, and `vector?` says so. R7RS wants them
+;; disjoint from every other type; this representation leaks. It is the
+;; price of not adding a heap type, and it matters only if something
+;; dispatches on vector? before checking the record predicate.
+;;
+;; Fields omitted from the constructor are #f rather than unspecified,
+;; which R7RS permits (it leaves them unspecified) and which is easier to
+;; recognise when one has been forgotten.
+;;
+;; Explicit gensyms, for the same reason case-lambda needs them: the
+;; accessors are built by a nested backquote, and sym# would rewrite per
+;; template rather than consistently across them.
+(defmacro (define-record-type type-name ctor-spec pred . field-specs)
+  (let* ((ctor-name   (car ctor-spec))
+         (ctor-args   (cdr ctor-spec))
+         (field-names (map car field-specs))
+         (r (gensym)) (v (gensym))
+         (index-of (lambda (f)
+                     (let loop ((fs field-names) (i 1))
+                       (cond ((null? fs) (error "define-record-type: unknown field" f))
+                             ((eq? (car fs) f) i)
+                             (else (loop (cdr fs) (+ i 1))))))))
+    `(begin
+       ;; The tag is a fresh object, so identity is by eq? and two record
+       ;; types with the same name are still distinct.
+       (define ,type-name (list 'record-type ',type-name))
+       (define (,pred ,r)
+         (and (vector? ,r)
+              (> (vector-length ,r) 0)
+              (eq? (vector-ref ,r 0) ,type-name)))
+       (define (,ctor-name ,@ctor-args)
+         (vector ,type-name
+                 ,@(map (lambda (f) (if (memq f ctor-args) f #f)) field-names)))
+       ,@(apply append
+          (map (lambda (spec)
+                 (let* ((fname (car spec)) (acc (cadr spec))
+                        (mod (if (pair? (cddr spec)) (caddr spec) #f))
+                        (i (index-of fname)))
+                   (cons `(define (,acc ,r)
+                            (if (not (,pred ,r))
+                                (error ,(string-append (symbol->string acc) ": wrong type") ,r))
+                            (vector-ref ,r ,i))
+                         (if mod
+                             (list `(define (,mod ,r ,v)
+                                      (if (not (,pred ,r))
+                                          (error ,(string-append (symbol->string mod) ": wrong type") ,r))
+                                      (vector-set! ,r ,i ,v)))
+                             '()))))
+               field-specs)))))
+
 ;;--- case-lambda --------------------------------------------------------
 ;; R7RS-small (originally SRFI 16, also in R6RS). A procedure with several
 ;; declared arities, dispatching on how many arguments it was given.

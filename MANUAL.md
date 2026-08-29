@@ -897,6 +897,40 @@ reading the diff** — that is what these are for.
 
 ---
 
+### `define-record-type`
+
+R7RS-small, in the prelude. Constructor, predicate, accessors, optional
+modifiers:
+
+```scheme
+(define-record-type <point>
+  (make-point x y) point?
+  (x point-x)
+  (y point-y set-point-y!))
+```
+
+A **tagged vector**, not a new heap type. The tag in slot 0 is a fresh
+object per definition, so identity is by `eq?` and two record types
+sharing a name stay distinct. Fields are fixed indices, so an accessor is
+a `vector-ref` rather than the linear scan a map lookup would be.
+
+What it buys over a map or a closure is **nominal identity**. A map is
+anonymous — there is no `point?` to write. A closure carries behaviour but
+cannot be asked what it is without *calling* it, and calling an arbitrary
+object to discover its type is not a predicate: it has side effects, it
+errors on non-procedures, and it can hang.
+
+The two compose rather than compete: a record whose field *is* a dispatch
+closure gives you both — `predicate?` for identity, the closure for
+behaviour, open to extension without touching the record.
+
+⚠️ Records are vectors, and `vector?` says so. R7RS wants record types
+disjoint from every other type; this representation leaks. It is the price
+of not adding a heap type, and matters only where something dispatches on
+`vector?` before checking the record predicate.
+
+---
+
 ### `case-lambda`
 
 R7RS-small (originally SRFI 16), now in the prelude. Several declared

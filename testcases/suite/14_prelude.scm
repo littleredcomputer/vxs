@@ -155,4 +155,47 @@
 (assert-equal "two expansions in one scope do not collide"
               '(10 15) (list (cl-a 5) (cl-b 5)))
 
+
+;;--- define-record-type -------------------------------------------------
+;; R7RS-small. Wanted for NOMINAL IDENTITY: a closure can carry behaviour
+;; but cannot be asked what it is without calling it, and calling an
+;; arbitrary object to find out its type is not a predicate.
+
+(define-record-type <point> (make-point x y) point?
+  (x point-x)
+  (y point-y set-point-y!))
+
+(define pt (make-point 3 4))
+(assert-equal "the predicate recognises its own"  #t (point? pt))
+(assert-equal "accessors read the fields"         '(3 4) (list (point-x pt) (point-y pt)))
+(assert-equal "a modifier writes one"             99 (begin (set-point-y! pt 99) (point-y pt)))
+(assert-equal "the predicate rejects other things" '(#f #f)
+              (list (point? 5) (point? "x")))
+
+;; The point of the tag: a bare vector of the right shape is NOT a point,
+;; or the predicate would be a shape check rather than a type check.
+(assert-equal "and rejects a vector that merely looks right"
+              #f (point? (vector 'record-type 3 4)))
+(assert-equal "an accessor refuses the wrong type rather than reading garbage"
+              'raised (guard (e (#t 'raised)) (point-x (vector 1 2 3))))
+
+;; Two record types are distinct even though nothing about their shape
+;; differs — which is what "nominal" means and what a map could not give.
+(define-record-type <pair2> (make-pair2 x y) pair2? (x pair2-x) (y pair2-y))
+(assert-equal "same shape, different types" '(#f #f)
+              (list (point? (make-pair2 1 2)) (pair2? pt)))
+
+;; A field left out of the constructor is #f, not garbage.
+(define-record-type <partial> (make-partial a) partial? (a p-a) (b p-b set-p-b!))
+(assert-equal "an omitted field starts #f" #f (p-b (make-partial 1)))
+(assert-equal "and can be set afterwards"
+              7 (let ((x (make-partial 1))) (set-p-b! x 7) (p-b x)))
+
+;; Known limitation of the tagged-vector representation, pinned so it is
+;; documented rather than discovered: records ARE vectors. R7RS wants them
+;; disjoint. This matters only where something dispatches on vector?
+;; before checking the record predicate.
+(assert-equal "records are vectors — the representation leaks"
+              #t (vector? pt))
+
 (suite-summary)
