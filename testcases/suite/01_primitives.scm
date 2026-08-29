@@ -82,6 +82,35 @@
 (assert-equal "caddr" 3 (caddr '(1 2 3)))
 (assert-equal "caar" 1 (caar '((1 2) 3)))
 
+;; A contract violation is a native VM error and guard cannot catch it
+;; (MANUAL section 3), so the tests below observe one across a FIBER
+;; boundary instead — the documented way, and the same route a supervisor
+;; would use.
+(define (fails? thunk)
+  (let ((f (future (thunk))))
+    (run-fibers)
+    (error-object? (touch/or-error f))))
+
+;; string-append used to skip anything that was neither a string nor a
+;; symbol, so (string-append "a" 5) was "a": an argument discarded and a
+;; plausible result returned. That is worse than a wrong value — there is
+;; nothing left to notice.
+(assert-equal "string-append refuses a number"
+              #t (fails? (lambda () (string-append "a" 5))))
+(assert-equal "and a list"
+              #t (fails? (lambda () (string-append "a" (list 1 2)))))
+(assert-equal "and a boolean"
+              #t (fails? (lambda () (string-append "a" #t))))
+
+;; Symbols ARE still coerced. A deliberate extension rather than an
+;; oversight — R7RS takes strings only — kept because it is lossless and
+;; this codebase builds messages out of symbol names.
+(assert-equal "but a symbol is coerced, deliberately"
+              "ab" (string-append "a" 'b))
+(assert-equal "and ordinary appends are unaffected"
+              "abc" (string-append "a" "b" "c"))
+(assert-equal "including the zero-argument case" "" (string-append))
+
 ;; The compound accessors must FAIL on a short list, not return nil.
 ;; R7RS defines (cadr x) as (car (cdr x)), so (cadr '(1)) is (car '()) and
 ;; must raise — and car itself does, so returning nil made the two
@@ -89,13 +118,7 @@
 ;; somewhere else entirely, which is the worst way to find a destructuring
 ;; error.
 ;;
-;; A contract violation is a native VM error and guard cannot catch it
-;; (MANUAL section 3), so these are checked across a FIBER boundary, which
-;; is the documented way to observe one.
-(define (fails? thunk)
-  (let ((f (future (thunk))))
-    (run-fibers)
-    (error-object? (touch/or-error f))))
+;; Checked across a FIBER boundary — see the note on fails? above.
 
 (assert-equal "cadr of a one-element list fails"   #t (fails? (lambda () (cadr '(1)))))
 (assert-equal "caddr of a two-element list fails"  #t (fails? (lambda () (caddr '(1 2)))))

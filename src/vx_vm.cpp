@@ -4376,6 +4376,16 @@ void VM::init_primitives() {
     return Value::from_char(sv[ix]);
   }, 2, 2));
 
+  // Anything that is neither a string nor a symbol used to fall through
+  // this loop SILENTLY, so (string-append "a" 5) was "a" — an argument
+  // discarded and a plausible-looking result returned. Worse than the
+  // wrong value a bad cxr used to give, because there is nothing left to
+  // notice.
+  //
+  // Symbols are still coerced. That is a deliberate extension rather than
+  // an oversight (R7RS takes strings only), it is lossless, and enough of
+  // this codebase builds messages out of symbol names to make it worth
+  // keeping.
   def_global("string-append", heap.make_subr("string-append", [](VM &vm, uint32_t argc, Value *args) -> Value {
     std::string res;
     for (uint32_t i = 0; i < argc; ++i) {
@@ -4383,6 +4393,14 @@ void VM::init_primitives() {
         res += args[i].as_ptr<ObjString>()->view();
       } else if (args[i].is_symbol()) {
         res += vm.get_symbol_name(args[i].as_symbol_id());
+      } else {
+        if (vm.current_fiber) {
+          vm.current_fiber->state = Fiber::State::Error;
+          vm.current_fiber->error_message =
+              "[VM Error] string-append: contract violation, expected a string, got " +
+              vm.format_value(args[i]);
+        }
+        return Value::unspecified();
       }
     }
     return vm.heap.make_string(res);
