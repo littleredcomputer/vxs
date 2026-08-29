@@ -90,6 +90,31 @@ fiber's to own. Making the binding fiber-local is what makes the restore
 meaningful, and it also means an abandoned fiber's redirection dies with
 it rather than needing a cleanup to run at all.
 
+### `in-generator?`
+
+```scheme
+(in-generator?)   ; #t only when the current fiber is driven by `resume`
+```
+
+`(yield)` outside a generator is **legal** — every demo yields to the
+scheduler once a frame — so `yield` cannot complain on its own behalf. A
+form that expects an *answer* back has to ask, and this is the question.
+
+Without it a function full of yields, called directly, runs to completion:
+it yields, the scheduler resumes it with unspecified, and since arithmetic
+here does not type-check, it returns a plausible number. A structural
+mistake becomes data.
+
+```scheme
+(define (at address distro)
+  (if (not (in-generator?))
+      (error 'at "not inside a generative function"))
+  (yield (cons address distro)))
+```
+
+A plain `future` is **not** a generator, even though `yield` works in
+both — that is the distinction the predicate exists to draw.
+
 ### Generators — a fiber driven by hand
 
 The other thing a fiber can be, and not a future with an extra argument.
@@ -1022,8 +1047,18 @@ Threefry core.
 | `random-uniform r low high` | `logpdf-uniform` | `fill-uniform!` ᴺ | `logpdf-sum-uniform` |
 | `random-normal r loc scale` | `logpdf-normal` | `fill-normal!` ᴺ | `logpdf-sum-normal` |
 | `random-flip r p` | `logpdf-flip` | `fill-flip!` ᴺ | `logpdf-sum-flip` |
-| `random-exponential r lambda` | `logpdf-exponential` | `fill-exponential!` | — |
-| `random-gamma r alpha lambda` | — *(needs `lgamma`)* | `fill-gamma!` | — |
+| `random-exponential r lambda` | `logpdf-exponential` | `fill-exponential!` | `logpdf-sum-exponential` |
+| `random-gamma r alpha lambda` | `logpdf-gamma` | `fill-gamma!` | `logpdf-sum-gamma` |
+
+⚠️ In `logpdf-sum-exponential` the last word is the **distribution**, as
+in `logpdf-sum-normal` — not an instruction to exponentiate. "Exponential"
+being both a distribution and an operation is a collision the family
+pattern has to carry.
+
+`lambda` is the **rate** in both `random-gamma` and `logpdf-gamma`.
+`lgamma` is `std::lgamma`; WGSL has none, so a device version will be an
+approximation and must be checked against this one rather than the
+reverse.
 
 ᴺ = native. The rest are derived by `generic-fill` from the scalar
 sampler — a fill is the same loop every time, so only the hot ones are

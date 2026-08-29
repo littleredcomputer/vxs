@@ -2876,6 +2876,19 @@ void VM::init_primitives() {
     return Value::unspecified();
   }, 5, 5));
 
+  // (lgamma x) — log of the absolute value of the gamma function.
+  //
+  // std::lgamma rather than a hand-rolled Lanczos: it is more accurate and
+  // it is already there. NOTE for whenever the device needs one — WGSL has
+  // no lgamma, so a shader version will have to be an approximation, and
+  // it must be checked against THIS rather than the other way round. The
+  // host is the oracle everywhere else here; no reason to invert that for
+  // the one function where the device has to approximate.
+  def_global("lgamma", heap.make_subr("lgamma", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) vm.raise_contract("lgamma: expected a number");
+    return Value::from_double(std::lgamma(vxs_as_num(args[0])));
+  }, 1, 1));
+
   //--- buffer reductions ---------------------------------------------------
   // The shape inference actually has: M candidates, each scored against N
   // observations. That is M sums over N, NOT an M-by-N matrix — the matrix
@@ -2964,6 +2977,55 @@ void VM::init_primitives() {
     if (zeros > 0) sum += static_cast<double>(zeros) * std::log1p(-p);
     return Value::from_double(sum);
   }, 4, 4));
+
+  // (logpdf-sum-exponential view start count lambda) -> scalar
+  // NAME: the last word is the DISTRIBUTION, as in logpdf-sum-normal —
+  // not an instruction to exponentiate. "exponential" being both a
+  // distribution and an operation is an unfortunate collision the family
+  // pattern has to carry.
+  def_global("logpdf-sum-exponential", heap.make_subr("logpdf-sum-exponential", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-exponential: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double lambda = vxs_as_num(args[3]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-exponential: range out of bounds for this view");
+    }
+    const double loglam = std::log(lambda);
+    double sum = 0.0;
+    for (long i = 0; i < count; ++i) {
+      double x = vxs_view_load(v, static_cast<size_t>(start + i));
+      if (x < 0.0) return Value::from_double(-std::numeric_limits<double>::infinity());
+      sum += loglam - lambda * x;
+    }
+    return Value::from_double(sum);
+  }, 4, 4));
+
+  // (logpdf-sum-gamma view start count alpha lambda) -> scalar
+  // lambda is the RATE, matching random-gamma, which multiplies a
+  // Gamma(alpha, theta=1) draw by 1/lambda.
+  def_global("logpdf-sum-gamma", heap.make_subr("logpdf-sum-gamma", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-gamma: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double alpha = vxs_as_num(args[3]), lambda = vxs_as_num(args[4]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-gamma: range out of bounds for this view");
+    }
+    // alpha*log(lambda) - lgamma(alpha) is constant across the buffer, so
+    // it is computed once and multiplied in — the arrangement the scalar
+    // version cannot make.
+    const double k = alpha * std::log(lambda) - std::lgamma(alpha);
+    double sum = static_cast<double>(count) * k;
+    for (long i = 0; i < count; ++i) {
+      double x = vxs_view_load(v, static_cast<size_t>(start + i));
+      if (x <= 0.0) return Value::from_double(-std::numeric_limits<double>::infinity());
+      sum += (alpha - 1.0) * std::log(x) - lambda * x;
+    }
+    return Value::from_double(sum);
+  }, 5, 5));
 
   // (logsumexp view start count) -> log(sum(exp(x_i)))
   //
@@ -4798,6 +4860,7 @@ void VM::init_primitives() {
     // leak that to whoever resumes it.
     child->out_port = vm.effective_out_port();
     child->in_port = vm.effective_in_port();
+    child->driven_by_generator = true;
     child->push(args[0]);
     child->stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
     child->frames.push_back({closure, closure->chunk->code.data(), 0});
@@ -4872,6 +4935,19 @@ void VM::init_primitives() {
     g->fiber = nullptr;
     return g->result;
   }, 1, 2));
+
+  // (in-generator?) — is the current fiber being driven by `resume`?
+  //
+  // The question a form like `at` needs, and one nothing else can answer:
+  // yield outside a generator is legal (the scheduler resumes it with
+  // unspecified), so the failure is silent rather than loud. A model
+  // function called directly runs, yields, receives unspecified, and —
+  // because arithmetic here does not type-check — returns a plausible
+  // number. This is how a caller refuses that instead.
+  def_global("in-generator?", heap.make_subr("in-generator?", [](VM &vm, uint32_t, Value *) -> Value {
+    return (vm.current_fiber && vm.current_fiber->driven_by_generator)
+               ? Value::boolean_true() : Value::boolean_false();
+  }, 0, 0));
 
   def_global("generator?", heap.make_subr("generator?", [](VM &, uint32_t, Value *args) -> Value {
     return Heap::is_generator(args[0]) ? Value::boolean_true() : Value::boolean_false();

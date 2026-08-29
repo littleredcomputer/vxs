@@ -314,6 +314,16 @@ struct Fiber {
   Value out_port = Value::unspecified();
   Value in_port = Value::unspecified();
 
+  // Set when `generator` created this fiber, so code inside can ask
+  // whether it is being driven by `resume` or by the scheduler.
+  //
+  // (yield) itself cannot complain about being called outside a
+  // generator, because doing so is perfectly legal — every demo yields to
+  // the scheduler once a frame. So a form that is only meaningful under
+  // `resume` — one that expects an answer back — has to ask, and this is
+  // what it asks.
+  bool driven_by_generator = false;
+
   inline Fiber()
       : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}
 

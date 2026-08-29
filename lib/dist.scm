@@ -155,6 +155,23 @@
   ;; exactly zero probability rather than an extremely small one.
   (if (< v 0.0) (log 0.0) (- (log lambda) (* lambda v))))
 
+;; Gamma(alpha, rate=lambda). lambda is the RATE, matching random-gamma,
+;; which multiplies a Gamma(alpha, theta=1) draw by 1/lambda.
+;;
+;;   alpha*log(lambda) - lgamma(alpha) + (alpha-1)*log(v) - lambda*v
+;;
+;; Absent from lib/stat.wgsl, and it will stay absent until someone writes
+;; an lgamma for WGSL — which has none. When that happens the shader
+;; version is an approximation and must be checked against this one, not
+;; the reverse: the host is the oracle everywhere else here.
+(define (logpdf-gamma v alpha lambda)
+  (if (<= v 0.0)
+      (log 0.0)
+      (+ (* alpha (log lambda))
+         (- (lgamma alpha))
+         (* (- alpha 1.0) (log v))
+         (- (* lambda v)))))
+
 (define (logpdf-uniform v low high)
   (let* ((outside? (or (< v low) (> v high)))
          (l (if outside? 0.0 (/ 1.0 (- high low)))))
@@ -202,6 +219,20 @@
 ;; it is the sampler least likely to be filled in bulk.
 (define fill-exponential! (generic-fill random-exponential))
 (define fill-gamma!       (generic-fill random-gamma))
+
+;; The summed scores. Every scored distribution now has one; each hoists
+;; whatever is constant across the buffer out of the loop, which is the
+;; one arrangement a scalar version cannot make.
+(define (sum-uniform! view start count low high)
+  (logpdf-sum-uniform view start count low high))
+(define (sum-normal! view start count loc scale)
+  (logpdf-sum-normal view start count loc scale))
+(define (sum-flip! view start count p)
+  (logpdf-sum-flip view start count p))
+(define (sum-exponential! view start count lambda)
+  (logpdf-sum-exponential view start count lambda))
+(define (sum-gamma! view start count alpha lambda)
+  (logpdf-sum-gamma view start count alpha lambda))
 
 ;; The raw generator operation, kept distinct: rng-fill-unit! is (0,1) and
 ;; belongs to the RNG layer, while fill-uniform! takes the bounds its

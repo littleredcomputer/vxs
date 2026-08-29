@@ -516,4 +516,74 @@
                                      (loop (+ i 1) (+ s (logpdf-flip (view-ref fb2 i) 0.25)))))))
                    (< (abs (- native scalar)) 1e-9)))
 
+
+;;--- gamma finally has a score ------------------------------------------
+;; alpha*log(lambda) - lgamma(alpha) + (alpha-1)*log(v) - lambda*v, with
+;; lambda the RATE — matching random-gamma, which multiplies a
+;; Gamma(alpha, theta=1) draw by 1/lambda. Getting that parameterisation
+;; backwards would produce plausible numbers that were wrong.
+
+(assert-equal "lgamma(2) is log 1! = 0" #t (< (abs (lgamma 2.0)) 1e-12))
+(assert-equal "lgamma(5) is log 4! = log 24"
+              #t (< (abs (- (lgamma 5.0) (log 24.0))) 1e-9))
+
+;; Gamma(2,1) at x=1 is exactly -1: 2*log(1) - lgamma(2) + log(1) - 1.
+;; A closed-form check beats a statistical one for catching a wrong
+;; parameterisation.
+(assert-equal "logpdf-gamma(1 | 2, 1) is exactly -1"
+              #t (< (abs (- (logpdf-gamma 1.0 2.0 1.0) -1.0)) 1e-12))
+;; And the rate really is a rate. Checked against the closed form rather
+;; than "it moved by at least some amount": Gamma(2,2) at x=1 is
+;; 2*log(2) - lgamma(2) + log(1) - 2*1 = 2*log(2) - 2. A threshold would
+;; have passed for the scale parameterisation too, which is the mistake
+;; worth catching.
+(assert-equal "lambda is the rate, not the scale"
+              #t (< (abs (- (logpdf-gamma 1.0 2.0 2.0) (- (* 2.0 (log 2.0)) 2.0))) 1e-12))
+(assert-equal "and it is -inf at and below zero"
+              '(#t #t) (list (infinite? (logpdf-gamma 0.0 2.0 1.0))
+                             (infinite? (logpdf-gamma -1.0 2.0 1.0))))
+
+(define gv (bytes-view (make-bytes (* 200 8)) :f64))
+(define (scalar-over f . a)
+  (let loop ((i 0) (s 0.0))
+    (if (= i 200) s (loop (+ i 1) (+ s (apply f (view-ref gv i) a))))))
+
+(fill-gamma! (rng-make 0 5 0) gv 0 200 2.0 1.5)
+(assert-equal "logpdf-sum-gamma matches the scalar loop"
+              #t (< (abs (- (logpdf-sum-gamma gv 0 200 2.0 1.5)
+                            (scalar-over logpdf-gamma 2.0 1.5))) 1e-9))
+
+(fill-exponential! (rng-make 0 5 0) gv 0 200 2.0)
+;; NAME: the last word is the DISTRIBUTION, as in logpdf-sum-normal — not
+;; an instruction to exponentiate. "exponential" being both a distribution
+;; and an operation is a collision the family pattern has to carry.
+(assert-equal "logpdf-sum-exponential matches the scalar loop"
+              #t (< (abs (- (logpdf-sum-exponential gv 0 200 2.0)
+                            (scalar-over logpdf-exponential 2.0))) 1e-9))
+
+;;--- in-generator? ------------------------------------------------------
+;; (yield) outside a generator is LEGAL — every demo yields to the
+;; scheduler once a frame — so yield cannot complain on its own behalf. A
+;; form that expects an answer back has to ask, and this is the question.
+;;
+;; Without it, a model function called directly runs, yields, is resumed
+;; by the scheduler with unspecified, and returns a plausible number,
+;; because arithmetic here does not type-check. A structural mistake turns
+;; into data.
+
+(assert-equal "false at the top level" #f (in-generator?))
+(assert-equal "true inside a generator" #t
+              (resume (generator (lambda () (yield (in-generator?)) 'done))))
+;; The distinction that matters: a plain fiber is NOT a generator, even
+;; though yield works in both.
+(assert-equal "false inside an ordinary fiber"
+              #f (let ((f (future (in-generator?)))) (run-fibers) (touch f)))
+;; Nested: a generator created inside a generator is still one, and the
+;; flag belongs to the fiber rather than to whoever is resuming.
+(assert-equal "true inside a generator nested in one"
+              #t (resume (generator
+                          (lambda ()
+                            (yield (resume (generator (lambda () (yield (in-generator?)) 1))))
+                            'outer))))
+
 (suite-summary)
