@@ -897,6 +897,26 @@ reading the diff** — that is what these are for.
 
 ---
 
+### Maps: copy and delete
+
+```scheme
+(map-copy m)        ; shallow copy — a fresh spine, shared values
+(map-delete! m k)    ; remove k if present; a no-op otherwise
+```
+
+Scheme's convention is that aggregates are mutable and you copy
+explicitly — `vector-copy`, `string-copy`, `list-copy`. Maps had no
+`-copy`, so handing a map out of a structure handed out that structure's
+own storage, and editing what looked like a candidate silently edited the
+original.
+
+⚠️ **Shallow**, like every other `-copy`. A nested map is *shared*, so a
+structure of maps is protected only one level deep and the sharing is
+invisible until something writes through it. Copy per level if you need
+independence all the way down.
+
+---
+
 ### `define-record-type`
 
 R7RS-small, in the prelude. Constructor, predicate, accessors, optional

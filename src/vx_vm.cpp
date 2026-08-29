@@ -3680,6 +3680,40 @@ void VM::init_primitives() {
   def_global("map-set!", heap.make_subr("map-set!", subr_map_set, 3, 3));
   def_global("hash-map-set!", heap.make_subr("hash-map-set!", subr_map_set, 3, 3));
 
+  // (map-copy m) — a SHALLOW copy, the same contract vector-copy and
+  // string-copy have. The spine is fresh, so adding or removing a key does
+  // not touch the original; the values are shared.
+  //
+  // Scheme's convention is that aggregates are mutable and you copy
+  // explicitly, which is why every other aggregate here already has a
+  // -copy. Without it, sieving a map out of something and editing it
+  // silently edits what you sieved it from.
+  //
+  // ⚠️ SHALLOW is load bearing to understand: if a value is itself a map,
+  // the copy shares it, and editing the inner map is visible through both.
+  // Nested structures want a copy per level.
+  def_global("map-copy", heap.make_subr("map-copy", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) vm.raise_contract("map-copy: expected a map");
+    // Allocated before the entries are read out, so the source stays
+    // rooted on the caller's stack across the allocation and nothing is
+    // held across a possible collection.
+    Value nv = vm.heap.make_map();
+    nv.as_ptr<ObjMap>()->entries = args[0].as_ptr<ObjMap>()->entries;
+    return nv;
+  }, 1, 1));
+
+  // (map-delete! m k) — removes k if present, otherwise does nothing.
+  // Unspecified return, per the convention that a bang procedure reports
+  // nothing; ask map-has? first if you need to know.
+  def_global("map-delete!", heap.make_subr("map-delete!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_map(args[0])) vm.raise_contract("map-delete!: expected a map");
+    auto &es = args[0].as_ptr<ObjMap>()->entries;
+    for (size_t i = 0; i < es.size(); ++i) {
+      if (es[i].first == args[1]) { es.erase(es.begin() + i); break; }
+    }
+    return Value::unspecified();
+  }, 2, 2));
+
   def_global("map-has?", heap.make_subr("map-has?", [](VM &, uint32_t, Value *args) -> Value {
     if (!Heap::is_map(args[0])) return Value::boolean_false();
     return Value::from_bool(args[0].as_ptr<ObjMap>()->has(args[1]));

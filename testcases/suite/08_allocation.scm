@@ -192,4 +192,47 @@
 (assert-true "nor when a grown map is collected"
              (< (live-bytes) (+ alloc-baseline 100000)))
 
+
+;;--- map-copy and map-delete! -------------------------------------------
+;; Scheme's convention is that aggregates are mutable and you copy
+;; explicitly — vector-copy, string-copy, list-copy. Maps had no -copy,
+;; which meant handing a map out of a structure handed out the structure's
+;; own storage: an edit to what looked like a candidate silently edited
+;; the original.
+
+(define original {:x 1 :y 2})
+(define candidate (map-copy original))
+(map-set! candidate :x 99)
+(map-delete! candidate :y)
+(assert-equal "the copy can be edited freely" '(99 #f)
+              (list (map-ref candidate :x) (map-has? candidate :y)))
+(assert-equal "and the original is untouched" '(1 #t)
+              (list (map-ref original :x) (map-has? original :y)))
+
+(assert-equal "a copy is a different object" #f (eq? original (map-copy original)))
+(assert-equal "with the same contents"
+              '(1 2) (let ((c (map-copy original))) (list (map-ref c :x) (map-ref c :y))))
+
+(assert-equal "deleting an absent key does nothing"
+              1 (let ((m {:a 1})) (map-delete! m :nope) (map-count m)))
+(assert-equal "deleting the last key leaves an empty map"
+              0 (let ((m {:a 1})) (map-delete! m :a) (map-count m)))
+(assert-equal "and the key is really gone"
+              #f (let ((m {:a 1 :b 2})) (map-delete! m :a) (map-has? m :a)))
+(assert-equal "while its neighbours survive"
+              2 (let ((m {:a 1 :b 2})) (map-delete! m :a) (map-ref m :b)))
+
+;; SHALLOW, like every other -copy in Scheme. Worth pinning rather than
+;; assuming, because a structure of nested maps — the obvious shape for
+;; anything hierarchical — is only protected one level deep, and the
+;; sharing is invisible until something writes through it.
+(define outer {:inner {:v 1}})
+(define shallow (map-copy outer))
+(map-set! (map-ref shallow :inner) :v 42)
+(assert-equal "map-copy is shallow: a nested map is shared"
+              42 (map-ref (map-ref outer :inner) :v))
+
+(assert-equal "map-copy refuses a non-map"
+              'raised (guard (e (#t 'raised)) (map-copy 5)))
+
 (suite-summary)
