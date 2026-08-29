@@ -99,7 +99,18 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
   }
 }
 
-static bool is_balanced(const std::string &code) {
+// Three answers, not two. A buffer can be complete, still open, or
+// OVER-CLOSED — and the third is not a kind of "still open", because no
+// amount of further input can repair a surplus ')'.
+//
+// Treating it as incomplete is what made a typo silent: (display {:a 3})
+// mistyped with ')' for '}' leaves the brace open, so the REPL waited for
+// a '}' that was never coming and swallowed every line typed afterwards.
+// The same text through -e reported the reader error at once, which is
+// why the command line and the REPL disagreed about identical input.
+enum class BufferState { Complete, Incomplete, OverClosed };
+
+static BufferState buffer_state(const std::string &code) {
   int parens = 0;
   int brackets = 0;
   int braces = 0;
@@ -137,8 +148,15 @@ static bool is_balanced(const std::string &code) {
     else if (c == ']') --brackets;
     else if (c == '{') ++braces;
     else if (c == '}') --braces;
+    // Checked as we go rather than at the end: a closer that arrives with
+    // nothing open is a fault at that point, even if a later opener would
+    // bring the count back to zero.
+    if (parens < 0 || brackets < 0 || braces < 0) return BufferState::OverClosed;
   }
-  return parens <= 0 && brackets <= 0 && braces <= 0 && !in_string;
+  if (in_string) return BufferState::Incomplete;
+  return (parens == 0 && brackets == 0 && braces == 0)
+             ? BufferState::Complete
+             : BufferState::Incomplete;
 }
 
 static void run_repl(VM &vm) {
@@ -165,7 +183,17 @@ static void run_repl(VM &vm) {
     if (!buffer.empty()) buffer += "\n";
     buffer += line;
 
-    if (!is_balanced(buffer)) {
+    BufferState st = buffer_state(buffer);
+    if (st == BufferState::OverClosed) {
+      // Report and DISCARD. Keeping it would mean every later line joined
+      // a buffer that can never become valid — which is exactly the
+      // failure this replaced.
+      std::cerr << "[Error] unbalanced: a closing bracket with nothing open"
+                << std::endl;
+      buffer.clear();
+      continue;
+    }
+    if (st == BufferState::Incomplete) {
       continue;
     }
 

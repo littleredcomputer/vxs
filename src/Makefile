@@ -186,6 +186,18 @@ test-repl: vx-scheme
 	  echo "  ❌ [FAIL] --repl did not drive the interactive loop"; \
 	  echo "$$out"; exit 1; \
 	fi
+	@out=$$(printf '(display "a")\n(display {:x 1))\n(display "b")\n' | ./vx-scheme --repl 2>&1); \
+	if echo "$$out" | grep -q 'unbalanced' && echo "$$out" | grep -q 'b'; then \
+	  echo "  ✅ [PASS] an over-closed form errors and does not swallow what follows"; \
+	else \
+	  echo "  ❌ [FAIL] over-closed input did not recover"; echo "$$out"; exit 1; \
+	fi
+	@out=$$(printf '(define (f x)\n (* x 2))\n(display (f 21))\n' | ./vx-scheme --repl 2>&1); \
+	if echo "$$out" | grep -q '42'; then \
+	  echo "  ✅ [PASS] and a genuine multi-line form still spans lines"; \
+	else \
+	  echo "  ❌ [FAIL] multi-line input broke"; echo "$$out"; exit 1; \
+	fi
 	@out=$$(printf '(display "batch")\n' | ./vx-scheme 2>&1); \
 	if [ "$$out" = "batch" ]; then \
 	  echo "  ✅ [PASS] and without the flag a pipe is still a script"; \
