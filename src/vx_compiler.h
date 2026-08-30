@@ -958,13 +958,43 @@ private:
           Value k = sym(vm.intern("$case_key__" +
                                   std::to_string(vm.next_gensym_id++)));
 
+          // R7RS: a clause is ((datum ...) expression ...) or
+          // (else expression ...). All three departures below used to be
+          // accepted and then silently do nothing:
+          //
+          //   ((:form))            an EMPTY body — matches, returns
+          //                        unspecified, and the intended body ends
+          //                        up as the next clause
+          //   (begin ...)          a clause whose datums are not a list —
+          //                        skipped by `continue`, never matches
+          //   (1 body)             a bare datum rather than a list of them
+          //
+          // The first two are the same typo — a paren after the datum list
+          // instead of after the body — and it is invisible, because the
+          // form still compiles and still runs. Refused here so it is a
+          // build failure rather than a procedure that quietly returns
+          // nothing.
           std::vector<Value> cond_clauses;
           for (Value cur = clauses; Heap::is_cons(cur); cur = Heap::cdr(cur)) {
             Value clause = Heap::car(cur);
-            if (!Heap::is_cons(clause)) continue;
+            if (!Heap::is_cons(clause)) {
+              vm.raise_contract("case: each clause must be ((datum ...) body ...) "
+                                "or (else body ...), got " + vm.format_value(clause));
+            }
             Value datums = Heap::car(clause);
             Value body = Heap::cdr(clause);
-            if (datums.is_symbol() && datums.as_symbol_id() == vm.sym.s_else) {
+            bool is_else = datums.is_symbol() && datums.as_symbol_id() == vm.sym.s_else;
+            if (!is_else && !Heap::is_cons(datums) && !datums.is_nil()) {
+              vm.raise_contract("case: a clause's datums must be a LIST, got " +
+                                vm.format_value(datums) + " — write ((" +
+                                vm.format_value(datums) + ") body ...)");
+            }
+            if (body.is_nil()) {
+              vm.raise_contract("case: clause for " + vm.format_value(datums) +
+                                " has no body — a stray paren after the datum "
+                                "list is the usual cause");
+            }
+            if (is_else) {
               cond_clauses.push_back(clause);
             } else {
               Value test = list(sym(vm.sym.s_memv), k,

@@ -124,4 +124,46 @@
 (assert-equal "filter even numbers" '(2 4 6 8) (filter even? '(1 2 3 4 5 6 7 8)))
 (assert-equal "filter positive numbers" '(10 20) (filter positive? '(-5 10 -2 20 0)))
 
+
+;;--- case rejects a malformed clause ------------------------------------
+;; R7RS: a clause is ((datum ...) expression ...) or (else expression ...).
+;; All three departures used to compile, run, and silently do nothing —
+;; and two of them are the same typo, a paren after the DATUM LIST rather
+;; than after the body:
+;;
+;;   ((:finish))  (begin ...)     the begin becomes a stray clause, and the
+;;                                clause that matched has an empty body, so
+;;                                the procedure returns unspecified
+;;
+;; That cost two real bugs in one afternoon before this check existed. It
+;; is invisible by construction: the form is still well-formed Scheme, it
+;; still compiles, it still runs, and it returns a value.
+;;
+;; Checked by compiling rather than running, so a fiber boundary catches
+;; what the compiler raises.
+;; The three rejections are NOT asserted here: the check fires while the
+;; enclosing form is COMPILED, so provoking it needs `eval`, which vxs does
+;; not have (R7RS's separate (scheme eval) library). Verified by hand:
+;;
+;;   (case 1 ((1)) (else 2))
+;;   case: clause for (1) has no body — a stray paren after the datum list
+;;   is the usual cause
+;;
+;;   (case 9 ((1) 2) (display "x") (else 3))
+;;   case: a clause's datums must be a LIST, got display
+;;
+;;   (case 1 (1 2) (else 3))
+;;   case: a clause's datums must be a LIST, got 1 — write ((1) body ...)
+
+;; Valid forms first, so a blanket rejection would fail here.
+(assert-equal "an ordinary case still works" 2 (case 1 ((1) 2) (else 3)))
+(assert-equal "with several datums per clause"
+              'b (case 5 ((1 2) 'a) ((5 6) 'b) (else 'c)))
+(assert-equal "and a multi-expression body"
+              3 (case 1 ((1) 1 2 3) (else 0)))
+(assert-equal "else still catches"
+              'fell (case 99 ((1) 'no) (else 'fell)))
+(assert-equal "an empty datum list never matches"
+              'fell (case 1 (() 'no) (else 'fell)))
+
 (suite-summary)
