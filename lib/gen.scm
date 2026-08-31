@@ -69,6 +69,10 @@
 (define normal  (distribution 'normal  random-normal  logpdf-normal  fill-normal!  logpdf-sum-normal))
 (define uniform (distribution 'uniform random-uniform logpdf-uniform fill-uniform! logpdf-sum-uniform))
 (define flip    (distribution 'flip    random-flip    logpdf-flip    fill-flip!    logpdf-sum-flip))
+;; Beta is X/(X+Y) over two Gamma draws. It waited on Gamma's boost for
+;; alpha < 1: Beta(0.5, 0.5) is Jeffreys' prior, and before the boost both
+;; draws fabricated 1.0, so every sample was exactly 0.5.
+(define beta    (distribution 'beta    random-beta    logpdf-beta    fill-beta!    logpdf-sum-beta))
 
 ;; (batch d n) — one choice whose value is n draws.
 ;;

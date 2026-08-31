@@ -3121,6 +3121,31 @@ void VM::init_primitives() {
     return Value::from_double(sum);
   }, 5, 5));
 
+  // (logpdf-sum-beta view start count alpha beta) -> scalar
+  // lbeta = lgamma(a) + lgamma(b) - lgamma(a+b) is constant across the
+  // buffer, so it is computed once — the arrangement the scalar version
+  // cannot make.
+  def_global("logpdf-sum-beta", heap.make_subr("logpdf-sum-beta", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_view(args[0])) vm.raise_contract("logpdf-sum-beta: expected a view");
+    ObjView *v = args[0].as_ptr<ObjView>();
+    long start = static_cast<long>(vxs_as_num(args[1]));
+    long count = static_cast<long>(vxs_as_num(args[2]));
+    double a = vxs_as_num(args[3]), b = vxs_as_num(args[4]);
+    if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
+      vm.raise_contract("logpdf-sum-beta: range out of bounds for this view");
+    }
+    const double lb = std::lgamma(a) + std::lgamma(b) - std::lgamma(a + b);
+    double sum = -static_cast<double>(count) * lb;
+    for (long i = 0; i < count; ++i) {
+      double x = vxs_view_load(v, static_cast<size_t>(start + i));
+      if (x <= 0.0 || x >= 1.0) {
+        return Value::from_double(-std::numeric_limits<double>::infinity());
+      }
+      sum += (a - 1.0) * std::log(x) + (b - 1.0) * std::log1p(-x);
+    }
+    return Value::from_double(sum);
+  }, 5, 5));
+
   // (logsumexp view start count) -> log(sum(exp(x_i)))
   //
   // Native for CORRECTNESS rather than speed — the counts here are small.

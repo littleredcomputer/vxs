@@ -107,7 +107,14 @@
 (define dist-failures 0)
 (define (dist-reset-failures!) (set! dist-failures 0))
 
-(define (random-gamma-theta-one r alpha)
+;; The squeeze itself, valid only for alpha >= 1. Below that d = alpha-1/3
+;; goes non-positive, sqrt(9d) is the root of a non-positive number, the
+;; acceptance test can never pass, and three attempts later a fabricated
+;; 1.0 comes back — a perfectly plausible gamma value. Measured before the
+;; boost below existed: alpha <= 1/3 ALWAYS fabricated, and alpha = 0.5
+;; fabricated 8 times in 2000 because the acceptance rate degrades as
+;; alpha approaches 1/3 from above.
+(define (gamma-core r alpha)
   (let ((d (- alpha (/ 1.0 3.0))))
     (let loop ((i 0))
       (if (= i 3)
@@ -119,6 +126,50 @@
             (if (< (log u) (+ (* 0.5 (expt x 2)) d (- dv) (* d (log v))))
                 dv
                 (loop (+ i 1))))))))
+
+;; Marsaglia and Tsang's own remedy for alpha < 1, from the same paper:
+;;
+;;   Gamma(alpha) = Gamma(alpha + 1) * U^(1/alpha)
+;;
+;; It does two things. It extends validity to every alpha > 0, and it
+;; keeps the squeeze in the regime it is good at — so the fabrication rate
+;; falls rather than merely stopping at zero.
+;;
+;; CONSUMPTION ORDER: the boost uniform is drawn AFTER the core's draws.
+;; That is part of the contract, not an implementation detail — the device
+;; must consume in the same order or the two stop agreeing.
+(define (random-gamma-theta-one r alpha)
+  (if (< alpha 1.0)
+      (let* ((g (gamma-core r (+ alpha 1.0)))
+             (u (random-uniform r 0.0 1.0)))
+        (* g (expt u (/ 1.0 alpha))))
+      (gamma-core r alpha)))
+
+;;--- beta ---------------------------------------------------------------
+;; X/(X+Y) with X ~ Gamma(alpha,1) and Y ~ Gamma(beta,1). Which is why the
+;; boost above had to come first: Beta(0.5, 0.5) is Jeffreys' prior, and
+;; without it both draws would have been fabricated 1.0 and every sample
+;; would have been exactly 0.5.
+(define (random-beta r alpha beta)
+  (let* ((x (random-gamma-theta-one r alpha))
+         (y (random-gamma-theta-one r beta)))
+    (/ x (+ x y))))
+
+(define (lbeta a b) (- (+ (lgamma a) (lgamma b)) (lgamma (+ a b))))
+
+;; (alpha-1)log(v) + (beta-1)log(1-v) - lbeta(alpha,beta).
+;;
+;; -inf outside [0,1] AND at the endpoints. For alpha < 1 the true density
+;; diverges at 0 rather than vanishing, so -inf there is wrong in
+;; principle — but the endpoints have measure zero and the sampler cannot
+;; produce them, so this is the boundary convention rather than a claim
+;; about the density.
+(define (logpdf-beta v alpha beta)
+  (if (or (<= v 0.0) (>= v 1.0))
+      (log 0.0)
+      (+ (* (- alpha 1.0) (log v))
+         (* (- beta 1.0) (log (- 1.0 v)))
+         (- (lbeta alpha beta)))))
 
 (define (random-gamma r alpha lambda)
   (* (/ 1.0 lambda) (random-gamma-theta-one r alpha)))
@@ -217,6 +268,7 @@
 ;; Derived. Gamma's rejection loop consumes a variable number of uniforms,
 ;; so a native version would have to reproduce that exactly for no gain —
 ;; it is the sampler least likely to be filled in bulk.
+(define fill-beta!        (generic-fill random-beta))
 (define fill-exponential! (generic-fill random-exponential))
 (define fill-gamma!       (generic-fill random-gamma))
 
@@ -229,6 +281,8 @@
   (logpdf-sum-normal view start count loc scale))
 (define (sum-flip! view start count p)
   (logpdf-sum-flip view start count p))
+(define (sum-beta! view start count alpha beta)
+  (logpdf-sum-beta view start count alpha beta))
 (define (sum-exponential! view start count lambda)
   (logpdf-sum-exponential view start count lambda))
 (define (sum-gamma! view start count alpha lambda)

@@ -1168,6 +1168,30 @@ Threefry core.
 | `random-flip r p` | `logpdf-flip` | `fill-flip!` ᴺ | `logpdf-sum-flip` |
 | `random-exponential r lambda` | `logpdf-exponential` | `fill-exponential!` | `logpdf-sum-exponential` |
 | `random-gamma r alpha lambda` | `logpdf-gamma` | `fill-gamma!` | `logpdf-sum-gamma` |
+| `random-beta r alpha beta` | `logpdf-beta` | `fill-beta!` | `logpdf-sum-beta` |
+
+`random-gamma` **boosts below α = 1**. Marsaglia–Tsang's squeeze needs
+α ≥ 1; below that `d = α − 1/3` goes non-positive, the acceptance test can
+never pass, and a fabricated `1.0` came back — a plausible gamma value,
+silently wrong for a whole parameter range. Their own remedy is
+`Gamma(α) = Gamma(α+1) · U^(1/α)`, which also *lifts* the acceptance rate
+because the squeeze always runs where it is good:
+
+```
+α:  0.5   0.33    0.2      0.05
+    was:  1.0     1.0      1.0        ← fabricated
+    now:  0.117   0.0225   1.67e-07
+fabrications: 4 in 40,000 (was 8 in 2,000)
+```
+
+⚠️ The boost uniform is drawn **after** the core's draws. That's part of
+the contract, not an implementation detail — `lib/stat.wgsl` consumes in
+the same order and the two agree only while both do.
+
+`beta` is `X/(X+Y)` over two Gamma draws, which is why it waited on that
+fix: **Beta(½, ½) is Jeffreys' prior**, and before the boost both draws
+fabricated `1.0`, so every sample was exactly 0.5 — a correct-looking mean
+from a distribution that never varied.
 
 ⚠️ In `logpdf-sum-exponential` the last word is the **distribution**, as
 in `logpdf-sum-normal` — not an instruction to exponentiate. "Exponential"

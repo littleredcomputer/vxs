@@ -118,11 +118,14 @@ fn random_exponential(lambda: f32) -> f32 {
   return - log(u) / lambda;
 }
 
-fn random_gamma_theta_one(alpha: f32) -> f32 {
-  // return a sample from Gamma(alpha, theta=lambda=1.0).
-  // note that lambda = 1/theta; lambda parameterization is common
-  // in statistics.
-  // https://dl.acm.org/doi/pdf/10.1145/358407.358414
+// The squeeze itself, valid only for alpha >= 1. Below that d = alpha-1/3
+// goes non-positive, sqrt(9d) is the root of a non-positive number, the
+// acceptance test can never pass, and a fabricated 1.0 comes back — a
+// perfectly plausible gamma value. Measured on the host before the boost
+// below existed: alpha <= 1/3 ALWAYS fabricated, and alpha = 0.5
+// fabricated 8 times in 2000.
+// https://dl.acm.org/doi/pdf/10.1145/358407.358414
+fn gamma_core(alpha: f32) -> f32 {
   let d = alpha - 1.0/3.0;
   for (var i: u32 = 0u; i < 3u; i++) {
     let x = random_normal(0.0, 1.0);
@@ -135,6 +138,26 @@ fn random_gamma_theta_one(alpha: f32) -> f32 {
   }
   fail++;
   return 1.0; // Argh. creating a NaN, which I would prefer to return, is nontrivial in wgsl
+}
+
+// Marsaglia and Tsang's own remedy for alpha < 1, from the same paper:
+//
+//   Gamma(alpha) = Gamma(alpha + 1) * U^(1/alpha)
+//
+// It extends validity to every alpha > 0 and keeps the squeeze in the
+// regime it is good at, so the fabrication rate falls rather than merely
+// stopping at zero — measured on the host at 4 in 40000, from 8 in 2000.
+//
+// CONSUMPTION ORDER: the boost uniform is drawn AFTER the core's draws.
+// That is part of the contract, not an implementation detail — the host
+// consumes in this order and the two agree only while both do.
+fn random_gamma_theta_one(alpha: f32) -> f32 {
+  if (alpha < 1.0) {
+    let g = gamma_core(alpha + 1.0);
+    let u = random_uniform(0.0, 1.0);
+    return g * pow(u, 1.0/alpha);
+  }
+  return gamma_core(alpha);
 }
 
 fn random_gamma(alpha: f32, lambda: f32) -> f32 {

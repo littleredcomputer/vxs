@@ -144,6 +144,10 @@
 ;; two and shift every downstream value in every kernel.
 (assert-true "random_normal is still one inverse-CDF draw"
              (wgsl-has? "sqrt(2.0) * inv_erf(random_uniform(-1.0, 1.0))"))
+(assert-true "random_gamma boosts below alpha = 1, matching the host"
+             (wgsl-has? "return g * pow(u, 1.0/alpha);"))
+(assert-true "and draws the boost uniform AFTER the core"
+             (wgsl-has? "let g = gamma_core(alpha + 1.0);\n    let u = random_uniform(0.0, 1.0);"))
 (assert-true "random_gamma still gives up after three attempts"
              (wgsl-has? "i < 3u"))
 
@@ -585,5 +589,78 @@
                           (lambda ()
                             (yield (resume (generator (lambda () (yield (in-generator?)) 1))))
                             'outer))))
+
+
+;;--- gamma below alpha = 1, and beta ------------------------------------
+;; Marsaglia-Tsang's squeeze needs alpha >= 1. Below that d = alpha-1/3 is
+;; non-positive, sqrt(9d) is the root of a non-positive number, the
+;; acceptance test can never pass, and a fabricated 1.0 comes back — a
+;; perfectly plausible gamma value, silently wrong for a whole parameter
+;; range. Their own remedy is Gamma(alpha) = Gamma(alpha+1) * U^(1/alpha).
+
+(assert-equal "gamma below 1/3 is no longer the fabricated 1.0"
+              #t (let ((r (rng-make 0 7 0)))
+                   (let ((g (random-gamma r 0.2 1.0))) (and (> g 0.0) (< g 1.0)))))
+(assert-equal "and well below it"
+              #t (let ((r (rng-make 0 7 0))) (< (random-gamma r 0.05 1.0) 0.5)))
+
+;; The boost also LIFTS the acceptance rate, because the squeeze always
+;; runs in the regime it is good at. Before: 8 fabrications in 2000 at
+;; alpha = 0.5. This bound is loose enough not to be flaky and tight
+;; enough to catch the old behaviour, which fabricated every draw below
+;; 1/3 and would fail here by four orders of magnitude.
+(dist-reset-failures!)
+(let ((r (rng-make 0 11 0)))
+  (let loop ((i 0))
+    (if (< i 4000)
+        (begin (random-gamma r 0.5 1.0) (random-gamma r 0.1 1.0) (loop (+ i 1))))))
+(assert-equal "and fabricates almost never at small alpha"
+              #t (< dist-failures 20))
+
+;; Statistical sanity: Gamma(a,1) has mean a, and small a is the range the
+;; boost governs.
+(assert-equal "Gamma(0.5,1) has mean near 0.5"
+              #t (let ((r (rng-make 0 21 0)))
+                   (let loop ((i 0) (s 0.0))
+                     (if (= i 8000) (< (abs (- (/ s 8000) 0.5)) 0.03)
+                         (loop (+ i 1) (+ s (random-gamma r 0.5 1.0)))))))
+
+;;--- beta ---------------------------------------------------------------
+;; X/(X+Y) over two Gamma draws, which is why it waited on the boost.
+
+;; Closed form: Beta(2,5) has density 30*v*(1-v)^4.
+(assert-equal "logpdf-beta matches the closed form"
+              #t (< (abs (- (exp (logpdf-beta 0.3 2.0 5.0)) (* 30 0.3 (expt 0.7 4)))) 1e-9))
+(assert-equal "Beta(1,1) is uniform, so its log density is zero"
+              #t (< (abs (logpdf-beta 0.5 1.0 1.0)) 1e-12))
+(assert-equal "and it is -inf outside the unit interval"
+              '(#t #t) (list (infinite? (logpdf-beta 0.0 2.0 5.0))
+                             (infinite? (logpdf-beta 1.5 2.0 5.0))))
+
+(define (beta-mean n a b)
+  (let ((r (rng-make 0 5 0)))
+    (let loop ((i 0) (s 0.0))
+      (if (= i n) (/ s n) (loop (+ i 1) (+ s (random-beta r a b)))))))
+
+(assert-equal "Beta(2,5) has mean 2/7"
+              #t (< (abs (- (beta-mean 20000 2.0 5.0) (/ 2.0 7.0))) 0.02))
+;; THE case the boost was for. Before it, both gamma draws fabricated 1.0
+;; and every sample was exactly 0.5 — a mean that looks entirely correct.
+(assert-equal "Jeffreys' prior Beta(1/2,1/2) has mean 1/2, and varies"
+              #t (let ((r (rng-make 0 31 0)))
+                   (let loop ((i 0) (s 0.0) (same 0))
+                     (if (= i 2000)
+                         (and (< (abs (- (/ s 2000) 0.5)) 0.03) (< same 100))
+                         (let ((x (random-beta r 0.5 0.5)))
+                           (loop (+ i 1) (+ s x) (if (= x 0.5) (+ same 1) same)))))))
+
+(define bv2 (bytes-view (make-bytes (* 300 8)) :f64))
+(fill-beta! (rng-make 0 3 0) bv2 0 300 2.0 5.0)
+(assert-equal "logpdf-sum-beta matches the scalar loop"
+              #t (< (abs (- (logpdf-sum-beta bv2 0 300 2.0 5.0)
+                            (let loop ((i 0) (s 0.0))
+                              (if (= i 300) s
+                                  (loop (+ i 1) (+ s (logpdf-beta (view-ref bv2 i) 2.0 5.0)))))))
+                    1e-9))
 
 (suite-summary)
