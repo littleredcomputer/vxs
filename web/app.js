@@ -312,7 +312,8 @@
   // the same machinery that already watches a scratch file, loadable by
   // the harness directly, and free to use quasiquote.
   const PRESET_NAMES = [
-    'plasma', 'rings', 'ensemble', 'field', 'cubes',
+    'field', 'curvefit',
+    'plasma', 'rings', 'cubes', 'ensemble',
     'actors', 'wrangle', 'points', 'fibers', 'repl'
   ];
   const presetCache = Object.create(null);

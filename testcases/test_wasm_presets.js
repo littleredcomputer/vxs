@@ -154,6 +154,13 @@ const presets = {
 `
 };
 
+// curvefit is read from demos/, not copied. It is the one preset here that
+// RUNS TO COMPLETION rather than spawning a loop, and it covers a path
+// nothing else does: lib/gen.scm driven end to end, plus the 2D canvas
+// primitives, inside a single bounded evaluation.
+presets.curvefit = fs.readFileSync(
+  path.join(__dirname, '..', 'demos', 'curvefit.scm'), 'utf8');
+
 // How many fibers each preset is expected to leave running after load.
 // null = don't care (the preset finishes synchronously or its count is
 // not the interesting property).
@@ -164,6 +171,7 @@ const expectedFibers = {
   wave: 1,
   fibers: null,
   repl: 0,
+  curvefit: 0,
 };
 
 async function run() {
