@@ -1095,6 +1095,53 @@ It has no `fill` or `sum` of its own, stated in its constructor rather
 than discovered by falling through, so `(batch (batch d n) m)` is refused:
 a two-axis shape wants a different mechanism, not a nested one.
 
+### `importance` — K samples, transposed
+
+```scheme
+(importance (coin 10) {:qs observations} 20000 seed)
+;; => {:p       #<view f64 ✕20000 [0.6887 0.7328 …]>
+;;     :weights #<view f64 ✕20000 [-9.288 -10.171 …]>
+;;     :n 20000}
+```
+
+**Columns, not K traces.** K traces would be K maps plus one map per
+address inside each. Measured at K=20000 on the coin model:
+
+| | seconds | live |
+|---|---|---|
+| columnar | 0.120 | **0.41 MB** |
+| K traces | 0.256 | 10.9 MB |
+
+27× the memory, and the ratio grows with the number of addresses — the
+coin model has one unconstrained address, so it is the *kindest* case for
+the map version. Nothing at the call site fixes that; it is structural.
+
+A **constrained** address gets no column, because its value is the same
+for every sample. Storing K copies of it would record a fact already held
+in the constraints.
+
+**Two accumulators, and the asymmetry is the whole of it:** everything
+goes into `score`, only constrained values go into `weight`. The
+unconstrained draws come from the prior, so their density appears in
+numerator and denominator and cancels. Adding them to the weight — the
+obvious thing, since both branches compute a logpdf — gives a number that
+is plausible, moves in roughly the right direction, and is wrong.
+
+Sample *i* draws from `(rng-make i seed 0)`, so sample 37 is the same
+whether you take 50 samples or 900, in any order.
+
+⚠️ **Not vectorised.** This is a loop over K with one generator per
+sample; only the *output* is columnar. At K=20000 that is 1819
+collections, and 20000 bare generators alone cost 2500 — so the remaining
+time is the per-sample fiber. Removing it means one pass over all K, which
+needs distribution parameters that may be views rather than scalars, and
+costs the ability to branch per sample.
+
+Two shapes are refused rather than fudged: a **nested** generative
+function (columns are keyed by a single address, so nesting needs
+path-flattened keys) and an **unconstrained batched** choice (that would
+want a K×n column, the two-axis shape we don't build).
+
 ### `define-gen` is not `@gen`
 
 GenJAX's decorator performs a tracing transformation on the body. This

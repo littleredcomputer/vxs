@@ -171,4 +171,60 @@
               '(missing-choice :w)
               (guard (e (#t e)) (assess (outer) {:v 2})))
 
+
+;;--- importance ---------------------------------------------------------
+;; K samples, transposed: columns rather than K traces. The arithmetic is
+;; checked against a closed form because that is the only way to catch the
+;; failure this code is prone to — a weight that is plausible and wrong.
+
+(define obs (bytes-view (make-bytes (* 10 4)) :f32))
+(let loop ((i 0))
+  (if (< i 10) (begin (view-set! obs i (if (< i 3) 1.0 0.0)) (loop (+ i 1)))))
+
+(define KK 8000)
+(define soa (importance (coin 10) {:qs obs} KK 1))
+
+(assert-equal "the result is columns, not traces"
+              '(#t #t) (list (map-has? soa :p) (map-has? soa :weights)))
+(assert-equal "one column entry per sample" KK (view-length (:p soa)))
+(assert-equal "and one weight per sample"   KK (view-length (:weights soa)))
+;; The CONSTRAINED address is not a column — it is the same for every
+;; sample, so a column would store K copies of a fact already in the
+;; constraints. That is the whole argument for transposing.
+(assert-equal "a constrained address gets no column" #f (map-has? soa :qs))
+
+;; THE assertion. Three heads in ten under a uniform prior is Beta(4,8),
+;; whose mean is exactly 1/3. Anything that put the unconstrained draw's
+;; density into the weight would still concentrate somewhere — just not
+;; here.
+(assert-equal "the posterior mean of p is Beta(4,8)'s"
+              #t (< (abs (- (weighted-mean (:p soa) (:weights soa) KK) (/ 1.0 3.0)))
+                    0.02))
+
+;; The weight is the log density of the CONSTRAINED part only, given the
+;; drawn latent — not the trace's total score.
+(assert-equal "each weight is the constrained logpdf alone"
+              #t (< (abs (- (view-ref (:weights soa) 0)
+                            (logpdf-sum-flip obs 0 10 (view-ref (:p soa) 0))))
+                    1e-9))
+
+;; Sample i draws from (rng-make i seed 0), so a sample does not depend on
+;; how many were taken or in what order.
+(assert-equal "sample i is the same at any K"
+              (view-ref (:p (importance (coin 10) {:qs obs} 50 1)) 37)
+              (view-ref (:p (importance (coin 10) {:qs obs} 900 1)) 37))
+
+(assert-equal "normalised weights sum to one"
+              #t (let ((ws (:weights (importance (coin 10) {:qs obs} 500 2))))
+                   (normalize-weights! ws 500)
+                   (let loop ((i 0) (s 0.0))
+                     (if (= i 500) (< (abs (- s 1.0)) 1e-9)
+                         (loop (+ i 1) (+ s (view-ref ws i)))))))
+
+;; Two shapes refused rather than fudged, each naming its own reason.
+(assert-equal "a nested generative function is refused for now"
+              'raised (guard (e (#t 'raised)) (importance (outer) {:v 1} 4 1)))
+(assert-equal "and an unconstrained batched choice"
+              'raised (guard (e (#t 'raised)) (importance (coin 10) {} 4 1)))
+
 (suite-summary)

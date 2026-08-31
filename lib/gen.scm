@@ -217,3 +217,101 @@
      (lambda (d) (cons sum-w d)))))
 
 (define (assess gf choices) (gf-driver gf (assess-stepper choices)))
+
+
+;;--- importance ---------------------------------------------------------
+;; K samples of a model, with some addresses constrained.
+;;
+;; TRANSPOSED, and that is the whole of the design. N traces would be N
+;; maps plus one map per address inside each — at K=20000 that measured
+;; 10.9MB live, against 0.41MB for the columns below, and the ratio grows
+;; with the number of addresses. Nothing about the call site fixes that;
+;; it is structural, so the structure changes.
+;;
+;;   {address -> :f64 view of K, ..., :weights view of K, :n K}
+;;
+;; NOT vectorised. This is a loop over K, one generator per sample; only
+;; the OUTPUT is columnar. Vectorising properly needs distribution
+;; parameters that may be views, so that one pass covers all K — at which
+;; point the per-sample generator goes away too, and that is currently
+;; where the time goes (20000 samples cost 1819 collections, and 20000
+;; bare generators cost 2500).
+
+(define (column! cols address K)
+  (if (map-has? cols address)
+      (map-ref cols address)
+      (let ((v (bytes-view (make-bytes (* K 8)) :f64)))
+        (map-set! cols address v)
+        v)))
+
+;; TWO accumulators, and the asymmetry is the point: everything goes into
+;; SCORE, only constrained values go into WEIGHT.
+;;
+;; The unconstrained choices are drawn from the prior, so their density
+;; appears in both numerator and denominator and cancels exactly. Adding
+;; them to the weight — the obvious thing, since both branches compute a
+;; logpdf — gives a number that is plausible, moves in roughly the right
+;; direction, and is wrong.
+(define (importance-stepper constraints cols i K k)
+  (let ((weight 0.0) (score 0.0))
+    (make-stepper
+     (lambda (d)
+       (let ((address (car d)) (thing (cadr d)))
+         (cond
+          ;; Refused rather than fudged: columns are keyed by a single
+          ;; address, so a nested model needs path-flattened keys — a
+          ;; decision, not an oversight.
+          ((not (distribution? thing))
+           (raise `(importance: nested-generative-function-unsupported ,address)))
+          ((map-has? constraints address)
+           (let* ((v (map-ref constraints address))
+                  (w (d:score thing v)))
+             (set! weight (+ weight w))
+             (set! score  (+ score w))
+             v))
+          (else
+           (let* ((v (d:sample thing k))
+                  (w (d:score thing v)))
+             ;; An unconstrained BATCHED choice would want a K-by-n
+             ;; column. That is the two-axis shape we do not build, so it
+             ;; is refused where it happens rather than silently coerced.
+             (if (not (number? v))
+                 (raise `(importance: unconstrained-batch-needs-a-2d-column ,address)))
+             (set! score (+ score w))
+             (view-set! (column! cols address K) i v)
+             v)))))
+     (lambda (d) (list weight score d)))))
+
+;; Sample i draws from (rng-make i seed 0) — ptnum is the sample index, so
+;; sample 37 is the same whether you drew 40 or 40,000, in any order. That
+;; is the axis rng-make's coordinates exist for, and it means no splitting
+;; and no threading between samples.
+(define (importance gf constraints K seed)
+  (let ((cols {})
+        (weights (bytes-view (make-bytes (* K 8)) :f64)))
+    (let loop ((i 0))
+      (if (< i K)
+          (let ((r (gf-driver gf (importance-stepper constraints cols i K
+                                                     (rng-make i seed 0)))))
+            (view-set! weights i (car r))
+            (loop (+ i 1)))))
+    (map-set! cols :weights weights)
+    (map-set! cols :n K)
+    cols))
+
+;; The normalised weights, in place. Subtracting logsumexp first is what
+;; keeps this finite: raw log-weights routinely sit below -700, where exp
+;; underflows to zero and every particle looks equally impossible.
+(define (normalize-weights! ws K)
+  (let ((lse (logsumexp ws 0 K)))
+    (let loop ((i 0))
+      (if (< i K)
+          (begin (view-set! ws i (exp (- (view-ref ws i) lse)))
+                 (loop (+ i 1)))))))
+
+;; The weighted mean of one column, without materialising anything.
+(define (weighted-mean col ws K)
+  (let ((lse (logsumexp ws 0 K)))
+    (let loop ((i 0) (m 0.0))
+      (if (= i K) m
+          (loop (+ i 1) (+ m (* (exp (- (view-ref ws i) lse)) (view-ref col i))))))))
