@@ -1051,6 +1051,60 @@ Still missing from R7RS-small: `raise-continuable` and
 
 ---
 
+## 5. Generative functions
+
+`lib/gen.scm`. A model is an ordinary procedure that calls `at` where it
+makes a random choice:
+
+```scheme
+(define-gen (coin n)
+  (let ((p (at :p (uniform 0 1))))
+    (at :qs (batch (flip p) n))))
+
+(sample (coin 4) seed)          ; draw everything, return a trace
+(assess (coin 4) choices)       ; draw nothing, return (weight . retval)
+```
+
+Nothing about the model is transformed, declared, or annotated. `at`
+yields; a driver on the other side of that yield decides what the choice
+is worth and hands a value back.
+
+### Why that is the whole trick
+
+Systems doing this in a language without suspension have to synthesise it.
+WebPPL CPS-transforms a subset of JavaScript; GenJAX decorates and traces
+to a jaxpr; a source rewriter inserts the plumbing into the text. All of
+them are buying **inversion of control**, and a coroutine already has it.
+
+It also hides the generator. A model never mentions an RNG key — it isn't
+*running* when a draw happens. It's suspended, and the driver holds the
+key, the trace and the accumulators. That's a second transformation
+(threading keys through every call site) made unnecessary by the same
+mechanism.
+
+⚠️ The cost is real: a live coroutine cannot be **inspected**. A jaxpr can
+be compiled, differentiated or vectorised; this can only be run.
+
+### `batch` is the vectorisation seam
+
+`(batch d n)` converts a distribution's `fill`/`sum` into `sample`/`score`
+at a larger shape, and is *itself* a distribution — which is what lets it
+sit at an address. A driver never learns `fill` and `sum` exist.
+
+It has no `fill` or `sum` of its own, stated in its constructor rather
+than discovered by falling through, so `(batch (batch d n) m)` is refused:
+a two-axis shape wants a different mechanism, not a nested one.
+
+### `define-gen` is not `@gen`
+
+GenJAX's decorator performs a tracing transformation on the body. This
+touches the body not at all — the coroutine does that work. It only makes
+`model` a *constructor*, so `(model 1 2)` builds a generative function
+rather than running one. What it buys is one name instead of two, and no
+way to write the wrong one.
+
+---
+
 ## 5a. Distributions on the host
 
 `lib/dist.scm` is a faithful port of `lib/stat.wgsl`, over a native
