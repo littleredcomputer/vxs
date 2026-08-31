@@ -663,4 +663,76 @@
                                   (loop (+ i 1) (+ s (logpdf-beta (view-ref bv2 i) 2.0 5.0)))))))
                     1e-9))
 
+
+;;--- parameters may be columns ------------------------------------------
+;; A fitted curve is what forces this: every y_i is scored against f(x_i),
+;; so `loc` differs per element while `scale` does not. Requiring both to
+;; be scalars makes scoring a curve a Scheme loop; requiring both to be
+;; views makes you allocate a column of identical numbers.
+
+(define PN 40)
+(define pys (bytes-view (make-bytes (* PN 8)) :f64))
+(define pmu (bytes-view (make-bytes (* PN 8)) :f64))
+(let loop ((i 0))
+  (if (< i PN)
+      (begin (view-set! pys i (* 0.5 i)) (view-set! pmu i (* 0.45 i)) (loop (+ i 1)))))
+
+(assert-equal "logpdf-sum-normal takes a column for loc"
+              #t (< (abs (- (logpdf-sum-normal pys 0 PN pmu 0.2)
+                            (let loop ((i 0) (s 0.0))
+                              (if (= i PN) s
+                                  (loop (+ i 1)
+                                        (+ s (logpdf-normal (view-ref pys i)
+                                                            (view-ref pmu i) 0.2)))))))
+                    1e-9))
+(assert-equal "and a scalar loc is unchanged"
+              #t (< (abs (- (logpdf-sum-normal pys 0 PN 0.0 1.0)
+                            (let loop ((i 0) (s 0.0))
+                              (if (= i PN) s
+                                  (loop (+ i 1)
+                                        (+ s (logpdf-normal (view-ref pys i) 0.0 1.0)))))))
+                    1e-9))
+;; Both at once, which is the case a per-element scale has to handle: the
+;; log(scale) hoist only applies when scale is constant, so this exercises
+;; the other branch. A separate column because a SCALE must be positive —
+;; reusing the means column would have put a zero in it.
+(define psd (bytes-view (make-bytes (* PN 8)) :f64))
+(let loop ((i 0))
+  (if (< i PN) (begin (view-set! psd i (+ 0.2 (* 0.01 i))) (loop (+ i 1)))))
+(assert-equal "both parameters may be columns"
+              #t (< (abs (- (logpdf-sum-normal pys 0 PN pmu psd)
+                            (let loop ((i 0) (s 0.0))
+                              (if (= i PN) s
+                                  (loop (+ i 1)
+                                        (+ s (logpdf-normal (view-ref pys i)
+                                                            (view-ref pmu i)
+                                                            (view-ref psd i))))))))
+                    1e-9))
+
+;; A column too short for the range is refused, once, rather than read off
+;; the end per element.
+;; Checked across a FIBER boundary: a contract violation is a native VM
+;; error and guard cannot catch it (MANUAL section 3). Worth the two extra
+;; lines — the alternative is a test that kills the suite.
+(define (param-fails? thunk)
+  (let ((f (future (thunk)))) (run-fibers) (error-object? (touch/or-error f))))
+
+(assert-equal "a column shorter than the range is refused"
+              #t (param-fails?
+                  (lambda () (logpdf-sum-normal pys 0 PN (bytes-view (make-bytes 16) :f64) 1.0))))
+(assert-equal "and a parameter that is neither a number nor a view"
+              #t (param-fails? (lambda () (logpdf-sum-normal pys 0 PN "x" 1.0))))
+
+;; The fills take them too, so a model can DRAW n points around a curve in
+;; one call rather than n.
+(define pfill (bytes-view (make-bytes (* PN 8)) :f64))
+(rng-fill-normal! (rng-make 0 77 0) pfill 0 PN pmu 0.2)
+(assert-equal "rng-fill-normal! draws around a column of means"
+              #t (let ((r (rng-make 0 77 0)))
+                   (let loop ((i 0))
+                     (cond ((= i PN) #t)
+                           ((> (abs (- (view-ref pfill i)
+                                       (random-normal r (view-ref pmu i) 0.2))) 1e-12) #f)
+                           (else (loop (+ i 1)))))))
+
 (suite-summary)

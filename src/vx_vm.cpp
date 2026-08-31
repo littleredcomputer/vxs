@@ -1634,6 +1634,48 @@ static inline bool vxs_index_arg(VM &vm, Value v, const char *who, double &out) 
   return true;
 }
 
+// A distribution parameter that is either a constant or a column.
+//
+// The curve fit is what forces this: every y_i is scored against f(x_i),
+// so `loc` differs per element while `scale` does not. Requiring both to
+// be scalars means scoring a fitted curve is a Scheme loop, and requiring
+// both to be views means allocating a column of identical numbers.
+//
+// It is also the first half of vectorising: with parameters that may be
+// columns, one pass covers K samples instead of K passes covering one.
+struct Operand {
+  ObjView *view;    // null when scalar
+  double scalar;
+  inline double at(size_t i) const {
+    return view ? vxs_view_load(view, i) : scalar;
+  }
+};
+
+// Reads a parameter, requiring a view to be long enough for the range it
+// will be indexed over. Checked once here rather than per element.
+static inline bool vxs_operand(VM &vm, Value v, const char *who, const char *what,
+                               long start, long count, Operand &out) {
+  if (Heap::is_view(v)) {
+    ObjView *w = v.as_ptr<ObjView>();
+    if (start + count > static_cast<long>(w->count)) {
+      vxs_fail(vm, std::string(who) + ": " + what + " is a view of " +
+                       std::to_string(w->count) + ", too short for " +
+                       std::to_string(start + count));
+      return false;
+    }
+    out.view = w; out.scalar = 0.0;
+    return true;
+  }
+  if (!v.is_number()) {
+    vxs_fail(vm, std::string(who) + ": " + what +
+                     " must be a number or a view, got " + vm.format_value(v));
+    return false;
+  }
+  out.view = nullptr; out.scalar = vxs_as_num(v);
+  return true;
+}
+
+
 
 // Threefry-4x32-13. Must stay bit-identical to lib/threefry.scm (which the
 // nine published known-answer vectors in layer 13 pin) and to
@@ -2914,9 +2956,13 @@ void VM::init_primitives() {
     ObjView *view = args[1].as_ptr<ObjView>();
     long start = static_cast<long>(vxs_as_num(args[2]));
     long count = static_cast<long>(vxs_as_num(args[3]));
-    double low = vxs_as_num(args[4]), high = vxs_as_num(args[5]);
     if (start < 0 || count < 0 || start + count > static_cast<long>(view->count)) {
       vm.raise_contract("rng-fill-uniform!: range out of bounds for this view");
+    }
+    Operand low, high;
+    if (!vxs_operand(vm, args[4], "rng-fill-uniform!", "low",  start, count, low) ||
+        !vxs_operand(vm, args[5], "rng-fill-uniform!", "high", start, count, high)) {
+      return Value::unspecified();
     }
     uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
     uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
@@ -2924,8 +2970,10 @@ void VM::init_primitives() {
       double m = static_cast<double>(vxs_rng_u32(w) >> 9);
       double a = m / 8388608.0;
       if (a < 5.9604645e-8) a = 5.9604645e-8;
-      double u = (high - low) * a + low;
-      if (u < low) u = low;               // random_uniform's max(low, u)
+      size_t j = static_cast<size_t>(start + i);
+      double lo = low.at(j), hi = high.at(j);
+      double u = (hi - lo) * a + lo;
+      if (u < lo) u = lo;                 // random_uniform's max(low, u)
       uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
       switch (view->elem) {
         case ElemType::F32: { float x = static_cast<float>(u); std::memcpy(p, &x, 4); break; }
@@ -2947,9 +2995,12 @@ void VM::init_primitives() {
     ObjView *view = args[1].as_ptr<ObjView>();
     long start = static_cast<long>(vxs_as_num(args[2]));
     long count = static_cast<long>(vxs_as_num(args[3]));
-    double prob = vxs_as_num(args[4]);
     if (start < 0 || count < 0 || start + count > static_cast<long>(view->count)) {
       vm.raise_contract("rng-fill-flip!: range out of bounds for this view");
+    }
+    Operand prob;
+    if (!vxs_operand(vm, args[4], "rng-fill-flip!", "p", start, count, prob)) {
+      return Value::unspecified();
     }
     uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
     uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
@@ -2959,7 +3010,7 @@ void VM::init_primitives() {
       if (a < 5.9604645e-8) a = 5.9604645e-8;
       // flip is random_uniform(0,1) < prob, and random_uniform(0,1) is
       // max(0, a) which is a. Same one draw, same comparison.
-      double v = (a < prob) ? 1.0 : 0.0;
+      double v = (a < prob.at(static_cast<size_t>(start + i))) ? 1.0 : 0.0;
       uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
       switch (view->elem) {
         case ElemType::F32: { float x = static_cast<float>(v); std::memcpy(p, &x, 4); break; }
@@ -2996,17 +3047,30 @@ void VM::init_primitives() {
     ObjView *v = args[0].as_ptr<ObjView>();
     long start = static_cast<long>(vxs_as_num(args[1]));
     long count = static_cast<long>(vxs_as_num(args[2]));
-    double loc = vxs_as_num(args[3]), scale = vxs_as_num(args[4]);
     if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
       vm.raise_contract("logpdf-sum-normal: range out of bounds for this view");
     }
-    // Same expression as logpdf-normal, with log(scale) hoisted out of the
-    // loop — the one arrangement the scalar version cannot make.
-    const double k = 0.9189385175704956 + std::log(scale);
+    // loc and scale may each be a number or a COLUMN. A fitted curve makes
+    // loc differ per element while scale stays fixed, so requiring them to
+    // agree either way would cost a Scheme loop or a column of identical
+    // numbers.
+    Operand loc, scale;
+    if (!vxs_operand(vm, args[3], "logpdf-sum-normal", "loc",   start, count, loc)) {
+      return Value::unspecified();
+    }
+    if (!vxs_operand(vm, args[4], "logpdf-sum-normal", "scale", start, count, scale)) {
+      return Value::unspecified();
+    }
+    // log(scale) still hoists when scale is a constant, which is the
+    // common case; a per-element scale pays a log each, as it must.
+    const bool k_fixed = (scale.view == nullptr);
+    const double k_const = k_fixed ? 0.9189385175704956 + std::log(scale.scalar) : 0.0;
     double sum = 0.0;
     for (long i = 0; i < count; ++i) {
-      double f = (vxs_view_load(v, static_cast<size_t>(start + i)) - loc) / scale;
-      sum += -0.5 * f * f - k;
+      size_t j = static_cast<size_t>(start + i);
+      double sc = scale.at(j);
+      double f = (vxs_view_load(v, j) - loc.at(j)) / sc;
+      sum += -0.5 * f * f - (k_fixed ? k_const : 0.9189385175704956 + std::log(sc));
     }
     return Value::from_double(sum);
   }, 5, 5));
@@ -3031,18 +3095,22 @@ void VM::init_primitives() {
     ObjView *v = args[0].as_ptr<ObjView>();
     long start = static_cast<long>(vxs_as_num(args[1]));
     long count = static_cast<long>(vxs_as_num(args[2]));
-    double low = vxs_as_num(args[3]), high = vxs_as_num(args[4]);
     if (start < 0 || count < 0 || start + count > static_cast<long>(v->count)) {
       vm.raise_contract("logpdf-sum-uniform: range out of bounds for this view");
     }
-    const double d = -std::log(high - low);
+    Operand low, high;
+    if (!vxs_operand(vm, args[3], "logpdf-sum-uniform", "low",  start, count, low) ||
+        !vxs_operand(vm, args[4], "logpdf-sum-uniform", "high", start, count, high)) {
+      return Value::unspecified();
+    }
     double sum = 0.0;
     for (long i = 0; i < count; ++i) {
-      double x = vxs_view_load(v, static_cast<size_t>(start + i));
-      if (x < low || x > high) {
+      size_t j = static_cast<size_t>(start + i);
+      double x = vxs_view_load(v, j), lo = low.at(j), hi = high.at(j);
+      if (x < lo || x > hi) {
         return Value::from_double(-std::numeric_limits<double>::infinity());
       }
-      sum += d;
+      sum += -std::log(hi - lo);
     }
     return Value::from_double(sum);
   }, 5, 5));
@@ -3208,17 +3276,23 @@ void VM::init_primitives() {
     auto *b = args[0].as_ptr<ObjBytes>();
     if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-normal!: not an rng state buffer");
     ObjView *view = args[1].as_ptr<ObjView>();
-    for (int i = 2; i < 6; ++i) {
-      if (!args[i].is_number()) {
-        vm.raise_contract("rng-fill-normal!: expected (rng view start count loc scale)");
-      }
+    // start and count only — loc and scale may each be a view, and are
+    // checked by vxs_operand below.
+    if (!args[2].is_number() || !args[3].is_number()) {
+      vm.raise_contract("rng-fill-normal!: expected (rng view start count loc scale)");
     }
     long start = static_cast<long>(vxs_as_num(args[2]));
     long count = static_cast<long>(vxs_as_num(args[3]));
-    double loc = vxs_as_num(args[4]), scale = vxs_as_num(args[5]);
     if (start < 0 || count < 0 ||
         static_cast<long>(start + count) > static_cast<long>(view->count)) {
       vm.raise_contract("rng-fill-normal!: range out of bounds for this view");
+    }
+    // loc and scale may each be a column, so a model can draw n points
+    // around a fitted curve in one call rather than n.
+    Operand loc, scale;
+    if (!vxs_operand(vm, args[4], "rng-fill-normal!", "loc",   start, count, loc) ||
+        !vxs_operand(vm, args[5], "rng-fill-normal!", "scale", start, count, scale)) {
+      return Value::unspecified();
     }
     uint32_t *w = reinterpret_cast<uint32_t *>(b->data.data());
     uint8_t *base = view->bytes.as_ptr<ObjBytes>()->data.data() + view->offset;
@@ -3229,7 +3303,8 @@ void VM::init_primitives() {
       if (a < 5.9604645e-8) a = 5.9604645e-8;
       double u = 2.0 * a - 1.0;
       if (u < -1.0) u = -1.0;
-      double n = loc + scale * kSqrt2 * vxs_inv_erf(u);
+      size_t j = static_cast<size_t>(start + i);
+      double n = loc.at(j) + scale.at(j) * kSqrt2 * vxs_inv_erf(u);
       uint8_t *p = base + static_cast<size_t>(start + i) * view->stride;
       switch (view->elem) {
         case ElemType::F32: { float x = static_cast<float>(n); std::memcpy(p, &x, 4); break; }
