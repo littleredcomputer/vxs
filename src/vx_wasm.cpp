@@ -2125,7 +2125,16 @@ const char *vxs_eval_json(const char *code) {
     // for a one-shot "run what's in the buffer" action. A hit deadline
     // is reported as a timeout, never dressed up as a result — that
     // would be the Yielded/Preempted conflation rebuilt one layer up.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    // The budget is a VM field, not a literal, so a program can widen it
+    // for a deliberately expensive stretch (eval-budget-ms!). Any override
+    // left over from a previous evaluation is cleared FIRST: it is an
+    // absolute instant, so a stale one is either long past — timing this
+    // evaluation out before it starts — or far in the future, silently
+    // disabling the cap the next caller is relying on.
+    g_vm->deadline_override = VM::NO_DEADLINE;
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(
+                        static_cast<long long>(g_vm->eval_budget_ms));
     SeqOutcome outcome = eval_forms_sequentially(code, deadline);
     VM::StepResult res = outcome.res;
     g_vm->push_temp_root(&outcome.result);
@@ -2133,7 +2142,7 @@ const char *vxs_eval_json(const char *code) {
     double time_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
 
     if (res == VM::StepResult::Preempted) {
-      g_eval_result_buffer = "{\"ok\":false,\"error\":\"evaluation exceeded 750ms and was stopped\",\"error_type\":\"timeout\",\"time_us\":" + std::to_string(time_us) + "}";
+      g_eval_result_buffer = "{\"ok\":false,\"error\":\"evaluation exceeded " + std::to_string(static_cast<long long>(g_vm->eval_budget_ms)) + "ms and was stopped\",\"error_type\":\"timeout\",\"time_us\":" + std::to_string(time_us) + "}";
     } else if (res == VM::StepResult::Error) {
       g_eval_result_buffer = "{\"ok\":false,\"error\":\"" + escape_json(outcome.error) + "\",\"error_type\":\"runtime\",\"time_us\":" + std::to_string(time_us) + "}";
     } else {
@@ -2180,10 +2189,19 @@ const char *vxs_eval(const char *code) {
 
   try {
     // Same deadline treatment as vxs_eval_json above.
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    // The budget is a VM field, not a literal, so a program can widen it
+    // for a deliberately expensive stretch (eval-budget-ms!). Any override
+    // left over from a previous evaluation is cleared FIRST: it is an
+    // absolute instant, so a stale one is either long past — timing this
+    // evaluation out before it starts — or far in the future, silently
+    // disabling the cap the next caller is relying on.
+    g_vm->deadline_override = VM::NO_DEADLINE;
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(
+                        static_cast<long long>(g_vm->eval_budget_ms));
     SeqOutcome outcome = eval_forms_sequentially(code, deadline);
     if (outcome.res == VM::StepResult::Preempted) {
-      g_eval_result_buffer = "[Timeout] evaluation exceeded 750ms and was stopped";
+      g_eval_result_buffer = "[Timeout] evaluation exceeded " + std::to_string(static_cast<long long>(g_vm->eval_budget_ms)) + "ms and was stopped";
     } else if (outcome.res == VM::StepResult::Error) {
       g_eval_result_buffer = outcome.error;
     } else {

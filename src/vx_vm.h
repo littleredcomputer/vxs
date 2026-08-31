@@ -725,6 +725,18 @@ public:
   static constexpr std::chrono::steady_clock::time_point NO_DEADLINE =
       std::chrono::steady_clock::time_point::max();
 
+  // The wall-clock budget an embedder allows ONE top-level evaluation, in
+  // milliseconds, and a live override a running program may set for its
+  // own expensive stretch. Only the browser sets a budget at all; a native
+  // run has no deadline and both of these are inert there.
+  //
+  // The override REPLACES an existing deadline and never creates one, so
+  // (eval-budget-ms! 10000) cannot impose a limit on a native run that had
+  // none — it would be a surprising way for a portable program to acquire
+  // a timeout it never had. See init_primitives for the Scheme side.
+  double eval_budget_ms = 750.0;
+  std::chrono::steady_clock::time_point deadline_override = NO_DEADLINE;
+
   StepResult step_fiber(Fiber &f, size_t max_instructions = UNBOUNDED,
                         std::chrono::steady_clock::time_point deadline = NO_DEADLINE);
 

@@ -735,4 +735,147 @@
                                        (random-normal r (view-ref pmu i) 0.2))) 1e-12) #f)
                            (else (loop (+ i 1)))))))
 
+;;--- rng-categorical! ---------------------------------------------------
+;; Weighted selection, native. The point of having it is that the walk over
+;; a running sum is the whole operation, and writing it out at each call
+;; site is a dozen lines of accumulator threading with a boundary to get
+;; wrong.
+
+(define cw (bytes-view (make-bytes (* 4 8)) :f64))
+(view-set! cw 0 1.0) (view-set! cw 1 0.0) (view-set! cw 2 3.0) (view-set! cw 3 6.0)
+
+(assert-equal "an index is an INTEGER, ready for view-ref"
+              #t (let ((j (rng-categorical! (rng-make 0 1 0) cw 0 4)))
+                   (and (integer? j) (exact? j))))
+
+;; A zero weight must never be chosen. This is the assertion that catches
+;; an off-by-one in the scan: a strictly-less-than that became
+;; less-or-equal picks bucket 1 whenever the running sum lands exactly on
+;; its boundary, which happens on the very first draw that falls at 1.0.
+(assert-equal "a zero weight is never selected"
+              #t (let ((k (rng-make 0 5 0)))
+                   (let loop ((i 0))
+                     (cond ((= i 4000) #t)
+                           ((= 1 (rng-categorical! k cw 0 4)) #f)
+                           (else (loop (+ i 1)))))))
+
+;; Frequencies track the weights. Loose bounds on purpose — this is here to
+;; catch a sampler that ignores the weights or inverts them, not to test
+;; the RNG's uniformity, which layer 13 already does.
+(assert-equal "frequencies follow the weights"
+              #t (let ((k (rng-make 0 9 0))
+                       (n (vector 0 0 0 0)))
+                   (let loop ((i 0))
+                     (if (< i 8000)
+                         (let ((j (rng-categorical! k cw 0 4)))
+                           (vector-set! n j (+ 1 (vector-ref n j)))
+                           (loop (+ i 1)))))
+                   ;; Expected 800 / 0 / 2400 / 4800 out of 8000. The
+                   ;; bands are wide enough that no plausible sampling run
+                   ;; trips them, and narrow enough that ignoring or
+                   ;; inverting the weights cannot pass.
+                   (and (< 600  (vector-ref n 0) 1000)
+                        (= 0    (vector-ref n 1))
+                        (< 2100 (vector-ref n 2) 2700)
+                        (< 4500 (vector-ref n 3) 5100))))
+
+;; Unnormalised is fine — the total is computed here — so a caller never
+;; has to normalise a buffer purely to satisfy the sampler.
+(assert-equal "weights need not sum to one"
+              #t (let ((w (bytes-view (make-bytes (* 2 8)) :f64)))
+                   (view-set! w 0 0.0) (view-set! w 1 17.5)
+                   (= 1 (rng-categorical! (rng-make 0 2 0) w 0 2))))
+
+;; A window inside a larger buffer returns an ABSOLUTE index, because the
+;; caller indexes parallel columns with it.
+(assert-equal "a windowed call returns an absolute index"
+              2 (let ((w (bytes-view (make-bytes (* 4 8)) :f64)))
+                  (view-set! w 2 1.0)
+                  (rng-categorical! (rng-make 0 3 0) w 2 2)))
+
+;; Three refusals, each naming its own reason rather than returning
+;; something plausible. All-zero weights in particular would otherwise fall
+;; off the end of the scan and hand back an out-of-range index.
+(assert-equal "all-zero weights are refused"
+              #t (param-fails?
+                  (lambda () (rng-categorical! (rng-make 0 1 0)
+                                               (bytes-view (make-bytes 16) :f64) 0 2))))
+(assert-equal "a negative weight is refused"
+              #t (param-fails?
+                  (lambda () (let ((w (bytes-view (make-bytes 16) :f64)))
+                               (view-set! w 0 -1.0) (view-set! w 1 2.0)
+                               (rng-categorical! (rng-make 0 1 0) w 0 2)))))
+(assert-equal "and a range past the end of the view"
+              #t (param-fails? (lambda () (rng-categorical! (rng-make 0 1 0) cw 0 9))))
+
+;;--- rng-fill-categorical! ----------------------------------------------
+;; The same selection, n at a time, in ONE pass over the weights. Picking
+;; one at a time rescans them per draw, which is quadratic exactly when n
+;; approaches the population — the resampling case. Measured at 20000 from
+;; 20000: 389ms one at a time against 0.22ms here.
+
+(define fout (bytes-view (make-bytes (* 20 4)) :i32))
+(rng-fill-categorical! (rng-make 0 1 0) fout 0 20 cw)
+
+(assert-equal "indices come back exact, ready for view-ref"
+              #t (let loop ((i 0))
+                   (cond ((= i 20) #t)
+                         ((not (exact? (view-ref fout i))) #f)
+                         (else (loop (+ i 1))))))
+
+;; STRATIFIED, and this is the assertion that says so. Twenty picks against
+;; weights 1:0:3:6 are not approximately proportional, they are EXACTLY
+;; 2/0/6/12 — the pointers are spaced evenly rather than drawn
+;; independently, so the counts cannot come out otherwise. An
+;; implementation that quietly fell back to n independent draws would land
+;; near these numbers and essentially never on them.
+(assert-equal "the split is exact, not approximate"
+              '(2 0 6 12)
+              (let ((n (vector 0 0 0 0)))
+                (let loop ((i 0))
+                  (if (< i 20)
+                      (let ((j (view-ref fout i)))
+                        (vector-set! n j (+ 1 (vector-ref n j)))
+                        (loop (+ i 1)))))
+                (list (vector-ref n 0) (vector-ref n 1)
+                      (vector-ref n 2) (vector-ref n 3))))
+
+(assert-equal "a zero weight is never filled in"
+              #t (let ((o (bytes-view (make-bytes (* 500 4)) :i32)))
+                   (rng-fill-categorical! (rng-make 0 4 0) o 0 500 cw)
+                   (let loop ((i 0))
+                     (cond ((= i 500) #t)
+                           ((= 1 (view-ref o i)) #f)
+                           (else (loop (+ i 1)))))))
+
+(assert-equal "weights need not sum to one here either"
+              #t (let ((w (bytes-view (make-bytes (* 2 8)) :f64))
+                       (o (bytes-view (make-bytes (* 3 4)) :i32)))
+                   (view-set! w 0 0.0) (view-set! w 1 17.5)
+                   (rng-fill-categorical! (rng-make 0 2 0) o 0 3 w)
+                   (and (= 1 (view-ref o 0)) (= 1 (view-ref o 1)) (= 1 (view-ref o 2)))))
+
+;; Writes only inside its window, so a caller can fill one region of a
+;; larger index buffer without disturbing what is already there.
+(assert-equal "it fills only the window it was given"
+              '(0 0)
+              (let ((o (bytes-view (make-bytes (* 4 4)) :i32)))
+                (rng-fill-categorical! (rng-make 0 6 0) o 2 2 cw)
+                (list (view-ref o 0) (view-ref o 1))))
+
+;; A float output view would work here and then fail at the view-ref that
+;; consumes it, one call away from the mistake.
+(assert-equal "a float output view is refused"
+              #t (param-fails?
+                  (lambda () (rng-fill-categorical! (rng-make 0 1 0)
+                                                    (bytes-view (make-bytes (* 4 8)) :f64)
+                                                    0 4 cw))))
+(assert-equal "all-zero weights are refused"
+              #t (param-fails?
+                  (lambda () (rng-fill-categorical! (rng-make 0 1 0) fout 0 4
+                                                    (bytes-view (make-bytes 16) :f64)))))
+(assert-equal "and a window past the end of the output"
+              #t (param-fails?
+                  (lambda () (rng-fill-categorical! (rng-make 0 1 0) fout 18 9 cw))))
+
 (suite-summary)

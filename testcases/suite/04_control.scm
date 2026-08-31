@@ -166,4 +166,38 @@
 (assert-equal "an empty datum list never matches"
               'fell (case 1 (() 'no) (else 'fell)))
 
+;;--- the evaluation budget ----------------------------------------------
+;; An embedder that cannot afford to block (the browser) gives one
+;; top-level evaluation a wall-clock slice. That is right for a typo and
+;; wrong for a computation that is expensive on purpose, and only the
+;; program knows which it is — so it can say, and put it back.
+
+(assert-equal "the budget reads as a number" #t (number? (eval-budget-ms)))
+
+;; The setter returns the PREVIOUS value, which is what lets the save and
+;; the override be one call instead of two that can drift apart.
+(assert-equal "setting returns the previous budget"
+              #t (let* ((was (eval-budget-ms))
+                        (back (eval-budget-ms! 1234)))
+                   (and (= back was)
+                        (= 1234 (eval-budget-ms))
+                        (begin (eval-budget-ms! was) #t))))
+
+;; The pairing this exists for. unwind-protect restores even when the body
+;; raises, which is the case that matters: a fit that dies inside a widened
+;; budget must not leave the budget widened for everything after it.
+(assert-equal "unwind-protect puts the budget back after a raise"
+              #t (let ((was (eval-budget-ms)))
+                   (guard (e (#t #t))
+                     (let ((prev (eval-budget-ms! 9999)))
+                       (unwind-protect
+                         (raise 'boom)
+                         (eval-budget-ms! prev))))
+                   (= was (eval-budget-ms))))
+
+(assert-equal "a non-positive budget is refused"
+              'raised (guard (e (#t 'raised)) (eval-budget-ms! 0)))
+(assert-equal "and a budget that is not a number"
+              'raised (guard (e (#t 'raised)) (eval-budget-ms! "soon")))
+
 (suite-summary)

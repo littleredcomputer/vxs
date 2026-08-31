@@ -629,8 +629,13 @@ restart:
     // Wall-clock backstop, sampled every 1024 instructions (bitmask, not
     // a divide) and short-circuited away entirely when no deadline is
     // set — the common native/synchronous case pays one predicted branch.
+    // deadline_override is read HERE and not hoisted out of the loop: the
+    // program can set it from inside this very dispatch (eval-budget-ms!),
+    // and a value sampled at entry would miss exactly the call that asked
+    // for more room.
     if (deadline != NO_DEADLINE && (count & 0x3FF) == 0 &&
-        std::chrono::steady_clock::now() >= deadline) {
+        std::chrono::steady_clock::now() >=
+            (deadline_override != NO_DEADLINE ? deadline_override : deadline)) {
       frame->ip = ip;
       f.state = Fiber::State::Suspended; // suspended, just not voluntarily —
       return StepResult::Preempted;      // the result carries that bit
@@ -1199,7 +1204,8 @@ restart:
           // we await may itself be waiting on a third fiber, and driving
           // one in isolation livelocks the chain. Everyone but us runs.
           while (!fut->is_completed) {
-            if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >= deadline) {
+            if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >=
+                    (deadline_override != NO_DEADLINE ? deadline_override : deadline)) {
               frame->ip = ip - 1;   // resumable: re-touch on the next slice
               f.push(fut_val);
               return StepResult::Preempted;
@@ -1420,7 +1426,8 @@ size_t VM::step_all_active_fibers(size_t instructions_per_fiber,
     // The cursor stays put, so the next call picks up exactly here — that
     // is what turns "too much work" into every fiber running slower
     // rather than a lucky prefix running at full rate and the rest never.
-    if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >= deadline) {
+    if (deadline != NO_DEADLINE && std::chrono::steady_clock::now() >=
+            (deadline_override != NO_DEADLINE ? deadline_override : deadline)) {
       break;
     }
     if (round_cursor >= active_fibers.size()) round_cursor = 0;
@@ -3456,6 +3463,217 @@ void VM::init_primitives() {
     }
     return Value::unspecified();
   }, 4, 4));
+
+  // (rng-categorical! rng view start count) -> an index in [start, start+count)
+  //
+  // Draws one index with probability proportional to the weight stored
+  // there. The weights are LINEAR and need not be normalised — the total
+  // is computed here — which is what lets a caller pass the same buffer it
+  // is about to use for anything else, and skips a normalising pass that
+  // exists only to satisfy the sampler.
+  //
+  // Native because the Scheme version of this is a walk over the running
+  // sum, and the loop is the whole operation: written out it is a dozen
+  // lines of accumulator threading at every call site that resamples, and
+  // every one of those is a place to get the boundary wrong.
+  //
+  // COST, and the shape of it matters more than the constant: this is one
+  // scan per call, so drawing n indices is O(n*count). That is free when n
+  // is small against count — 40 picks from 5000 weights is 0.2ms — and it
+  // is quadratic when they are equal, which is exactly the SMC resampling
+  // step: 5000 from 5000 measured 26ms, 20000 from 20000 measured 389ms.
+  // So this is the right primitive for choosing a FEW particles and the
+  // wrong one for resampling a whole population. That case wants a fill
+  // variant walking sorted uniforms in one O(count + n) pass, which is
+  // also where stratified and systematic resampling would live; not built
+  // here because nothing calls it yet, and a guess at its signature would
+  // be worse than its absence.
+  //
+  // The scan is inclusive-from-below and the result is clamped to the last
+  // index with weight: with floating-point addition the running sum can
+  // finish a hair under `total`, so a u drawn just below 1 can walk off
+  // the end. Returning the last positive index there is correct — that is
+  // the bucket the mass belongs to — where falling off would be an
+  // out-of-range index handed back as if it were a sample.
+  def_global("rng-categorical!", heap.make_subr("rng-categorical!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-categorical!: expected an rng");
+    if (!Heap::is_view(args[1])) vm.raise_contract("rng-categorical!: expected a view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-categorical!: not an rng state buffer");
+    ObjView *view = args[1].as_ptr<ObjView>();
+    if (!args[2].is_number() || !args[3].is_number()) {
+      vm.raise_contract("rng-categorical!: expected (rng view start count)");
+    }
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long count = static_cast<long>(vxs_as_num(args[3]));
+    if (start < 0 || count <= 0 ||
+        static_cast<long>(start + count) > static_cast<long>(view->count)) {
+      vm.raise_contract("rng-categorical!: range out of bounds for this view");
+    }
+
+    double total = 0.0;
+    long last = -1;
+    for (long i = 0; i < count; ++i) {
+      double w = vxs_view_load(view, static_cast<size_t>(start + i));
+      // A negative weight is a caller error, not a small probability: it
+      // makes the total disagree with the scan and silently biases every
+      // draw that follows. Said here rather than discovered as a skewed
+      // histogram.
+      if (!(w >= 0.0)) {
+        vm.raise_contract("rng-categorical!: weights must be non-negative and not NaN");
+      }
+      total += w;
+      if (w > 0.0) last = i;
+    }
+    if (last < 0) vm.raise_contract("rng-categorical!: every weight is zero");
+
+    uint32_t *w32 = reinterpret_cast<uint32_t *>(b->data.data());
+    double m = static_cast<double>(vxs_rng_u32(w32) >> 9);
+    double u = (m / 8388608.0) * total;
+
+    double acc = 0.0;
+    for (long i = 0; i < count; ++i) {
+      acc += vxs_view_load(view, static_cast<size_t>(start + i));
+      // An INTEGER, not a double: this is an index and its whole purpose is
+      // to be handed straight to view-ref, which refuses a float. Returning
+      // 2848.0 where 2848 was meant is a contract error one call later,
+      // pointing at the innocent reader rather than at this line.
+      if (u < acc) return Value::from_int(static_cast<int32_t>(start + i));
+    }
+    return Value::from_int(static_cast<int32_t>(start + last));
+  }, 4, 4));
+
+  // (eval-budget-ms)     -> the wall-clock budget for one evaluation, in ms
+  // (eval-budget-ms! n)  -> set it, and restart the running clock; returns
+  //                         the PREVIOUS value
+  //
+  // The browser gives a top-level evaluation a fixed slice so a runaway
+  // program cannot freeze the tab. That is right for a typo and wrong for
+  // a deliberately expensive computation, and the program is the only
+  // thing that knows which it is — so it can say:
+  //
+  //   (let ((was (eval-budget-ms)))
+  //     (dynamic-wind (lambda () (eval-budget-ms! 8000))
+  //                   (lambda () ...the expensive part...)
+  //                   (lambda () (eval-budget-ms! was))))
+  //
+  // The setter restarts the clock from NOW rather than restoring an
+  // absolute instant, and that is the only sane reading: by the time the
+  // after-thunk runs the original deadline has usually passed, so handing
+  // it back would time the program out during its own cleanup. What is
+  // restored is the POLICY — the next evaluation gets its normal slice.
+  //
+  // Inert on a native run, which has no deadline to begin with; the
+  // override replaces a deadline and never creates one, so a portable
+  // program cannot acquire a timeout by asking for a longer one.
+  // (rng-fill-categorical! rng out start count weights)
+  //
+  // Fill out[start, start+count) with `count` indices into `weights`,
+  // chosen with probability proportional to weight. The whole weights view
+  // is the population; slice it with (bytes-view b :f64 offset) to select
+  // over part of one. Weights are linear and need not be normalised.
+  //
+  // ONE PASS, and that is the entire reason this exists next to
+  // rng-categorical!. Picking n indices one at a time rescans the weights
+  // n times, which is quadratic when n approaches the population size —
+  // the case that matters, since resampling a particle set draws exactly
+  // as many as it has. Measured at 20000 from 20000: 389ms one at a time,
+  // 0.25ms here.
+  //
+  // STRATIFIED, NOT INDEPENDENT, which is the honest name for what makes
+  // the single pass possible. The n pointers are spaced evenly at
+  // (m + u)/n of the total for one shared u, so they arrive already in
+  // order and a single walk of the running sum serves all of them. That is
+  // systematic resampling, and it is not n independent categorical draws:
+  // the picks are negatively correlated, which is why it is the standard
+  // choice here — it has strictly lower variance than drawing them
+  // independently, and a population resampled this way cannot come back
+  // wildly over- or under-representing a particle by luck. When genuine
+  // independence is wanted, call rng-categorical! in a loop and pay for it.
+  //
+  // Consumes exactly one block of randomness however large n is, so a
+  // caller's stream advances by one whether it drew forty indices or forty
+  // thousand.
+  def_global("rng-fill-categorical!", heap.make_subr("rng-fill-categorical!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!Heap::is_bytes(args[0])) vm.raise_contract("rng-fill-categorical!: expected an rng");
+    if (!Heap::is_view(args[1])) vm.raise_contract("rng-fill-categorical!: expected an output view");
+    if (!Heap::is_view(args[4])) vm.raise_contract("rng-fill-categorical!: expected a weights view");
+    auto *b = args[0].as_ptr<ObjBytes>();
+    if (b->data.size() != 13 * 4) vm.raise_contract("rng-fill-categorical!: not an rng state buffer");
+    ObjView *out = args[1].as_ptr<ObjView>();
+    ObjView *wv  = args[4].as_ptr<ObjView>();
+    if (!args[2].is_number() || !args[3].is_number()) {
+      vm.raise_contract("rng-fill-categorical!: expected (rng out start count weights)");
+    }
+    long start = static_cast<long>(vxs_as_num(args[2]));
+    long n     = static_cast<long>(vxs_as_num(args[3]));
+    if (start < 0 || n <= 0 || start + n > static_cast<long>(out->count)) {
+      vm.raise_contract("rng-fill-categorical!: range out of bounds for the output view");
+    }
+    // An integer view, because these are indices and the only thing anyone
+    // does with them is hand them to view-ref, which refuses a float. A
+    // :f64 buffer here would work and then fail one call later.
+    if (out->elem != ElemType::I32 && out->elem != ElemType::U32) {
+      vm.raise_contract("rng-fill-categorical!: the output needs an :i32 or :u32 view");
+    }
+    long count = static_cast<long>(wv->count);
+    if (count <= 0) vm.raise_contract("rng-fill-categorical!: the weights view is empty");
+
+    double total = 0.0;
+    long last = -1;
+    for (long i = 0; i < count; ++i) {
+      double w = vxs_view_load(wv, static_cast<size_t>(i));
+      if (!(w >= 0.0)) {
+        vm.raise_contract("rng-fill-categorical!: weights must be non-negative and not NaN");
+      }
+      total += w;
+      if (w > 0.0) last = i;
+    }
+    if (last < 0) vm.raise_contract("rng-fill-categorical!: every weight is zero");
+
+    uint32_t *w32 = reinterpret_cast<uint32_t *>(b->data.data());
+    double u = static_cast<double>(vxs_rng_u32(w32) >> 9) / 8388608.0;
+
+    double step = total / static_cast<double>(n);
+    double target = u * step;
+    long j = 0;
+    double acc = vxs_view_load(wv, 0);
+    uint8_t *obase = out->bytes.as_ptr<ObjBytes>()->data.data() + out->offset;
+    for (long m = 0; m < n; ++m) {
+      // Bounded by `last`, never by count-1: a trailing run of zero
+      // weights is reachable by floating-point drift in the running sum,
+      // and stopping there would report an impossible particle as chosen.
+      while (target > acc && j < last) {
+        ++j;
+        acc += vxs_view_load(wv, static_cast<size_t>(j));
+      }
+      uint8_t *p = obase + static_cast<size_t>(start + m) * out->stride;
+      if (out->elem == ElemType::I32) {
+        int32_t x = static_cast<int32_t>(j);
+        std::memcpy(p, &x, 4);
+      } else {
+        uint32_t x = static_cast<uint32_t>(j);
+        std::memcpy(p, &x, 4);
+      }
+      target += step;
+    }
+    return Value::unspecified();
+  }, 5, 5));
+
+  def_global("eval-budget-ms", heap.make_subr("eval-budget-ms", [](VM &vm, uint32_t, Value *) -> Value {
+    return Value::from_double(vm.eval_budget_ms);
+  }, 0, 0));
+
+  def_global("eval-budget-ms!", heap.make_subr("eval-budget-ms!", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) vm.raise_contract("eval-budget-ms!: expected a number of milliseconds");
+    double ms = vxs_as_num(args[0]);
+    if (!(ms > 0.0)) vm.raise_contract("eval-budget-ms!: the budget must be positive");
+    double was = vm.eval_budget_ms;
+    vm.eval_budget_ms = ms;
+    vm.deadline_override = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(static_cast<long long>(ms));
+    return Value::from_double(was);
+  }, 1, 1));
 
   def_global("open-byte-sink", heap.make_subr("open-byte-sink", [](VM &vm, uint32_t, Value *) -> Value {
     return vm.heap.make_byte_sink();
