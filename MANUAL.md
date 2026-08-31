@@ -1240,6 +1240,32 @@ comparing host and device values past the digit where they can agree.
 
 ---
 
+### Parameters may be columns
+
+Every distribution parameter — `loc`, `scale`, `low`, `high`, `p` — is
+either a **number or a view**, in both the fills and the sums:
+
+```scheme
+(logpdf-sum-normal ys 0 n means 0.5)   ; a mean per element, one scale
+(rng-fill-normal! r ys 0 n means 0.5)  ; draw n points around a curve
+```
+
+A fitted curve is what forces this: every `y_i` is scored against `f(x_i)`,
+so `loc` differs per element while `scale` does not. Requiring both to be
+scalars makes scoring a curve a Scheme loop; requiring both to be views
+makes you allocate a column of identical numbers.
+
+`log(scale)` still hoists out of the loop when `scale` is constant, which
+is the common case. A per-element scale pays a `log` each, as it must.
+
+A view too short for the range is refused **once**, before the loop, rather
+than read off the end per element.
+
+⚠️ A scale column must be **positive** — reusing a means column that starts
+at zero puts a division by zero in it.
+
+---
+
 ### Buffer reductions
 
 ```scheme
