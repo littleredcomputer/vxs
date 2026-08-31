@@ -878,4 +878,59 @@
               #t (param-fails?
                   (lambda () (rng-fill-categorical! (rng-make 0 1 0) fout 18 9 cw))))
 
+;; EVERY SLOT MUST REACH EVERY PARTICLE, and this is the assertion the
+;; first version of this primitive failed. Spacing the pointers from a
+;; fixed anchor at zero — pointers at (m + u)/n, the textbook form — traps
+;; output slot m inside the m'th 1/n of the weight: over ten equal buckets
+;; with n = 4, out[0] landed on index 0, 1 or 2 in 4000 trials out of 4000
+;; and never once on the other seven. Aggregate counts are unbiased either
+;; way, which is why nothing else here noticed.
+;;
+;; Rotating by a uniform over the whole total fixes it. Each slot is then
+;; marginally proportional to weight, with the spacing — and the variance
+;; reduction that is the entire reason to stratify — untouched.
+;;
+;; Ten equal buckets, 400 trials, so a given bucket is missed at one slot
+;; with probability 0.9^400, which is about 1e-18. A failure here is the
+;; anchor coming back, not luck.
+(assert-equal "every output slot can reach every particle"
+              #t (let ((eq (bytes-view (make-bytes (* 10 8)) :f64))
+                       (o  (bytes-view (make-bytes (* 4 4)) :i32))
+                       (hit0 (make-vector 10 0))
+                       (hit3 (make-vector 10 0)))
+                   (let loop ((i 0))
+                     (if (< i 10) (begin (view-set! eq i 1.0) (loop (+ i 1)))))
+                   (let trial ((t 0))
+                     (if (< t 400)
+                         (begin
+                           (rng-fill-categorical! (rng-make 0 t 0) o 0 4 eq)
+                           (vector-set! hit0 (view-ref o 0) 1)
+                           (vector-set! hit3 (view-ref o 3) 1)
+                           (trial (+ t 1)))))
+                   (let check ((i 0))
+                     (cond ((= i 10) #t)
+                           ((= 0 (vector-ref hit0 i)) #f)
+                           ((= 0 (vector-ref hit3 i)) #f)
+                           (else (check (+ i 1)))))))
+
+;; And the counts stay exact under the rotation — it permutes which slot
+;; gets what without changing how many of each there are.
+(assert-equal "the exact split survives the rotation, at every key"
+              #t (let ((o (bytes-view (make-bytes (* 20 4)) :i32)))
+                   (let trial ((t 1))
+                     (if (> t 8)
+                         #t
+                         (begin
+                           (rng-fill-categorical! (rng-make 0 t 0) o 0 20 cw)
+                           (let ((c (make-vector 4 0)))
+                             (let loop ((i 0))
+                               (if (< i 20)
+                                   (let ((j (view-ref o i)))
+                                     (vector-set! c j (+ 1 (vector-ref c j)))
+                                     (loop (+ i 1)))))
+                             (if (and (= 2 (vector-ref c 0)) (= 0 (vector-ref c 1))
+                                      (= 6 (vector-ref c 2)) (= 12 (vector-ref c 3)))
+                                 (trial (+ t 1))
+                                 #f)))))))
+
 (suite-summary)
