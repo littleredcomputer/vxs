@@ -198,7 +198,12 @@ async function run() {
     vxsClear();
     const out = vxsEval(code);
 
-    if (typeof out === 'string' && /error|exception/i.test(out)) {
+    // `timeout` is in this list because it was NOT, and a preset that blew
+    // the 750ms evaluation cap reported "[Timeout] evaluation exceeded
+    // 750ms and was stopped" — which contains neither "error" nor
+    // "exception", so it sailed through as a pass. A preset that never
+    // finished looked identical to one that finished perfectly.
+    if (typeof out === 'string' && /error|exception|timeout/i.test(out)) {
       fail(name, `evaluation reported: ${out}`);
       continue;
     }
