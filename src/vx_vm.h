@@ -797,11 +797,13 @@ public:
     f->backing_future = Value::nil();
   }
 
-  // Misuse of these primitives RAISES rather than setting Fiber::State::Error.
-  // The older list primitives (car, cdr, ...) set the fiber state, which
-  // `guard` cannot catch — a known gap. New code moves toward catchable, so
-  // a workbench can report a bad buffer index and carry on rather than
-  // losing the fiber. Same choice already made for a failed future.
+  // Misuse of these primitives RAISES rather than setting Fiber::State::Error,
+  // so `guard` can catch it in place. MANUAL §6 has since decided the
+  // OPPOSITE convergence — a contract violation is a bug, uncatchable in
+  // place, observed at a fiber boundary via touch — so these sites are
+  // slated to converge DOWNWARD onto the fiber-state path, not the other
+  // way around. Until that lands, a new contract check should use
+  // numeric_contract below (or the car-style fiber-state block), not this.
   [[noreturn]] inline void raise_contract(const std::string &msg) {
     Value m = heap.make_string(msg);
     push_temp_root(&m);
@@ -821,6 +823,25 @@ public:
     if (Heap::is_view(v)) return v.as_ptr<ObjView>();
     raise_contract(std::string(who) +
         ": contract violation, expected a view, got " + format_value(v));
+  }
+
+  // The fiber-state contract path (per §6: converge downward), phrased so
+  // a subr can write `return contract_violation(who, ...)` and let the
+  // dispatch loop notice before the unspecified ever lands on the stack.
+  inline Value contract_violation(const char *who, const std::string &complaint) {
+    if (current_fiber) {
+      current_fiber->state = Fiber::State::Error;
+      current_fiber->error_message = std::string("[VM Error] ") + who +
+          ": contract violation, " + complaint;
+    }
+    return Value::unspecified();
+  }
+
+  // A non-number reaching arithmetic. Before this existed, as_real()'s
+  // fall-through turned it into 0.0 — so a typo'd variable gave a
+  // plausible number, and (< 'typo x) a plausible boolean.
+  inline Value numeric_contract(const char *who, Value got) {
+    return contract_violation(who, "expected a number, got " + format_value(got));
   }
 
   // How to drop the host-side object a handle names. Installed by the

@@ -1763,12 +1763,13 @@ static const char *embedded_lib_source(const std::string &path) {
 
 void VM::init_primitives() {
   // 1. Math & Arithmetic
-  auto subr_add = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_add = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_int(0);
     bool all_int = true;
     int64_t isum = 0;
     double dsum = 0.0;
     for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("+", args[i]);
       if (!args[i].is_int()) all_int = false;
       if (all_int) isum += args[i].as_int();
       dsum += args[i].as_real();
@@ -1781,7 +1782,10 @@ void VM::init_primitives() {
   };
   def_global("+", heap.make_subr("+", subr_add, 0, UINT32_MAX));
 
-  auto subr_sub = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_sub = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("-", args[i]);
+    }
     if (argc == 1) {
       if (args[0].is_int()) {
         int64_t v = -static_cast<int64_t>(args[0].as_int());
@@ -1807,12 +1811,13 @@ void VM::init_primitives() {
   };
   def_global("-", heap.make_subr("-", subr_sub, 1, UINT32_MAX));
 
-  auto subr_mul = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_mul = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_int(1);
     bool all_int = true;
     int64_t iprod = 1;
     double dprod = 1.0;
     for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("*", args[i]);
       if (!args[i].is_int()) all_int = false;
       if (all_int) iprod *= args[i].as_int();
       dprod *= args[i].as_real();
@@ -1825,7 +1830,10 @@ void VM::init_primitives() {
   };
   def_global("*", heap.make_subr("*", subr_mul, 0, UINT32_MAX));
 
-  auto subr_div = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_div = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("/", args[i]);
+    }
     if (argc == 1) return Value::from_double(1.0 / args[0].as_real());
     double quot = args[0].as_real();
     for (uint32_t i = 1; i < argc; ++i) quot /= args[i].as_real();
@@ -1846,7 +1854,10 @@ void VM::init_primitives() {
 
   // Comparisons — R4RS numeric comparisons are N-ary: (< a1 a2 a3 ...) holds
   // iff every consecutive pair satisfies the relation.
-  auto subr_num_eq = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_num_eq = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("=", args[i]);
+    }
     for (uint32_t i = 1; i < argc; ++i) {
       if (!(args[i - 1].as_real() == args[i].as_real())) return Value::boolean_false();
     }
@@ -1854,7 +1865,10 @@ void VM::init_primitives() {
   };
   def_global("=", heap.make_subr("=", subr_num_eq, 1, UINT32_MAX));
 
-  auto subr_lt = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_lt = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("<", args[i]);
+    }
     for (uint32_t i = 1; i < argc; ++i) {
       if (!(args[i - 1].as_real() < args[i].as_real())) return Value::boolean_false();
     }
@@ -1862,7 +1876,10 @@ void VM::init_primitives() {
   };
   def_global("<", heap.make_subr("<", subr_lt, 1, UINT32_MAX));
 
-  auto subr_le = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_le = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("<=", args[i]);
+    }
     for (uint32_t i = 1; i < argc; ++i) {
       if (!(args[i - 1].as_real() <= args[i].as_real())) return Value::boolean_false();
     }
@@ -1870,7 +1887,10 @@ void VM::init_primitives() {
   };
   def_global("<=", heap.make_subr("<=", subr_le, 1, UINT32_MAX));
 
-  auto subr_gt = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_gt = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract(">", args[i]);
+    }
     for (uint32_t i = 1; i < argc; ++i) {
       if (!(args[i - 1].as_real() > args[i].as_real())) return Value::boolean_false();
     }
@@ -1878,7 +1898,10 @@ void VM::init_primitives() {
   };
   def_global(">", heap.make_subr(">", subr_gt, 1, UINT32_MAX));
 
-  auto subr_ge = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_ge = [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract(">=", args[i]);
+    }
     for (uint32_t i = 1; i < argc; ++i) {
       if (!(args[i - 1].as_real() >= args[i].as_real())) return Value::boolean_false();
     }
@@ -1908,7 +1931,8 @@ void VM::init_primitives() {
   };
   def_global("cos", heap.make_subr("cos", subr_cos, 1, 1));
 
-  auto subr_exp = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_exp = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("exp", args[0]);
     return Value::from_double(std::exp(args[0].as_real()));
   };
   def_global("exp", heap.make_subr("exp", subr_exp, 1, 1));
@@ -1920,47 +1944,55 @@ void VM::init_primitives() {
   // convention IEEE 754's default rounding mode uses: std::nearbyint
   // (unlike std::round, which always rounds half away from zero) honors
   // the current rounding mode, which defaults to round-to-nearest-even.
-  auto subr_floor = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_floor = [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) return args[0];
+    if (!args[0].is_number()) return vm.numeric_contract("floor", args[0]);
     return Value::from_double(std::floor(args[0].as_real()));
   };
   def_global("floor", heap.make_subr("floor", subr_floor, 1, 1));
 
-  auto subr_ceiling = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_ceiling = [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) return args[0];
+    if (!args[0].is_number()) return vm.numeric_contract("ceiling", args[0]);
     return Value::from_double(std::ceil(args[0].as_real()));
   };
   def_global("ceiling", heap.make_subr("ceiling", subr_ceiling, 1, 1));
 
-  auto subr_round = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_round = [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) return args[0];
+    if (!args[0].is_number()) return vm.numeric_contract("round", args[0]);
     return Value::from_double(std::nearbyint(args[0].as_real()));
   };
   def_global("round", heap.make_subr("round", subr_round, 1, 1));
 
-  auto subr_inexact_exact = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_inexact_exact = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("inexact->exact", args[0]);
     return Value::from_int(static_cast<int32_t>(args[0].as_real()));
   };
   def_global("inexact->exact", heap.make_subr("inexact->exact", subr_inexact_exact, 1, 1));
-  def_global("exact->inexact", heap.make_subr("exact->inexact", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("exact->inexact", heap.make_subr("exact->inexact", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("exact->inexact", args[0]);
     return Value::from_double(args[0].as_real());
   }, 1, 1));
 
-  auto subr_abs = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_abs = [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) return Value::from_int(std::abs(args[0].as_int()));
+    if (!args[0].is_number()) return vm.numeric_contract("abs", args[0]);
     return Value::from_double(std::abs(args[0].as_real()));
   };
   def_global("abs", heap.make_subr("abs", subr_abs, 1, 1));
 
-  auto subr_sqrt = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_sqrt = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("sqrt", args[0]);
     return Value::from_double(std::sqrt(args[0].as_real()));
   };
   def_global("sqrt", heap.make_subr("sqrt", subr_sqrt, 1, 1));
 
-  auto subr_random = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_random = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) {
       return Value::from_double(static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX));
     }
+    if (!args[0].is_number()) return vm.numeric_contract("random", args[0]);
     if (args[0].is_int()) {
       int32_t n = args[0].as_int();
       return Value::from_int(n > 0 ? (std::rand() % n) : 0);
@@ -1972,8 +2004,11 @@ void VM::init_primitives() {
   // R4RS exactness contagion: if any argument is inexact, the result must
   // be inexact too, even when the winning value came from an exact
   // argument — (max 3.9 4) is 4.0, not exact 4.
-  auto subr_max = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_max = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_double(-std::numeric_limits<double>::infinity());
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("max", args[i]);
+    }
     Value best = args[0];
     bool inexact = args[0].is_double();
     for (uint32_t i = 1; i < argc; ++i) {
@@ -1985,8 +2020,11 @@ void VM::init_primitives() {
   };
   def_global("max", heap.make_subr("max", subr_max, 1, UINT32_MAX));
 
-  auto subr_min = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_min = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_double(std::numeric_limits<double>::infinity());
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("min", args[i]);
+    }
     Value best = args[0];
     bool inexact = args[0].is_double();
     for (uint32_t i = 1; i < argc; ++i) {
@@ -1998,8 +2036,11 @@ void VM::init_primitives() {
   };
   def_global("min", heap.make_subr("min", subr_min, 1, UINT32_MAX));
 
-  auto subr_gcd = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_gcd = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_int(0);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("gcd", args[i]);
+    }
     int64_t g = std::abs(args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real()));
     for (uint32_t i = 1; i < argc; ++i) {
       int64_t b = std::abs(args[i].is_int() ? args[i].as_int() : static_cast<int64_t>(args[i].as_real()));
@@ -2009,8 +2050,11 @@ void VM::init_primitives() {
   };
   def_global("gcd", heap.make_subr("gcd", subr_gcd, 0, UINT32_MAX));
 
-  auto subr_lcm = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_lcm = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (argc == 0) return Value::from_int(1);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("lcm", args[i]);
+    }
     int64_t l = std::abs(args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real()));
     for (uint32_t i = 1; i < argc; ++i) {
       int64_t b = std::abs(args[i].is_int() ? args[i].as_int() : static_cast<int64_t>(args[i].as_real()));
@@ -2020,17 +2064,20 @@ void VM::init_primitives() {
   };
   def_global("lcm", heap.make_subr("lcm", subr_lcm, 0, UINT32_MAX));
 
-  def_global("sin", heap.make_subr("sin", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::sin(args[0].as_real())); }, 1, 1));
-  def_global("cos", heap.make_subr("cos", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::cos(args[0].as_real())); }, 1, 1));
-  def_global("tan", heap.make_subr("tan", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::tan(args[0].as_real())); }, 1, 1));
-  def_global("asin", heap.make_subr("asin", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::asin(args[0].as_real())); }, 1, 1));
-  def_global("acos", heap.make_subr("acos", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::acos(args[0].as_real())); }, 1, 1));
-  def_global("atan", heap.make_subr("atan", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("sin", heap.make_subr("sin", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("sin", args[0]); return Value::from_double(std::sin(args[0].as_real())); }, 1, 1));
+  def_global("cos", heap.make_subr("cos", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("cos", args[0]); return Value::from_double(std::cos(args[0].as_real())); }, 1, 1));
+  def_global("tan", heap.make_subr("tan", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("tan", args[0]); return Value::from_double(std::tan(args[0].as_real())); }, 1, 1));
+  def_global("asin", heap.make_subr("asin", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("asin", args[0]); return Value::from_double(std::asin(args[0].as_real())); }, 1, 1));
+  def_global("acos", heap.make_subr("acos", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("acos", args[0]); return Value::from_double(std::acos(args[0].as_real())); }, 1, 1));
+  def_global("atan", heap.make_subr("atan", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("atan", args[i]);
+    }
     if (argc == 1) return Value::from_double(std::atan(args[0].as_real()));
     return Value::from_double(std::atan2(args[0].as_real(), args[1].as_real()));
   }, 1, 2));
-  def_global("expt", heap.make_subr("expt", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::pow(args[0].as_real(), args[1].as_real())); }, 2, 2));
-  def_global("log", heap.make_subr("log", [](VM &, uint32_t, Value *args) -> Value { return Value::from_double(std::log(args[0].as_real())); }, 1, 1));
+  def_global("expt", heap.make_subr("expt", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("expt", args[0]); if (!args[1].is_number()) return vm.numeric_contract("expt", args[1]); return Value::from_double(std::pow(args[0].as_real(), args[1].as_real())); }, 2, 2));
+  def_global("log", heap.make_subr("log", [](VM &vm, uint32_t, Value *args) -> Value { if (!args[0].is_number()) return vm.numeric_contract("log", args[0]); return Value::from_double(std::log(args[0].as_real())); }, 1, 1));
 
   // Cons / List
   auto subr_cons = [](VM &vm, uint32_t, Value *args) -> Value {
@@ -2596,13 +2643,14 @@ void VM::init_primitives() {
     return Value::from_bool(args[0].is_double() && std::isfinite(args[0].as_double()));
   }, 1, 1));
 
-  def_global("square", heap.make_subr("square", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("square", heap.make_subr("square", [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) {
       int64_t v = args[0].as_int();
       int64_t sq = v * v;
       if (sq >= INT32_MIN && sq <= INT32_MAX) return Value::from_int(static_cast<int32_t>(sq));
       return Value::from_double(static_cast<double>(sq));
     }
+    if (!args[0].is_number()) return vm.numeric_contract("square", args[0]);
     double d = args[0].as_real();
     return Value::from_double(d * d);
   }, 1, 1));
@@ -3881,6 +3929,12 @@ void VM::init_primitives() {
                         std::to_string(v->count) + " elements), got " +
                         vm.format_value(args[1]));
     }
+    // The payload uses raise_contract like this subr's other contracts —
+    // one mechanism per subr; the family converges downward together (§6).
+    if (!args[2].is_number()) {
+      vm.raise_contract("view-set!: contract violation, expected a number, got " +
+                        vm.format_value(args[2]));
+    }
     double d = args[2].is_int() ? static_cast<double>(args[2].as_int()) : args[2].as_real();
     uint8_t *p = v->bytes.as_ptr<ObjBytes>()->data.data() +
                  v->offset + static_cast<size_t>(args[1].as_int()) * v->stride;
@@ -4081,9 +4135,10 @@ void VM::init_primitives() {
   }, 3, 3));
 
   // Bitwise arithmetic
-  auto subr_logand = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_logand = [](VM &vm, uint32_t argc, Value *args) -> Value {
     int64_t res = -1;
     for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("bitwise-and", args[i]);
       int64_t v = args[i].is_int() ? args[i].as_int() : static_cast<int64_t>(args[i].as_real());
       res &= v;
     }
@@ -4092,9 +4147,10 @@ void VM::init_primitives() {
   def_global("logand", heap.make_subr("logand", subr_logand, 0, UINT32_MAX));
   def_global("bitwise-and", heap.make_subr("bitwise-and", subr_logand, 0, UINT32_MAX));
 
-  auto subr_logior = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_logior = [](VM &vm, uint32_t argc, Value *args) -> Value {
     int64_t res = 0;
     for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("bitwise-ior", args[i]);
       int64_t v = args[i].is_int() ? args[i].as_int() : static_cast<int64_t>(args[i].as_real());
       res |= v;
     }
@@ -4103,9 +4159,10 @@ void VM::init_primitives() {
   def_global("logior", heap.make_subr("logior", subr_logior, 0, UINT32_MAX));
   def_global("bitwise-ior", heap.make_subr("bitwise-ior", subr_logior, 0, UINT32_MAX));
 
-  auto subr_logxor = [](VM &, uint32_t argc, Value *args) -> Value {
+  auto subr_logxor = [](VM &vm, uint32_t argc, Value *args) -> Value {
     int64_t res = 0;
     for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("bitwise-xor", args[i]);
       int64_t v = args[i].is_int() ? args[i].as_int() : static_cast<int64_t>(args[i].as_real());
       res ^= v;
     }
@@ -4114,7 +4171,8 @@ void VM::init_primitives() {
   def_global("logxor", heap.make_subr("logxor", subr_logxor, 0, UINT32_MAX));
   def_global("bitwise-xor", heap.make_subr("bitwise-xor", subr_logxor, 0, UINT32_MAX));
 
-  auto subr_lognot = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_lognot = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("bitwise-not", args[0]);
     int64_t v = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
     return Value::from_int(static_cast<int32_t>(~v));
   };
@@ -4138,52 +4196,73 @@ void VM::init_primitives() {
   // every u32 is exactly representable in a double's 53-bit mantissa.
   // Composing them therefore round-trips, which the signed family does
   // not.
-  def_global("u32", heap.make_subr("u32", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("u32", heap.make_subr("u32", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("u32", args[0]);
     return from_u32(to_u32(args[0]));
   }, 1, 1));
 
-  def_global("u32+", heap.make_subr("u32+", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("u32+", heap.make_subr("u32+", [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t r = 0;
-    for (uint32_t i = 0; i < argc; ++i) r += to_u32(args[i]);   // wraps, as intended
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("u32+", args[i]);
+      r += to_u32(args[i]);   // wraps, as intended
+    }
     return from_u32(r);
   }, 0, UINT32_MAX));
 
-  def_global("u32*", heap.make_subr("u32*", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("u32*", heap.make_subr("u32*", [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t r = 1;
-    for (uint32_t i = 0; i < argc; ++i) r *= to_u32(args[i]);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("u32*", args[i]);
+      r *= to_u32(args[i]);
+    }
     return from_u32(r);
   }, 0, UINT32_MAX));
 
-  def_global("u32-xor", heap.make_subr("u32-xor", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("u32-xor", heap.make_subr("u32-xor", [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t r = 0;
-    for (uint32_t i = 0; i < argc; ++i) r ^= to_u32(args[i]);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("u32-xor", args[i]);
+      r ^= to_u32(args[i]);
+    }
     return from_u32(r);
   }, 0, UINT32_MAX));
 
-  def_global("u32-and", heap.make_subr("u32-and", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("u32-and", heap.make_subr("u32-and", [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t r = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < argc; ++i) r &= to_u32(args[i]);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("u32-and", args[i]);
+      r &= to_u32(args[i]);
+    }
     return from_u32(r);
   }, 0, UINT32_MAX));
 
-  def_global("u32-or", heap.make_subr("u32-or", [](VM &, uint32_t argc, Value *args) -> Value {
+  def_global("u32-or", heap.make_subr("u32-or", [](VM &vm, uint32_t argc, Value *args) -> Value {
     uint32_t r = 0;
-    for (uint32_t i = 0; i < argc; ++i) r |= to_u32(args[i]);
+    for (uint32_t i = 0; i < argc; ++i) {
+      if (!args[i].is_number()) return vm.numeric_contract("u32-or", args[i]);
+      r |= to_u32(args[i]);
+    }
     return from_u32(r);
   }, 0, UINT32_MAX));
 
-  def_global("u32-not", heap.make_subr("u32-not", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("u32-not", heap.make_subr("u32-not", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("u32-not", args[0]);
     return from_u32(~to_u32(args[0]));
   }, 1, 1));
 
   // Shifts are LOGICAL: no sign to extend, and a shift of 32 or more is
   // zero rather than undefined (C++ would leave that up to the hardware).
-  def_global("u32-shl", heap.make_subr("u32-shl", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("u32-shl", heap.make_subr("u32-shl", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("u32-shl", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("u32-shl", args[1]);
     uint32_t n = to_u32(args[1]);
     return from_u32(n >= 32 ? 0u : (to_u32(args[0]) << n));
   }, 2, 2));
 
-  def_global("u32-shr", heap.make_subr("u32-shr", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("u32-shr", heap.make_subr("u32-shr", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("u32-shr", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("u32-shr", args[1]);
     uint32_t n = to_u32(args[1]);
     return from_u32(n >= 32 ? 0u : (to_u32(args[0]) >> n));
   }, 2, 2));
@@ -4191,13 +4270,17 @@ void VM::init_primitives() {
   // Rotate left. The one operation Threefry is built out of, and the one
   // C++ makes easy to write wrongly: x << 32 is undefined behaviour, so
   // the n % 32 == 0 case must be handled rather than assumed.
-  def_global("u32-rotl", heap.make_subr("u32-rotl", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("u32-rotl", heap.make_subr("u32-rotl", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("u32-rotl", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("u32-rotl", args[1]);
     uint32_t x = to_u32(args[0]);
     uint32_t n = to_u32(args[1]) & 31u;
     return from_u32(n == 0 ? x : ((x << n) | (x >> (32 - n))));
   }, 2, 2));
 
-  auto subr_ash = [](VM &, uint32_t, Value *args) -> Value {
+  auto subr_ash = [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("arithmetic-shift", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("arithmetic-shift", args[1]);
     int64_t n = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
     int32_t count = args[1].is_int() ? args[1].as_int() : static_cast<int32_t>(args[1].as_real());
     int64_t res = count >= 0 ? (n << count) : (n >> (-count));
@@ -4629,54 +4712,66 @@ void VM::init_primitives() {
   // ---------------------------------------------------------------------------
   // Standard Scheme Predicates & Numeric Operations
   // ---------------------------------------------------------------------------
-  def_global("zero?", heap.make_subr("zero?", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("zero?", heap.make_subr("zero?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("zero?", args[0]);
     return Value::from_bool(args[0].as_real() == 0.0);
   }, 1, 1));
 
-  def_global("positive?", heap.make_subr("positive?", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("positive?", heap.make_subr("positive?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("positive?", args[0]);
     return Value::from_bool(args[0].as_real() > 0.0);
   }, 1, 1));
 
-  def_global("negative?", heap.make_subr("negative?", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("negative?", heap.make_subr("negative?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("negative?", args[0]);
     return Value::from_bool(args[0].as_real() < 0.0);
   }, 1, 1));
 
-  def_global("even?", heap.make_subr("even?", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("even?", heap.make_subr("even?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("even?", args[0]);
     return Value::from_bool(args[0].as_int() % 2 == 0);
   }, 1, 1));
 
-  def_global("odd?", heap.make_subr("odd?", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("odd?", heap.make_subr("odd?", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("odd?", args[0]);
     return Value::from_bool(args[0].as_int() % 2 != 0);
   }, 1, 1));
 
-  def_global("quotient", heap.make_subr("quotient", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("quotient", heap.make_subr("quotient", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("quotient", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("quotient", args[1]);
     int64_t a = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
     int64_t b = args[1].is_int() ? args[1].as_int() : static_cast<int64_t>(args[1].as_real());
-    if (b == 0) return Value::from_int(0);
+    if (b == 0) return vm.contract_violation("quotient", "division by zero");
     int64_t q = a / b;
     if (q >= INT32_MIN && q <= INT32_MAX) return Value::from_int(static_cast<int32_t>(q));
     return Value::from_double(static_cast<double>(q));
   }, 2, 2));
 
-  def_global("remainder", heap.make_subr("remainder", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("remainder", heap.make_subr("remainder", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("remainder", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("remainder", args[1]);
     int64_t a = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
     int64_t b = args[1].is_int() ? args[1].as_int() : static_cast<int64_t>(args[1].as_real());
-    if (b == 0) return Value::from_int(0);
+    if (b == 0) return vm.contract_violation("remainder", "division by zero");
     int64_t r = a % b;
     return Value::from_int(static_cast<int32_t>(r));
   }, 2, 2));
 
-  def_global("modulo", heap.make_subr("modulo", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("modulo", heap.make_subr("modulo", [](VM &vm, uint32_t, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("modulo", args[0]);
+    if (!args[1].is_number()) return vm.numeric_contract("modulo", args[1]);
     int64_t a = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
     int64_t b = args[1].is_int() ? args[1].as_int() : static_cast<int64_t>(args[1].as_real());
-    if (b == 0) return Value::from_int(0);
+    if (b == 0) return vm.contract_violation("modulo", "division by zero");
     int64_t r = a % b;
     if ((r > 0 && b < 0) || (r < 0 && b > 0)) r += b;
     return Value::from_int(static_cast<int32_t>(r));
   }, 2, 2));
 
-  def_global("truncate", heap.make_subr("truncate", [](VM &, uint32_t, Value *args) -> Value {
+  def_global("truncate", heap.make_subr("truncate", [](VM &vm, uint32_t, Value *args) -> Value {
     if (args[0].is_int()) return args[0];
+    if (!args[0].is_number()) return vm.numeric_contract("truncate", args[0]);
     return Value::from_double(std::trunc(args[0].as_real()));
   }, 1, 1));
 
@@ -4834,6 +4929,7 @@ void VM::init_primitives() {
 
   // Strings
   def_global("number->string", heap.make_subr("number->string", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (!args[0].is_number()) return vm.numeric_contract("number->string", args[0]);
     int radix = 10;
     if (argc > 1 && args[1].is_int()) radix = args[1].as_int();
     if (radix != 10 && radix >= 2 && radix <= 36) {

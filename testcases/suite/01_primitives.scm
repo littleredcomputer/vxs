@@ -215,4 +215,42 @@
   (assert-equal "map as procedure" 0.8 (m :version))
   (assert-equal "keyword as procedure" #t (:fast? m)))
 
+;; 10. Arithmetic refuses non-numbers.
+;;
+;; as_real()'s fall-through used to turn anything that was not a number
+;; into 0.0, so a typo'd variable gave a plausible number — and worse, a
+;; plausible BOOLEAN: (< 'typo x) was (< 0.0 x). In a probabilistic model
+;; that is a confident posterior around the wrong answer, the exact class
+;; of defect this system exists to not produce. The check costs nothing:
+;; the tag tests were already being executed, only the fall-through arm
+;; changed. Observed across a fiber boundary like every contract
+;; violation above.
+(assert-true "+ refuses a symbol"        (fails? (lambda () (+ 'foo 1))))
+(assert-true "- refuses a string"        (fails? (lambda () (- "x" 1))))
+(assert-true "* refuses a list"          (fails? (lambda () (* 2 (list 3)))))
+(assert-true "/ refuses a boolean"       (fails? (lambda () (/ 1 #t))))
+(assert-true "< refuses a symbol (no plausible boolean)"
+             (fails? (lambda () (< 'typo 0.5))))
+(assert-true "= refuses symbols (two distinct symbols are not equal-as-0.0)"
+             (fails? (lambda () (= 'a 'b))))
+(assert-true "max refuses a symbol (used to RETURN it)"
+             (fails? (lambda () (max 'a -5))))
+(assert-true "sqrt refuses a symbol"     (fails? (lambda () (sqrt 'oops))))
+(assert-true "zero? refuses nil"         (fails? (lambda () (zero? '()))))
+(assert-true "u32-xor refuses a symbol (a typo'd Threefry stream errors, not wraps)"
+             (fails? (lambda () (u32-xor 'typo 1))))
+
+;; Division by zero in the integer family is the same silent-zero
+;; disease: (remainder 5 0) used to be 0. (/ x 0) staying inf is IEEE
+;; semantics and deliberate.
+(assert-true "remainder refuses a zero divisor" (fails? (lambda () (remainder 5 0))))
+(assert-true "modulo refuses a zero divisor"    (fails? (lambda () (modulo 5 0))))
+(assert-true "quotient refuses a zero divisor"  (fails? (lambda () (quotient 5 0))))
+
+;; And the happy paths the checks must not have disturbed.
+(assert-equal "mixed int/double addition still promotes" 6.5 (+ 1 2 3.5))
+(assert-equal "modulo still floors toward the divisor's sign" 2 (modulo -7 3))
+(assert-equal "remainder still truncates" -1 (remainder -7 3))
+(assert-equal "max keeps R4RS exactness contagion" 4.0 (max 3.9 4))
+
 (suite-summary)

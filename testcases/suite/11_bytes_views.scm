@@ -133,6 +133,8 @@
               (guard (e (#t #t)) (bytes-view fb :float128) #f))
 (assert-equal "viewing a non-buffer raises"   #t
               (guard (e (#t #t)) (bytes-view "not bytes" :f32) #f))
+(assert-equal "view-set! refuses a non-number payload (used to write 0.0)" #t
+              (guard (e (#t #t)) (view-set! fv 0 'oops) #f))
 
 ;; A view over a buffer too small for even one element is empty, not an
 ;; error — an emitter may legitimately produce nothing.

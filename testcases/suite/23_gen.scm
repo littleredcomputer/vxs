@@ -68,8 +68,9 @@
 ;;--- at, and calling a model directly ------------------------------------
 ;; (yield) outside a generator is LEGAL — the scheduler resumes it with
 ;; unspecified — so `at` has to refuse on its own behalf. Without this a
-;; model called directly runs, receives unspecified for every choice, and
-;; returns a plausible number, because arithmetic does not type-check.
+;; model called directly runs, receiving unspecified for every choice;
+;; arithmetic would refuse that non-number only downstream, and only if
+;; the choice value reaches arithmetic at all. This names the mistake.
 
 (define (bare-model) (at :x (normal 0 1)))
 (assert-equal "at refuses to run outside a generative function"

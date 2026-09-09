@@ -119,9 +119,10 @@
 ;;
 ;; The guard is not decorative. (yield) outside a generator is legal — the
 ;; scheduler resumes it with unspecified — so a model called directly would
-;; run, receive unspecified for every choice, and return a plausible number,
-;; because arithmetic here does not type-check. See in-generator? in
-;; MANUAL section 1.
+;; run, receiving unspecified for every choice. Arithmetic refuses a
+;; non-number these days, but only downstream and only if the choice value
+;; reaches arithmetic at all; this names the structural mistake where it
+;; happens. See in-generator? in MANUAL section 1.
 (define (at address thing)
   (if (not (in-generator?))
       (error 'at "not inside a generative function" address))

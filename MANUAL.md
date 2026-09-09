@@ -100,10 +100,11 @@ it rather than needing a cleanup to run at all.
 scheduler once a frame — so `yield` cannot complain on its own behalf. A
 form that expects an *answer* back has to ask, and this is the question.
 
-Without it a function full of yields, called directly, runs to completion:
-it yields, the scheduler resumes it with unspecified, and since arithmetic
-here does not type-check, it returns a plausible number. A structural
-mistake becomes data.
+Without it a function full of yields, called directly, runs on: it
+yields, and the scheduler resumes it with unspecified. Arithmetic now
+refuses a non-number (§3), but that backstop is downstream and fires only
+if the unspecified reaches arithmetic at all — this predicate asks the
+structural question at the moment of the mistake, and names it.
 
 ```scheme
 (define (at address distro)
@@ -398,23 +399,30 @@ structure — R6RS's `&who`/`&message`/`&irritants` — would improve this
 supervision path without making them catchable in place. The two are
 independent, and only the first is worth wanting.
 
-### ⚠️ Arithmetic does not type-check
+### Arithmetic refuses non-numbers
 
-Non-numbers are silently treated as zero, and the result is promoted to a
-flonum:
+A non-number reaching a numeric primitive is a contract violation:
 
 ```scheme
-(+ 1 'a)      ; => 1.0     (not an error)
-(+ 'a 'b)     ; => 0.0
-(* 2 'a)      ; => 0.0
-(+ 1 "str")   ; => 1.0
-(< 1 'a)      ; => #f
+(+ 1 'a)      ; [VM Error] +: contract violation, expected a number, got a
+(< 1 'a)      ; same — no plausible #f from comparing against a phantom 0.0
+(max 'a -5)   ; same — max used to RETURN the symbol
+(remainder 5 0) ; division by zero, same mechanism. (/ x 0) stays inf: IEEE.
 ```
 
-A deliberate consequence of keeping `+` first-class and un-opcoded for
-speed, but it means a typo'd variable name in arithmetic produces a
-plausible wrong number rather than a complaint. If a computation goes
-quietly wrong, suspect this first.
+It was not always so: `as_real()`'s fall-through used to turn anything
+that was not a number into 0.0, so a typo'd variable gave a plausible
+number — and a plausible *boolean* from the comparisons, which silently
+picks a branch. The old behaviour was recorded as a speed trade, but the
+trade was illusory: the tag tests were already executed on every call and
+their answer discarded, so the check changed only what the fall-through
+arm does (measured: within noise on a tight arithmetic loop).
+
+Like every contract violation, this is a native VM error — uncatchable in
+place by `guard`, observed across a fiber boundary via `touch/or-error`
+(section 3). Inside a generator, `resume` re-raises it in the driver's
+context, so a typo'd model stops an `importance` run with the operation
+and the offending value named rather than converging on nonsense.
 
 ---
 
@@ -1515,15 +1523,29 @@ case where the fault *is* exhaustion.
 an unbound variable. Small, self-contained, and the error message points
 nowhere useful.
 
-#### Arithmetic does not type-check
+#### ✅ Arithmetic refuses non-numbers — **done**
 
-Symptom in [§3](#3-errors-what-is-catchable): non-numbers are treated as
-zero, so a typo'd name yields a plausible wrong number rather than a
-complaint.
+This entry used to record the silent-zero behaviour as **undecided**,
+entangled with keeping `+` first-class and un-opcoded for speed, with any
+fix owing a benchmark answer first. The benchmark answered: **the
+entanglement was a misdiagnosis**. There are no arithmetic opcodes to
+protect — `+` is an ordinary subr — and `as_real()` already executed both
+tag tests on every call, discarding their answer. The silent zero was
+never buying speed; the check changed only the fall-through arm, and
+measured within noise on a tight arithmetic loop (0.220s vs 0.220s over
+~12M numeric subr ops).
 
-Entangled with keeping `+` first-class and un-opcoded for speed, which is a
-deliberate trade — so this is **undecided**. Any fix has to answer what it
-costs on the benchmark suite before it is worth having.
+What made it worth doing now rather than eventually: comparisons. A wrong
+*number* propagates somewhere visible; `(< 'typo x)` was a wrong *boolean*
+that silently picks a branch, `(= 'a 'b)` was `#t`, and `(max 'a -5)`
+returned the symbol. In a generative model those become a confident
+posterior around the wrong answer.
+
+Every numeric subr now checks, via `VM::numeric_contract` — the
+fiber-state path, per the converge-downward decision above. The integer
+division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
+`(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
+documented.
 
 ---
 

@@ -570,10 +570,10 @@
 ;; scheduler once a frame — so yield cannot complain on its own behalf. A
 ;; form that expects an answer back has to ask, and this is the question.
 ;;
-;; Without it, a model function called directly runs, yields, is resumed
-;; by the scheduler with unspecified, and returns a plausible number,
-;; because arithmetic here does not type-check. A structural mistake turns
-;; into data.
+;; Without it, a model function called directly runs, yields, and is
+;; resumed by the scheduler with unspecified. Arithmetic refuses a
+;; non-number these days, but only downstream and only if the value
+;; reaches arithmetic — this asks the structural question at the mistake.
 
 (assert-equal "false at the top level" #f (in-generator?))
 (assert-equal "true inside a generator" #t
