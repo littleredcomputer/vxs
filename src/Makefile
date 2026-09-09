@@ -1,9 +1,9 @@
 CXX             ?= clang++
 VERSION         = 0.8
-# A stamp baked into the binary at compile time. web/vxs.wasm is a
-# COMMITTED artifact that a browser will happily cache, so "is this the
-# build I just made?" is a question that comes up — and guessing at it
-# costs far more than printing it.
+# A stamp baked into the binary at compile time. web/vxs.wasm is an
+# artifact a browser will happily cache, so "is this the build I just
+# made?" is a question that comes up — and guessing at it costs far more
+# than printing it.
 BUILDSTAMP      = $(shell date -u +%H:%M:%SZ)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)
 DEFVER          = -DVERSION=$(VERSION) -DVXS_BUILD='"$(BUILDSTAMP)"' 
 CXXFLAGS        = -std=c++20 -O3 -Wall -Wextra -fno-strict-aliasing -fexceptions -fno-rtti $(DEFVER)

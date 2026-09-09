@@ -1841,16 +1841,9 @@ void VM::init_primitives() {
   };
   def_global("/", heap.make_subr("/", subr_div, 1, UINT32_MAX));
 
-  auto subr_rem = [](VM &, uint32_t, Value *args) -> Value {
-    int64_t a = args[0].is_int() ? args[0].as_int() : static_cast<int64_t>(args[0].as_real());
-    int64_t b = args[1].is_int() ? args[1].as_int() : static_cast<int64_t>(args[1].as_real());
-    if (b == 0) return Value::from_int(0);
-    int64_t r = a % b;
-    if (r >= INT32_MIN && r <= INT32_MAX) return Value::from_int(static_cast<int32_t>(r));
-    return Value::from_double(static_cast<double>(r));
-  };
-  def_global("remainder", heap.make_subr("remainder", subr_rem, 2, 2));
-  def_global("modulo", heap.make_subr("modulo", subr_rem, 2, 2));
+  // remainder/modulo live further down, next to quotient — a pair used to
+  // be registered here too (with modulo wrongly aliasing remainder), dead
+  // since the later def_global shadowed it.
 
   // Comparisons — R4RS numeric comparisons are N-ary: (< a1 a2 a3 ...) holds
   // iff every consecutive pair satisfies the relation.
@@ -1918,19 +1911,13 @@ void VM::init_primitives() {
     return Value::from_bool(args[0] == args[1]);
   };
   def_global("eq?", heap.make_subr("eq?", subr_eq, 2, 2));
-  def_global("eqv?", heap.make_subr("eqv?", subr_eq, 2, 2));
+  // eqv? is NOT an alias of eq? — it lives near equal?, with the numeric
+  // and char cases R4RS requires. An alias used to be registered here,
+  // dead since the real one shadowed it.
 
-  // Math Functions
-  auto subr_sin = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_double(std::sin(args[0].as_real()));
-  };
-  def_global("sin", heap.make_subr("sin", subr_sin, 1, 1));
-
-  auto subr_cos = [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_double(std::cos(args[0].as_real()));
-  };
-  def_global("cos", heap.make_subr("cos", subr_cos, 1, 1));
-
+  // Math Functions — sin/cos live with the rest of the transcendentals
+  // below; a duplicate pair used to be registered here, dead since the
+  // later def_global shadowed it.
   auto subr_exp = [](VM &vm, uint32_t, Value *args) -> Value {
     if (!args[0].is_number()) return vm.numeric_contract("exp", args[0]);
     return Value::from_double(std::exp(args[0].as_real()));

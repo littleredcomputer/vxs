@@ -1587,16 +1587,19 @@ Nearly free; `defined?` exists.
 
 ### Infrastructure
 
-#### A staleness guard for `web/vxs.wasm`
+#### ✅ A staleness guard for `web/vxs.wasm` — **retired, premise gone**
 
-The artifact is committed deliberately — clone-and-serve is the deployment
-model, and `.git` is only 26 MB for 65 revisions of it, so size is not the
-argument. The real risk is a committed `.wasm` drifting from the source it
-claims to be, which is a silent wrong-version bug of exactly the class this
-project keeps hunting.
+This entry proposed a test against a committed `.wasm` drifting from its
+source. The artifact is no longer checked in (`.gitignore` has both
+`web/vxs.js` and `web/vxs.wasm`; `make -C src wasm` builds them, and
+emscripten's absence is reported plainly rather than as a missing-file
+error). `make test` depends on the `wasm` target, so make's own
+dependency tracking is the guard this entry asked for — a stale build
+cannot survive a test run.
 
-Cheapest version: a test that fails if any source under `src/` is newer
-than `web/vxs.wasm`.
+The residual staleness risk is the browser cache serving an old build,
+which is what the BUILDSTAMP baked into the binary exists to expose:
+compare the stamp the page prints against the build you just made.
 
 #### Migrate the classic testcases into the ground-up suite
 
