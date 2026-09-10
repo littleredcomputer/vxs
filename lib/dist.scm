@@ -175,6 +175,26 @@
 (define (random-gamma r alpha lambda)
   (* (/ 1.0 lambda) (random-gamma-theta-one r alpha)))
 
+;;--- negative infinity, spelled once for each language ------------------
+;; A BILATERAL pair, not a dual, because the two languages genuinely
+;; differ here rather than merely being written twice. The host has `-inf`
+;; from ordinary IEEE division; WGSL has no literal for it and refuses to
+;; compute one at shader-creation time — `log(0.0)` and `-1.0 / 0.0` are
+;; both const-expressions whose value cannot be represented as an
+;; AbstractFloat, so both are compile errors. The device side therefore
+;; needs a runtime `var` to divide by, which is hand-written WGSL in
+;; lib/stat.wgsl and declared rather than derived.
+;;
+;; This was a real bug, and instructively so: logpdf-exponential's dual
+;; body used (log 0.0), which is correct Scheme and a shader that will not
+;; compile — emitted into EVERY assembled shader, since lib/wrangle.scm
+;; loads this file. Nothing caught it because fake_webgpu.js counts
+;; dispatches rather than compiling WGSL. lib/wgsl.scm now refuses a
+;; transcendental applied to a literal that is not finite, so this
+;; particular class arrives as a Scheme error instead.
+(define (neg-inf) (/ -1.0 0.0))
+(wgsl-declare! 'neg-inf "neg_inf" '() :f32)
+
 ;;--- log densities ------------------------------------------------------
 ;; The half that turns samples into weights, and the half that is now
 ;; WRITTEN ONCE. These used to exist twice — here in Scheme and again as
@@ -225,8 +245,8 @@
   ;; exactly zero probability rather than an extremely small one.
   ;;
   ;; On the device `if` is select, so BOTH arms are evaluated — which is
-  ;; safe here only because neither traps: log(0) is -inf, not a fault.
-  (if (< v 0.0) (log 0.0) (- (log rate) (* rate v))))
+  ;; safe here only because neither traps.
+  (if (< v 0.0) (neg-inf) (- (log rate) (* rate v))))
 
 ;; Gamma(alpha, rate=lambda). lambda is the RATE, matching random-gamma,
 ;; which multiplies a Gamma(alpha, theta=1) draw by 1/lambda.

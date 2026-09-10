@@ -517,6 +517,33 @@
                               (smoothstep 0.0 1.5 d))
                            E)))
 
+;;--- a literal that cannot survive shader creation ----------------------
+;; WGSL evaluates a const-expression at shader-creation time, so a literal
+;; argument makes one, and `log(0.0)` is not -inf — it is the error "value
+;; -Infinity cannot be represented as '<AbstractFloat>'", reported by the
+;; browser with no line number in our source.
+;;
+;; This is not hypothetical. logpdf-exponential's dual body said
+;; (log 0.0), which is correct Scheme, and put a shader that would not
+;; compile into every assembled module.
+
+(assert-equal "log of a literal zero is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(log 0.0) '())))
+(assert-equal "as is sqrt of a negative literal"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(sqrt -1.0) '())))
+(assert-equal "and an exp that overflows"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(exp 1000) '())))
+(assert-equal "and an acos outside its domain"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(acos 2.0) '())))
+
+;; The refusal must not overreach. A finite literal is fine, and a RUNTIME
+;; argument is never a const-expression however impossible its value —
+;; log(scale) is exactly what logpdf_normal does.
+(assert-equal "a finite literal is untouched" :f32 (wgsl-type '(log 2.0) '()))
+(assert-equal "and a runtime argument is not a const-expression at all"
+              :f32 (wgsl-type '(log time) E))
+(assert-equal "nor is a computed one" :f32 (wgsl-type '(log (* 0.0 time)) E))
+
 ;;--- loading the compiler twice must not forget anything -----------------
 ;; Every table here is module state, and a plain (define t '()) re-runs on
 ;; a second load and resets it. Transitive double-loading is the normal

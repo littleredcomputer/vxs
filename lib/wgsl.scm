@@ -187,6 +187,36 @@
                                    (symbol->string wgsl-stage) " one")
                     ", and this compile did not say which stage it is"))))))
 
+;;--- a literal that cannot survive shader creation ----------------------
+;; WGSL evaluates a const-expression at shader-creation time, and a
+;; literal argument makes one. `log(0.0)` is therefore not -inf: it is the
+;; error "value -Infinity cannot be represented as '<AbstractFloat>'",
+;; reported by the browser's shader compiler with no line number in our
+;; source — which is the failure this whole file exists to catch instead.
+;;
+;; Learned the hard way. logpdf-exponential's dual body said (log 0.0),
+;; which is correct Scheme, and put a shader that would not compile into
+;; every assembled module. The host equivalents below are consulted ONLY
+;; to refuse such a call; nothing here folds constants.
+;;
+;; For -inf, which is usually what was wanted: lib/stat.wgsl's neg_inf.
+(define wgsl-const-check
+  (list (cons 'log log) (cons 'sqrt sqrt) (cons 'exp exp)
+        (cons 'asin asin) (cons 'acos acos)))
+
+(define (wgsl-check-const op args)
+  (let ((chk (assq op wgsl-const-check)))
+    (if (and chk (pair? args) (null? (cdr args)) (number? (car args)))
+        (let ((r ((cdr chk) (car args))))
+          (if (not (finite? r))
+              (error 'wgsl
+                     (string-append
+                      "(" (symbol->string op) " " (number->string (car args))
+                      ") is " (if (infinite? r) "infinite" "not a number")
+                      ", and WGSL evaluates a literal argument at"
+                      " shader-creation time and rejects that."
+                      (if (eq? op 'log) " For -inf, call (neg-inf)." ""))))))))
+
 ;; Run a compile with the stage declared, and put it back afterwards even
 ;; if the compile raises — a harness that left the stage set would license
 ;; a later unstaged compile to use fragment-only operations.
@@ -305,9 +335,12 @@
 
 (define (wgsl-form op args env)
   ;; Before anything else, and for every form: a stage-restricted
-  ;; operation is refused where it cannot run. One check covers built-ins
-  ;; and declared functions alike, because the table is keyed by name.
+  ;; operation is refused where it cannot run, and so is a literal
+  ;; argument whose value WGSL would compute at shader-creation time and
+  ;; then refuse. Both checks are keyed by name, so both cover built-ins
+  ;; and declared functions alike.
   (wgsl-check-stage op)
+  (wgsl-check-const op args)
   (cond
     ;; (vec2 a b) / (vec3 a b c) / (vec4 ...) — all components f32.
     ((memq op '(vec2 vec3 vec4))

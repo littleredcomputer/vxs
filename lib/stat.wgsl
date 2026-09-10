@@ -25,6 +25,25 @@ var<private> fail: u32 = 0u;
 
 // From Press NR 3ed.
 // A lower-order Chebyshev approximation produces a very concise routine, though with only about single precision accuracy:
+// Negative infinity, which WGSL has no literal for and will not let you
+// compute at shader-creation time: `log(0.0)` is a const-expression whose
+// value cannot be represented as an AbstractFloat, so it is a compile
+// error rather than -inf. Even `-1.0 / 0.0` is const-evaluated and
+// refused the same way.
+//
+// The `var` is the whole trick and must not be turned into a `let` or a
+// `const`: it makes z runtime storage, so the division is a runtime
+// operation and produces the IEEE value instead of being evaluated by the
+// compiler and rejected.
+//
+// Wanted by every score with bounded support: off-support is -inf, not a
+// large negative, because exp(-inf) is exactly zero and an impossible
+// value should get exactly no probability. See lib/dist.scm.
+fn neg_inf() -> f32 {
+  var z : f32 = 0.0;
+  return -1.0 / z;
+}
+
 // Returns the complementary error function with fractional error everywhere less than 1.2e-7.
 fn erfc(x: f32) -> f32 {
   var z = abs(x);

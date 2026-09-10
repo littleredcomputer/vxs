@@ -192,6 +192,67 @@
 (assert-equal "while an ordinary value is unaffected"
               (log 1.0) (logpdf-uniform 0.5 0.0 1.0))
 
+;;--- -inf has to be spelled twice, and that is not drift ----------------
+;; The host gets -inf from ordinary IEEE division. WGSL has no literal for
+;; it and refuses to compute one at shader-creation time: `log(0.0)` and
+;; `-1.0 / 0.0` are both const-expressions whose value cannot be
+;; represented as an AbstractFloat, so both are compile errors. So the
+;; device side is hand-written WGSL over a runtime `var`, declared rather
+;; than derived — bilateral, not dual, because the languages differ here
+;; rather than the text being duplicated.
+
+(assert-true "the host spells -inf directly" (infinite? (neg-inf)))
+(assert-true "and negative"                  (< (neg-inf) 0.0))
+(assert-true "the device has a definition for it"
+             (wgsl-has? "fn neg_inf()"))
+(assert-true "declared, so a kernel may call it"
+             (if (wgsl-signature 'neg-inf) #t #f))
+;; Not a dual: there is no shared source to register, which is exactly the
+;; distinction the dual table draws.
+(assert-false "but not dual, since the two bodies are genuinely different"
+              (if (wgsl-dual 'neg-inf) #t #f))
+
+;; The bug this fixed, kept as a regression: exponential's score is -inf
+;; below its support, and the emitted device version reaches that through
+;; neg_inf() rather than through a log of a literal zero.
+(assert-true "exponential is -inf below its support, on the host"
+             (infinite? (logpdf-exponential -1.0 2.0)))
+(assert-true "and the emitted kernel calls neg_inf rather than log(0.0)"
+             (string-contains? (wgsl-definitions-source) "neg_inf()"))
+(assert-false "with no literal log of zero anywhere in the definitions"
+              (string-contains? (wgsl-definitions-source) "log(0.0)"))
+
+;; lib/wgsl.scm now refuses that class of literal, but only in code it
+;; COMPILES. The hand-written tier it never sees needs reading instead —
+;; which is what this file already does for the constants above.
+;;
+;; Comments there legitimately MENTION the hazard, including the one
+;; explaining why neg_inf exists, so the scan has to look at code. There
+;; are no string literals in these shaders, so dropping from // to
+;; end-of-line is exact rather than approximate.
+(define (strip-line-comments s)
+  (let ((n (string-length s)))
+    (let loop ((i 0) (acc '()) (skip #f))
+      (if (= i n)
+          (list->string (reverse acc))
+          (let ((c (string-ref s i)))
+            (cond
+              (skip (loop (+ i 1) acc (not (char=? c #\newline))))
+              ((and (char=? c #\/) (< (+ i 1) n)
+                    (char=? (string-ref s (+ i 1)) #\/))
+               (loop (+ i 2) acc #t))
+              (else (loop (+ i 1) (cons c acc) skip))))))))
+
+(define wgsl-stat-code (strip-line-comments wgsl-stat))
+
+(assert-true "the stripper keeps code and drops prose"
+             (and (string-contains? (strip-line-comments "a();\n// b();\nc();") "a();")
+                  (string-contains? (strip-line-comments "a();\n// b();\nc();") "c();")
+                  (not (string-contains? (strip-line-comments "a();\n// b();\nc();")
+                                         "b();"))))
+(assert-false "and none in the hand-written WGSL either, which no checker sees"
+              (string-contains? wgsl-stat-code "log(0.0)"))
+
 ;; Structural, not numeric: the samplers must keep drawing what they draw
 ;; now. random_normal takes ONE uniform; a change to Box-Muller would take
 ;; two and shift every downstream value in every kernel.
