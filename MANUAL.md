@@ -1585,6 +1585,47 @@ milliseconds, and nothing needs it every frame.
 
 Nearly free; `defined?` exists.
 
+#### `batch-i` allocates a distribution per element — **noted, not scheduled**
+
+`batch-i*` calls `(f j)` per index, and `(normal <expr> sigma)` builds a
+form list, a record and four closures — every element, of every particle.
+`batch` builds one distribution and hands a column to a native sum.
+
+Measured, separating the two components (the per-particle fixed cost is
+identical, ≈12.3 µs, so the whole difference is per element):
+
+| | per element | at N=10 | at N=80 |
+|---|---|---|---|
+| `batch` + column + native sum | 0.18 µs | — | — |
+| `batch-i` | 1.05 µs | — | — |
+| ratio | **5.8×** | 1.6× | 3.6× |
+
+Flat in K — both paths are linear in it, so this never amortises away —
+and growing in N toward the per-element ratio as the fixed cost dilutes.
+
+The waste is allocation, not arithmetic: both compute the same
+polynomial and the same log-density. The fix, if it is ever wanted, is
+that `batch-i` asks for a distribution OBJECT per index when only the
+PARAMETERS vary. The macro can see its own body, so a recognised family
+could resolve the score function once and evaluate only the parameter
+expressions per index, falling back to the general path for anything it
+does not recognise. That makes the expansion depend on the shape of the
+body, which is why it is written down here rather than done.
+
+It matters more than it looks: if the stageable form becomes the default
+way to write a model, this is a tax on the fiber path for models that
+never go near a device.
+
+One thing it already tells us. `demos/curvefit.scm` reports
+`us-per-particle` as "the number to plan with", and extrapolating it in K
+is sound. It is **not** a baseline for the staged path, and not because
+of the ratio above: its speed rests on ONE scratch buffer "rewritten in
+place for every particle", which is correct only while exactly one
+particle exists at a time. A parallel-safe version of that same
+vectorisation needs K×N storage — the two-axis column
+[§6](#a-gather-primitive) refuses. The optimisation is licensed by
+sequentiality, so it cannot cross to the device with the model.
+
 ### Infrastructure
 
 #### ✅ A staleness guard for `web/vxs.wasm` — **retired, premise gone**

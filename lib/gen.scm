@@ -95,6 +95,89 @@
                (unsupported 'fill form)
                (unsupported 'sum  form))))
 
+;; (batch-i n (j) dist-expr) — n independent choices, the j-th distributed
+;; as dist-expr, with j bound to the index.
+;;
+;; The difference from `batch` is WHERE THE PARAMETERS COME FROM, and it
+;; is the difference between a model a compiler can read and one it
+;; cannot. `batch` takes one distribution and repeats it, so a varying
+;; parameter has to arrive as a column — the finished result of a loop
+;; that ran somewhere else. `batch-i` takes the expression instead, so the
+;; per-element structure is written down where it can be read.
+;;
+;; Both run identically on the fiber path. The second can also be staged.
+(defmacro (batch-i n spec body)
+  `(batch-i* ,n (lambda ,spec ,body)))
+
+(define (batch-i* n f)
+  (let ((form `(batch-i ,n)))
+    (make-dist form
+               (lambda (k)
+                 ;; :f64 where `batch` uses :f32 — this is the side that
+                 ;; is supposed to be the more precise one.
+                 (let ((view (bytes-view (make-bytes (* n 8)) :f64)))
+                   (let loop ((j 0))
+                     (if (< j n)
+                         (begin (view-set! view j (d:sample (f j) k))
+                                (loop (+ j 1)))))
+                   view))
+               (lambda (v)
+                 (let loop ((j 0) (acc 0.0))
+                   (if (= j n)
+                       acc
+                       (loop (+ j 1) (+ acc (d:score (f j) (view-ref v j)))))))
+               (unsupported 'fill form)
+               (unsupported 'sum  form))))
+
+;; (scan-i n (j) ((name init step) ...) dist-expr)
+;;
+;; n observations of a system that CARRIES STATE from one to the next. The
+;; j-th observation is distributed as dist-expr evaluated against the state
+;; as it stands; the state then advances by the step expressions.
+;;
+;; The difference from batch-i is independence. batch-i's j-th choice can
+;; be computed from j alone, which is why it maps; a trajectory's cannot,
+;; which is why this scans. Everything else — the per-element structure
+;; written down rather than materialised — is the same idea.
+;;
+;; THE STEPS ALL SEE THE OLD STATE. They are evaluated together and the
+;; components update at once, which is `let` rather than `let*` and is not
+;; a detail: threading them would silently turn an explicit integrator into
+;; a semi-implicit one, which is a different method that still converges
+;; and still looks plausible.
+(defmacro (scan-i n spec states body)
+  (let ((j     (car spec))
+        (names (map car states)))
+    ;; Curried rather than passing a state list to be destructured: it
+    ;; avoids inventing a temporary name that could shadow one of the
+    ;; model's own.
+    `(scan-i* ,n
+              (list ,@(map cadr states))
+              (lambda (,j) (lambda ,names (list ,@(map caddr states))))
+              (lambda (,j) (lambda ,names ,body)))))
+
+(define (scan-i* n inits stepper scorer)
+  (let ((form `(scan-i ,n)))
+    (make-dist form
+               (lambda (k)
+                 (let ((view (bytes-view (make-bytes (* n 8)) :f64)))
+                   (let loop ((j 0) (s inits))
+                     (if (< j n)
+                         (begin
+                           (view-set! view j (d:sample (apply (scorer j) s) k))
+                           (loop (+ j 1) (apply (stepper j) s)))))
+                   view))
+               (lambda (v)
+                 (let loop ((j 0) (s inits) (acc 0.0))
+                   (if (= j n)
+                       acc
+                       (loop (+ j 1)
+                             (apply (stepper j) s)
+                             (+ acc (d:score (apply (scorer j) s)
+                                             (view-ref v j)))))))
+               (unsupported 'fill form)
+               (unsupported 'sum  form))))
+
 ;;--- generative functions -----------------------------------------------
 
 (define-record-type <generative-function>
