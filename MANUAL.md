@@ -1158,12 +1158,26 @@ touches the body not at all — the coroutine does that work. It only makes
 rather than running one. What it buys is one name instead of two, and no
 way to write the wrong one.
 
+It does *keep* the body, which is not the same as transforming it: what
+runs is the same closure it always was, and the datum rides alongside in
+`gf-source` for anything that wants to **read** the model rather than run
+it. That field is [§5c](#5c-staging-a-model-read-rather-than-run).
+
 ---
 
 ## 5a. Distributions on the host
 
-`lib/dist.scm` is a faithful port of `lib/stat.wgsl`, over a native
-Threefry core.
+`lib/dist.scm` holds the samplers as a faithful port of `lib/stat.wgsl`,
+over a native Threefry core. The **log densities are no longer a port**:
+`logpdf-normal`, `logpdf-uniform`, `logpdf-flip` and `logpdf-exponential`
+are written once with `define-dual` ([§5c](#define-dual--one-definition-two-homes))
+and compiled for both, so `lib/stat.wgsl` does not define them at all.
+
+The samplers stay ported, and that is a real difference rather than work
+left undone: each takes its generator explicitly here and finds it as
+per-invocation private state on the device, so the two genuinely have
+different signatures. `logpdf-gamma` and `logpdf-beta` stay here too —
+both need `lgamma`, which WGSL has not got.
 
 ```scheme
 (define r (rng-make ptnum seed stream))   ; mirrors rng_init
@@ -1411,6 +1425,163 @@ wants `--repl`.
 
 ⚠️ Errors carry no `file:line`, so `next-error` has nothing to parse. See
 §6.
+
+---
+
+## 5c. Staging: a model read rather than run
+
+`sample` and `assess` drive a model by *running* it. Staging does the
+other thing — it reads the source and produces a description of the
+log-joint, which two backends turn into a number on the VM or into kernel
+code for a device.
+
+There is no tracer here, and the reason is not cleverness. A tracer
+exists because Python cannot hand a decorator the body of a function as a
+manipulable datum, so the only way to learn what a computation does is to
+run it and watch — which costs trace memory proportional to what the code
+**did**, in order to recover what it always **said**. `define-gen` was
+handed the source and kept it, so the cost is proportional to the length
+of the model text, and the reading happens once whatever N and K are.
+
+```scheme
+(load "lib/stage.scm")
+
+(define-dual (curve-elem (x :f32) (a :f32) (b :f32) (c :f32))
+  (+ (* a x x) (* b x) c))
+
+(define-gen (curve xs sigma npts)
+  (let* ((a (at :a (normal 0 1.5)))
+         (b (at :b (normal 0 1.5)))
+         (c (at :c (normal 0 1.5))))
+    (at :ys (batch-i npts (j)
+              (normal (curve-elem (view-ref xs j) a b c) sigma)))))
+
+(define st (stage (curve xs 1.0 10)))
+(staged-logpdf st {:a 2.0 :b -1.0 :c 0.5 :ys ys})   ; a number, on the VM
+(staged-kernel st)                                   ; kernel code, for a device
+```
+
+### The tax
+
+A model pays to enter this domain, and the whole bargain is that the tax
+is small, flat and visible — paid once, at the definition, by the person
+who has the knowledge. In exchange nothing is discovered at run time that
+could need machinery to cope with.
+
+- **Data arrive as parameters, not globals.** Staging has no `eval` and
+  cannot read a global, so `(stage (curve xs 1.0 10))` gets `xs` because
+  the call supplied it. This is also why a staged snapshot cannot go
+  stale: there is no captured global left to change.
+- **Helpers are registered**, via `define-dual`. A call is a lookup, and
+  an unregistered name is refused rather than followed.
+- **Repeated choices use `batch-i` or `scan-i`**, which write the
+  per-element structure down instead of handing over a finished column.
+
+### `define-dual` — one definition, two homes
+
+```scheme
+(define-dual (name (arg :type) ...) body)
+```
+
+Emits an ordinary Scheme procedure *and* a kernel function, from one
+body. Note the asymmetry, because it is the entire idea: the host side
+splices the body **unquoted**, so Scheme evaluates it; the kernel side
+splices it **quoted**, so the compiler reads it as text in another
+language. Same datum, two fates, no second copy to drift.
+
+The body must therefore be valid in both. Some names differ between the
+languages and the compiler bridges what it can — `expt` compiles to
+WGSL's `pow` — but a kernel builtin with no Scheme meaning will type-check
+here and fail as an unbound variable on its first call there.
+
+What it does **not** buy is numerical agreement: the device computes in
+f32 and the VM in f64. That gap is deliberate — see
+[§5a](#why-a-port-and-not-a-better-design) on why the more precise side is
+the oracle — so a comparison across it is a *measurement*, not a test to
+be tightened until it passes.
+
+`define-dual` is also how the log densities are defined. There is no
+hand-written `logpdf_*` in `lib/stat.wgsl` any more; adding one would be
+a second copy of something that no longer has a first.
+
+### `batch-i` maps, `scan-i` scans
+
+```scheme
+(batch-i n (j) dist-expr)                       ; the j-th from j alone
+(scan-i  n (j) ((name init step) ...) dist-expr) ; the j-th from the (j-1)-th
+```
+
+`batch` takes one distribution and repeats it, so a varying parameter has
+to arrive as a *column* — the finished result of a loop that ran
+somewhere else, which nothing can read. These write the structure down.
+
+`scan-i` carries state: the j-th observation is scored against the state
+as it stands, and the state then advances by the step expressions. **All
+the steps see the old state** — they are evaluated together and the
+components update at once, which is `let` and not `let*`. That is not a
+detail: threading them would silently turn an explicit integrator into a
+semi-implicit one, which is a different method that still converges and
+still looks plausible.
+
+Both run on the fiber path like any other distribution, and the readable
+shape has a price there — see [§6](#batch-i-allocates-a-distribution-per-element--noted-not-scheduled).
+
+### The intermediate form
+
+A plain datum on purpose. It is a format, not an object, so something
+other than the reader could emit one and both backends would still
+consume it.
+
+```
+staged = {:choices ((addr scalar) | (addr batched n) ...)
+          :buffers ((name . view) ...)
+          :terms   (term ...)}
+
+term   = (score dist expr)
+       | (sum-over n idx term)
+       | (scan-over n idx ((name init step) ...) term)
+```
+
+Terms are summands of the log-joint **in source order**, and that order
+is load-bearing: float addition is not associative, so it is what lets
+the two backends agree exactly rather than approximately.
+
+There is no separate notion of "observed" in here. A constrained address
+and a latent one differ in where their value comes from at evaluation
+time, not in how they are scored, and keeping that distinction out is
+what lets one staged object serve comparison, importance and
+rejuvenation alike.
+
+### What may sit in a kernel, and what may not
+
+| | |
+|---|---|
+| distributions that stage | `normal`, `uniform`, `flip` |
+| refused | `gamma`, `beta` — both need `lgamma`, which WGSL has not got |
+| state per `scan-i` | at most **three** components |
+
+The three-component ceiling is the device's, not a shortcut: `fold-i`
+carries one accumulator, that accumulator holds the running score as well
+as the state, and a WGSL vector stops at four. Wide state wants the
+per-element scratch-attribute path, which is a different mechanism rather
+than an extension of this one.
+
+### Everything else is refused by name
+
+A model that cannot stage is not broken. It stays on the fiber path,
+which is the general case and remains the oracle — so the refusals say
+what was wrong and where, rather than miscompiling into something
+plausible: a global, an unregistered helper, a distribution with no
+device score, an address used twice, a computed index (that is a gather,
+with different in-place safety), arithmetic on a batched choice, a buffer
+indexed by a state value, and a generative function with no source to
+read.
+
+One refusal is worth singling out because it is easy to misread as a bug.
+A **declared** function is hand-written WGSL and has no host meaning at
+all, so a model calling one stages happily for the device and is then
+refused by `staged-logpdf` — which is right, because such a model could
+never be checked against `assess`, and that check is the point.
 
 ---
 
