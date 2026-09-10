@@ -413,6 +413,33 @@
 (assert-true "as is the function's own name"
              (string-contains? (wgsl-definitions-source) "fn hyphen_probe("))
 
+;; A hyphen is not the only offender, and the others are commoner still: a
+;; WGSL identifier admits letters, digits and underscore, while `outside?`
+;; and `set!` are how Scheme habitually spells a predicate and a mutator.
+(set! wgsl-counter 0)
+(assert-true "a question mark is underscored too"
+             (string-contains?
+              (wgsl-body '(let ((outside? (< time 1.0))) (if outside? 1.0 2.0)) E "")
+              "outside__1"))
+(set! wgsl-counter 0)
+(assert-true "and a bang"
+             (string-contains? (wgsl-body '(let ((fill! 1.0)) (* fill! 2.0)) '() "")
+                               "fill__1"))
+;; Substituted rather than dropped: `a?` and `a!` are different names, and
+;; deleting the offending character would collide them onto one.
+(assert-equal "an illegal character becomes an underscore, it is not deleted"
+              "a_" (wgsl-underscore "a?"))
+
+;;--- expt, because a dual body must be valid in both languages -----------
+;; The kernel side has always spelled this `pow`, which is not a Scheme
+;; procedure — so a define-dual written with it would type-check for the
+;; device and fail as an unbound variable on its first host call.
+
+(assert-equal "expt compiles to WGSL's pow"
+              "pow(time, 2.0)" (wgsl-code '(expt time 2) E))
+(assert-equal "and pow still does, for a kernel that never runs on the host"
+              "pow(time, 2.0)" (wgsl-code '(pow time 2) E))
+
 
 ;;--- define-dual: one definition, two citizenships -----------------------
 ;; The form's whole claim is that the body is written ONCE, so the tests
@@ -452,5 +479,32 @@
 (assert-equal "a type error in the body is caught at definition time"
               'raised (guard (e (#t 'raised))
                         (wgsl-define-fn! 'bad-mix '((v :vec2f) (w :vec3f)) '(+ v w))))
+
+;;--- loading the compiler twice must not forget anything -----------------
+;; Every table here is module state, and a plain (define t '()) re-runs on
+;; a second load and resets it. Transitive double-loading is the normal
+;; case once more than one library wants the kernel compiler — lib/dist.scm
+;; and lib/wrangle.scm both do — so this silently discarded every
+;; signature and definition registered by whichever loaded first.
+
+(assert-true "a signature registered before a reload survives it"
+             (begin (load "lib/wgsl.scm")
+                    (if (wgsl-signature 'curve-elem) #t #f)))
+(assert-true "and so does its definition"
+             (string-contains? (wgsl-definitions-source) "fn curve_elem("))
+
+;;--- put the stub declarations back ------------------------------------
+;; draw, wall-a and obs were declared above to exercise call sites; no
+;; WGSL of those names exists anywhere. Layer 18 checks that every
+;; declared signature has a definition in the assembled shader — a real
+;; test, which once caught an `unresolved call target` that only the
+;; browser could see — so leaving these behind would fail it with a
+;; promise this file made and cannot keep.
+;;
+;; They used to be cleared by accident, because loading lib/wgsl.scm a
+;; second time reset the table. It no longer does.
+(wgsl-forget-declaration! 'draw)
+(wgsl-forget-declaration! 'wall-a)
+(wgsl-forget-declaration! 'obs)
 
 (suite-summary)

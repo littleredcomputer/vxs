@@ -72,19 +72,27 @@
 ;; Locals are numbered so that flattening nested scopes into one WGSL
 ;; function body cannot collide, and so shadowing keeps working.
 ;;
-;; The name is also UNDERSCORED, for the same reason a function's is: a
-;; hyphen is the ordinary way to spell a compound name in Scheme and is
-;; not a legal WGSL identifier character. Emitting `my-var_1` produced
-;; text this type checker accepted happily and the browser's shader
-;; compiler rejected — which is precisely the class of failure this file
-;; exists to move to Scheme, so it had no business surviving here.
+;; The name is also SANITISED, for the same reason a function's is: a
+;; WGSL identifier admits letters, digits and underscore and nothing
+;; else, while the ordinary Scheme spellings — `my-var`, `outside?`,
+;; `set!` — use all three of the characters it forbids. Emitting them
+;; produced text this type checker accepted happily and the browser's
+;; shader compiler rejected, which is precisely the class of failure this
+;; file exists to move to Scheme.
+;;
+;; Everything illegal becomes an underscore rather than being dropped:
+;; `a?` and `a!` are different names and must stay different, where
+;; deletion would collide them onto `a`.
 (define wgsl-counter 0)
 (define (wgsl-fresh base)
   (set! wgsl-counter (+ wgsl-counter 1))
   (string-append (wgsl-underscore base) "_" (number->string wgsl-counter)))
 
+(define (wgsl-ident-char c)
+  (if (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)) c #\_))
+
 (define (wgsl-underscore s)
-  (list->string (map (lambda (c) (if (char=? c #\-) #\_ c)) (string->list s))))
+  (list->string (map wgsl-ident-char (string->list s))))
 
 ;; Bind a result to a fresh local, so its code can be MENTIONED twice
 ;; without being EVALUATED twice. Compiled results are spliced as text, so
@@ -132,8 +140,14 @@
     (normalize . "normalize")))
 
 ;; Two arguments of the same type, result that type.
+;;
+;; `expt` is here as well as `pow` because a define-dual body has to be
+;; valid in BOTH languages, and Scheme spells this one `expt` — `pow` is
+;; not a Scheme procedure, so a dual written with it would type-check for
+;; the device and then fail as an unbound variable on its first host call.
 (define wgsl-binary-same
-  '((min . "min") (max . "max") (pow . "pow") (atan2 . "atan2") (step . "step")))
+  '((min . "min") (max . "max") (pow . "pow") (expt . "pow")
+    (atan2 . "atan2") (step . "step")))
 
 ;; Vector in, scalar out.
 (define wgsl-vector-to-scalar '((length . "length")))
@@ -630,7 +644,13 @@
 ;; and later be rewritten in Scheme without any caller changing.
 
 ;; (scheme-name wgsl-name (arg-type ...) result-type)
-(define wgsl-signatures '())
+;; GUARDED, because a second (load "lib/wgsl.scm") would otherwise reset
+;; this to empty and silently discard every signature registered since the
+;; first — and transitive double-loading is the normal case once more than
+;; one library wants the kernel compiler. The definitions and duals tables
+;; below are guarded for the same reason.
+(if (not (defined? 'wgsl-signatures))
+    (begin (define wgsl-signatures '())))
 
 (define (wgsl-declare! name wgsl-name arg-types result-type)
   (let loop ((xs wgsl-signatures) (acc '()) (found #f))
@@ -647,6 +667,20 @@
           (else (loop (cdr xs) (cons (car xs) acc) found)))))
 
 (define (wgsl-signature name) (assq name wgsl-signatures))
+
+;; Take a declaration back. A DECLARATION is a promise that hand-written
+;; WGSL of that name exists, and layer 18 checks every promise against the
+;; assembled shader — so a test that declares a stub purely to exercise a
+;; call site has made a promise it cannot keep and must withdraw it.
+;;
+;; Before the load guard above, re-loading this file wiped the table, and
+;; that accident was doing the withdrawing. Relying on it was never a plan.
+(define (wgsl-forget-declaration! name)
+  (set! wgsl-signatures
+        (let loop ((xs wgsl-signatures) (acc '()))
+          (cond ((null? xs) (reverse acc))
+                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
+                (else (loop (cdr xs) (cons (car xs) acc)))))))
 
 ;; Scheme spells names with hyphens, WGSL with underscores.
 (define (wgsl-fn-name name) (wgsl-underscore (symbol->string name)))
@@ -675,7 +709,9 @@
 ;; than appending — both because watch mode re-runs a file on every save,
 ;; and because a function must appear before the code that calls it.
 
-(define wgsl-definitions '())    ; ((name . source) ...) in emission order
+;; ((name . source) ...) in emission order. Guarded — see wgsl-signatures.
+(if (not (defined? 'wgsl-definitions))
+    (begin (define wgsl-definitions '())))
 
 (define (wgsl-put-definition! name source)
   (let loop ((xs wgsl-definitions) (acc '()) (found #f))
@@ -761,7 +797,8 @@
 ;; run hand-written WGSL on the VM — so this table is exactly the set of
 ;; names that mean something in both worlds, which is the question anything
 ;; evaluating kernel code on the host needs answered.
-(define wgsl-duals '())
+(if (not (defined? 'wgsl-duals))
+    (begin (define wgsl-duals '())))
 
 (define (wgsl-put-dual! name proc)
   (let loop ((xs wgsl-duals) (acc '()) (found #f))
