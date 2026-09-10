@@ -734,6 +734,54 @@
 (defmacro (define-gpu spec body)
   `(wgsl-define-fn! ',(car spec) ',(cdr spec) ',body))
 
+;; (define-dual (name (arg type) ...) body)
+;;
+;; ONE definition, two citizenships: an ordinary Scheme procedure the VM
+;; runs, and a kernel function a call site can reach. Written once, so the
+;; two cannot drift AT THE SOURCE — which is the whole tax a function pays
+;; to enter the kernel domain, and the reason the tax is cheap.
+;;
+;; Note the asymmetry in the expansion, because it is the entire idea: the
+;; CPU side splices the body UNQUOTED, so Scheme evaluates it; the kernel
+;; side splices it QUOTED, so the compiler reads it as text in another
+;; language. Same datum, two fates, no second copy to maintain.
+;;
+;; What this does NOT buy is NUMERICAL agreement: the device computes in
+;; f32 and the VM in f64. That gap is deliberate and load-bearing — see
+;; lib/dist.scm's header on why the more precise side is the oracle — so a
+;; comparison across it is a measurement, not a test to be tightened until
+;; it passes.
+;;
+;; The two halves fail at different moments, which is worth knowing when
+;; one does: the kernel half is compiled and type-checked HERE, at
+;; definition, while the Scheme half is only read here and can still carry
+;; an unbound name (a kernel builtin with no Scheme meaning) that surfaces
+;; on the first call.
+;; The Scheme halves, by name. A DECLARED function has none — nothing can
+;; run hand-written WGSL on the VM — so this table is exactly the set of
+;; names that mean something in both worlds, which is the question anything
+;; evaluating kernel code on the host needs answered.
+(define wgsl-duals '())
+
+(define (wgsl-put-dual! name proc)
+  (let loop ((xs wgsl-duals) (acc '()) (found #f))
+    (cond ((null? xs)
+           (set! wgsl-duals
+                 (reverse (if found acc (cons (cons name proc) acc)))))
+          ((eq? (car (car xs)) name)
+           ;; Replace rather than shadow, for the same reason wgsl-declare!
+           ;; does: watch mode re-runs a file on every save.
+           (loop (cdr xs) (cons (cons name proc) acc) #t))
+          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+
+(define (wgsl-dual name) (assq name wgsl-duals))
+
+(defmacro (define-dual spec body)
+  `(begin
+     (define (,(car spec) ,@(map car (cdr spec))) ,body)
+     (wgsl-define-fn! ',(car spec) ',(cdr spec) ',body)
+     (wgsl-put-dual! ',(car spec) ,(car spec))))
+
 ;;--- entry points -------------------------------------------------------
 
 ;; Compile a self-contained expression. Resets the local counter so the

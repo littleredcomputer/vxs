@@ -414,4 +414,43 @@
              (string-contains? (wgsl-definitions-source) "fn hyphen_probe("))
 
 
+;;--- define-dual: one definition, two citizenships -----------------------
+;; The form's whole claim is that the body is written ONCE, so the tests
+;; are not "does each half work" but "did both halves come from the same
+;; text": the Scheme procedure computes, the signature is registered with
+;; a DERIVED result type, and a call site type-checks against it.
+;;
+;; curve-elem is the subject rather than a toy because it is the helper
+;; the staged curve-fit model needs, and because its hyphen exercises the
+;; name transform WGSL requires.
+
+(define-dual (curve-elem (x :f32) (a :f32) (b :f32) (c :f32))
+  (+ (* a x x) (* b x) c))
+
+(assert-equal "the Scheme half is an ordinary procedure the VM runs"
+              17.0 (curve-elem 2.0 3.0 2.0 1.0))
+(assert-equal "the kernel half derived its result type rather than asserting one"
+              :f32 (list-ref (wgsl-signature 'curve-elem) 3))
+(assert-equal "and took the underscored name WGSL requires"
+              "curve_elem" (list-ref (wgsl-signature 'curve-elem) 1))
+(assert-equal "a call site type-checks against that signature"
+              :f32 (wgsl-type '(curve-elem 1.0 2.0 3.0 4.0) '()))
+(assert-true "and the definition reached the module"
+             (string-contains? (wgsl-definitions-source) "fn curve_elem("))
+
+;; The two ways a call site can be wrong, both caught in Scheme rather
+;; than by the browser's shader log.
+(assert-equal "a call with too few arguments is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(curve-elem 1.0) '())))
+(assert-equal "and one with the wrong argument type"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-type '(curve-elem (vec2 1 1) 2.0 3.0 4.0) '())))
+
+;; A mistake INSIDE the body is caught when the function is defined, not
+;; at some later call — the property define-gpu already had and that
+;; define-dual inherits by delegating to it.
+(assert-equal "a type error in the body is caught at definition time"
+              'raised (guard (e (#t 'raised))
+                        (wgsl-define-fn! 'bad-mix '((v :vec2f) (w :vec3f)) '(+ v w))))
+
 (suite-summary)

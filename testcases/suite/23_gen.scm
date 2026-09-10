@@ -228,4 +228,37 @@
 (assert-equal "and an unconstrained batched choice"
               'raised (guard (e (#t 'raised)) (importance (coin 10) {} 4 1)))
 
+;;--- a model keeps its source -------------------------------------------
+;; CARRIED, not transformed: what runs is the same closure it always was,
+;; and the datum rides alongside for anything that wants to read the model
+;; rather than run it. This is the field a staged compiler reads, and the
+;; reason nothing here needs a tracer to obtain one — the macro already
+;; held the source at definition time.
+
+(define-gen (kept a b) (+ a b))
+
+(assert-equal "define-gen carries the body datum"
+              '((+ a b)) (gf-source (kept 1 2)))
+(assert-equal "and the parameter names the arguments bind to"
+              '(a b) (gf-params (kept 1 2)))
+(assert-equal "while the arguments are still the values the call supplied"
+              '(1 2) (gf-args (kept 1 2)))
+(assert-equal "a multi-form body is kept whole, in order"
+              '((yield 1) (+ a b))
+              (gf-source ((gf (lambda (a b) (yield 1) (+ a b))
+                              '((yield 1) (+ a b)) '(a b)) 1 2)))
+
+;; A gf built by hand carries #f. The distinction that matters is between
+;; "cannot be read" and "reads as empty" — a staging path must refuse the
+;; first rather than compile it to nothing.
+(assert-equal "a hand-built gf reports no source rather than a plausible empty one"
+              #f (gf-source ((gf (lambda () 1)))))
+(assert-equal "and no parameter names"
+              #f (gf-params ((gf (lambda () 1)))))
+
+;; The model still RUNS, which is the property the source field must not
+;; have disturbed.
+(assert-equal "carrying the source did not change what the model does"
+              3 (:retval (sample (kept 1 2) 7)))
+
 (suite-summary)

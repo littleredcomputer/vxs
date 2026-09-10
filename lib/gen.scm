@@ -98,11 +98,29 @@
 ;;--- generative functions -----------------------------------------------
 
 (define-record-type <generative-function>
-  (make-gf f args) generative-function?
+  (make-gf f args source params) generative-function?
   (f gf-f)
-  (args gf-args))
+  (args gf-args)
+  ;; The body datum and the parameter NAMES, carried rather than
+  ;; transformed. `args` holds the values a call supplied; `params` holds
+  ;; the names they bind to, and a compiler over this model needs both.
+  ;;
+  ;; This is the whole of what a staged compiler wants, and the whole of
+  ;; what a tracer exists to reconstruct: the source was in the macro's
+  ;; hands at definition time, so carrying it costs one field and nothing
+  ;; at run time. Python cannot do this, which is why JAX watches an
+  ;; execution instead — trace memory proportional to what the code DID,
+  ;; to recover what it always SAID.
+  (source gf-source)
+  (params gf-params))
 
-(define (gf f) (lambda args (make-gf f args)))
+;; A gf built by hand carries no source and says so, rather than
+;; pretending: a staging path refuses what it cannot read, and #f is how
+;; it knows to refuse instead of miscompiling.
+(define (gf f . meta)
+  (let ((source (if (pair? meta) (car meta) #f))
+        (params (if (and (pair? meta) (pair? (cdr meta))) (cadr meta) #f)))
+    (lambda args (make-gf f args source params))))
 
 ;; (define-gen (model a b) body ...) — `model` becomes a CONSTRUCTOR, so
 ;; (model 1 2) builds a generative function rather than running one.
@@ -111,8 +129,13 @@
 ;; transformation on the body; this touches the body not at all — the
 ;; coroutine already does that work. All it buys is one name instead of
 ;; two, and no way to write the wrong one.
+;;
+;; It does now KEEP the body, which is not the same as transforming it:
+;; what runs is the same closure as before, and the datum rides alongside
+;; for anything that wants to READ the model rather than run it.
 (defmacro (define-gen spec . body)
-  `(define ,(car spec) (gf (lambda ,(cdr spec) ,@body))))
+  `(define ,(car spec)
+     (gf (lambda ,(cdr spec) ,@body) ',body ',(cdr spec))))
 
 ;; A random choice. Yields (address thing) and receives back whatever the
 ;; driver decides the choice is.
