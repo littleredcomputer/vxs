@@ -565,14 +565,19 @@
 ;; fold-i exists because a real program wanted something this language did
 ;; not have, and a form that foreclosed the escape would have made that a
 ;; blocker rather than a feature request.
+;; Compiled as :compute, which is what REFUSES dpdx and its family: there
+;; is no 2x2 quad in a compute dispatch, so a screen-space derivative here
+;; is rejected by the browser's shader compiler. Saying so lets that
+;; become a Scheme error instead.
 (define (wrangle-scheme body)
-  (let ((r (wgsl-compile body wrangle-env)))
-    (if (not (eq? (wgsl-type-of r) :point))
-        (error 'wgsl
-               "a wrangle body must end in (point ...); this one produces a value"))
-    (wrangle-wgsl (wgsl-join (map (lambda (l) (string-append "  " l))
-                                  (wgsl-stmts-of r))
-                             "\n"))))
+  (with-wgsl-stage :compute
+    (let ((r (wgsl-compile body wrangle-env)))
+      (if (not (eq? (wgsl-type-of r) :point))
+          (error 'wgsl
+                 "a wrangle body must end in (point ...); this one produces a value"))
+      (wrangle-wgsl (wgsl-join (map (lambda (l) (string-append "  " l))
+                                    (wgsl-stmts-of r))
+                               "\n")))))
 
 ;;--- shared read-only data ----------------------------------------------
 ;; Data every element reads, rather than data each element owns.

@@ -684,6 +684,15 @@
 ;; last position of a body rather than a rule anyone has to remember.
 (assert-equal "a body must end in (point ...)"
               'raised (guard (e (#t 'raised)) (wrangle-scheme '(+ 1.0 2.0))))
+
+;; A compute dispatch has no 2x2 quad, so a screen-space derivative is
+;; rejected by the browser's shader compiler — the one failure this
+;; checker must catch rather than forward. `wrangle-scheme` compiles as
+;; :compute and says so, which turns it into a Scheme error here.
+(assert-equal "a screen-space derivative is refused in a compute kernel"
+              'raised
+              (guard (e (#t 'raised))
+                (wrangle-scheme '(point (vec3 (dpdx pscale) 0 0) pscale colour))))
 (assert-equal "and (point ...) is not a value"
               'raised (guard (e (#t 'raised))
                         (wgsl-type '(+ 1.0 (point position pscale colour)) wrangle-env)))

@@ -72,18 +72,22 @@
 
 ;; (shadertoy body) -> complete WGSL source for gpu-run-kernel!
 ;; `body` is a lib/wgsl.scm expression returning vec3f.
+;; Compiled as :fragment, which is what admits dpdx and its family — the
+;; screen-space derivatives exist only where there is a 2x2 quad to
+;; difference across, and this is the harness that has one.
 (define (shadertoy body)
-  (let ((compiled (wgsl-compile body shadertoy-env)))
-    (if (not (eq? (wgsl-type-of compiled) :vec3f))
-        (error 'shadertoy
-               (string-append "kernel must return vec3<f32>, got: "
-                              (wgsl-type-name (wgsl-type-of compiled)))))
-    (string-append
-     shadertoy-preamble
-     "fn kernel(uv : vec2<f32>, time : f32, res : vec2<f32>) -> vec3<f32> {\n"
-     (wgsl-body body shadertoy-env "  ") "\n"
-     "}\n"
-     shadertoy-epilogue)))
+  (with-wgsl-stage :fragment
+    (let ((compiled (wgsl-compile body shadertoy-env)))
+      (if (not (eq? (wgsl-type-of compiled) :vec3f))
+          (error 'shadertoy
+                 (string-append "kernel must return vec3<f32>, got: "
+                                (wgsl-type-name (wgsl-type-of compiled)))))
+      (string-append
+       shadertoy-preamble
+       "fn kernel(uv : vec2<f32>, time : f32, res : vec2<f32>) -> vec3<f32> {\n"
+       (wgsl-body body shadertoy-env "  ") "\n"
+       "}\n"
+       shadertoy-epilogue))))
 
 ;; (define-kernel name body) — bind `name` to the WGSL compiled from `body`.
 ;;

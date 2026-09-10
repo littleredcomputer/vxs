@@ -480,6 +480,43 @@
               'raised (guard (e (#t 'raised))
                         (wgsl-define-fn! 'bad-mix '((v :vec2f) (w :vec3f)) '(+ v w))))
 
+;;--- the screen-space derivatives, and the one stage that matters --------
+;; dpdx and friends are computed by differencing across the 2x2 quad a
+;; FRAGMENT shader runs in. A compute shader has no quad, so the browser
+;; rejects them there — the one failure this checker must catch, since a
+;; shader log in a console is what it exists to avoid.
+
+(assert-equal "dpdx keeps its argument's type, in a fragment compile"
+              :vec3f (with-wgsl-stage :fragment (wgsl-type '(dpdx col) E)))
+(assert-equal "fwidth too" :f32
+              (with-wgsl-stage :fragment (wgsl-type '(fwidth time) E)))
+(assert-equal "and it is refused in a compute compile"
+              'raised (guard (e (#t 'raised))
+                        (with-wgsl-stage :compute (wgsl-type '(dpdx time) E))))
+;; "Not saying" must not count as permission: an unstaged compile is
+;; exactly the case where nothing knows where the code will run.
+(assert-equal "and refused when nothing said what the stage is"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(dpdx time) E)))
+;; The stage goes back even when the compile raises, or a later unstaged
+;; compile would inherit permission it never asked for.
+(assert-equal "the stage is restored after a raise inside it"
+              'raised
+              (begin (guard (e (#t 'ignored))
+                       (with-wgsl-stage :fragment (wgsl-type '(+ uv col) E)))
+                     (guard (e (#t 'raised)) (wgsl-type '(dpdx time) E))))
+
+;; The reason they were added: normalising an implicit function by its
+;; screen-space gradient gives distance in PIXELS, so a stroke is a
+;; uniform width without anyone converting plot units by hand.
+(assert-equal "the near-SDF idiom type-checks to a scalar"
+              :f32
+              (with-wgsl-stage :fragment
+                (wgsl-type '(let* ((g (- (* time time) (swizzle uv y)))
+                                   (d (/ (abs g)
+                                         (length (vec2 (dpdx g) (dpdy g))))))
+                              (smoothstep 0.0 1.5 d))
+                           E)))
+
 ;;--- loading the compiler twice must not forget anything -----------------
 ;; Every table here is module state, and a plain (define t '()) re-runs on
 ;; a second load and resets it. Transitive double-loading is the normal

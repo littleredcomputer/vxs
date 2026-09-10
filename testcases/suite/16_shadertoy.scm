@@ -96,4 +96,20 @@
 (assert-equal "res is a vec2" :vec2f (wgsl-type 'res shadertoy-env))
 (assert-true "an unknown name is rejected" (rejects? '(vec3 mouse 0 0)))
 
+;;--- this harness is the one with a quad --------------------------------
+;; The screen-space derivatives exist only where there are neighbouring
+;; fragments to difference against, so `shadertoy` compiles as :fragment
+;; and admits them. The assertion is that the HARNESS says so — the
+;; mechanism itself is layer 15's.
+
+(assert-true "a kernel may take a screen-space derivative here"
+             (string-contains? (shadertoy '(vec3 (fwidth time) 0 0)) "fwidth("))
+(assert-true "and the near-SDF idiom compiles, distance in pixels"
+             (string-contains?
+              (shadertoy '(let* ((g (- (swizzle uv y) 0.5))
+                                 (d (/ (abs g)
+                                       (length (vec2 (dpdx g) (dpdy g))))))
+                            (vec3 (smoothstep 0.0 1.5 d) 0 0)))
+              "dpdy("))
+
 (suite-summary)

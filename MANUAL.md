@@ -1768,6 +1768,83 @@ milliseconds, and nothing needs it every frame.
 
 Nearly free; `defined?` exists.
 
+#### The curve-fit demo as a programmable surface — **decided, unstarted**
+
+The shortcut and the real version cost about the same GPU work and differ
+in **whether the curve is a parameter of the program**. A hard-coded
+quadratic alpha-blended 5000 times is prettier than 40 polylines and says
+nothing new. One `curve-elem` next to the model, generating the score
+*and* the picture, means swapping in `a·sin(bx) + c` changes the model,
+the inference and the plot from one edit — which is a claim you can
+demonstrate in ten seconds.
+
+`define-dual` already supplies two of the three consumers. The plot is
+the new one.
+
+**It splits into two halves, and only the first carries the thesis.**
+
+- **The visual.** Host inference exactly as it is now (30 ms at K=2000),
+  resample N particles as the demo already does with
+  `rng-fill-categorical!`, upload their columns, and draw the posterior
+  in one **shadertoy** pass that loops over them accumulating near-SDF
+  coverage. That is the alpha blend *computed* rather than composited, so
+  it needs no new renderer — and at 800×500 with 256 particles and ~20
+  flops a contribution it is about 2 Gflop a frame, well under a
+  millisecond. `NDRAW = 40` simply becomes 256.
+- **The compute.** Move scoring to the device. Needs the staged-name
+  binding translation, the `point`-terminal decision and `gpu-gather!` —
+  and is **invisible to the thesis**, since "one procedure generates
+  model, inference and picture" is equally true with scoring on the host.
+
+So the visual half is reachable without any of the decisions the staged
+path is still circling, and the compute half waits for a program that
+wants K in the hundreds of thousands.
+
+The one missing piece of infrastructure is small: `lib/shadertoy.scm` has
+only a uniform at binding 0, so it cannot read a particle table. It needs
+a read-only storage binding with declared accessors — exactly the
+`shared-layout!` pattern `lib/wrangle.scm` already implements at binding 3.
+
+#### ✅ Screen-space derivatives, not autodiff, for the near-SDF — **done**
+
+A uniform-width stroke needs the distance to the curve, and the
+first-order estimate wants `f′`. It is tempting to reach for autodiff.
+Don't: `dpdx`/`dpdy` are better suited, not merely cheaper.
+
+```scheme
+;; g is the residual field f(px) - py, in plot coordinates
+(/ (abs g) (length (vec2 (dpdx g) (dpdy g))))   ; distance in PIXELS
+```
+
+Normalising an implicit function by its screen-space gradient gives the
+distance **already in pixel units**. The analytic form
+`|g| / sqrt(1 + f′²)` gives *plot* units and still needs converting — and
+plot axes almost never have equal scales, so it then wants the slope
+rescaled by `sx/sy` before the perpendicular distance means anything on
+screen. `dpdy(g)` picks the vertical scale up on its own, so the
+anisotropy handles itself.
+
+It also costs the thesis nothing: there is still exactly one definition
+of the curve. A hardware derivative **measures** it rather than being a
+second definition of it, so there is nothing that can drift.
+
+`dpdx`, `dpdy` and `fwidth` are in the kernel language, and **gated on a
+stage**. `wgsl-stage-of` is an exception list, not the beginning of a
+stage system: `shadertoy` compiles as `:fragment` and admits them,
+`wrangle-scheme` compiles as `:compute` and refuses them, and an
+un-staged compile refuses them too — "not saying" must not count as
+permission, because that is exactly the case where nothing knows where
+the code will run. `with-wgsl-stage` restores the stage even if the
+compile raises.
+
+Two things to check when the first curve is drawn, both cheap:
+**uniformity** — WGSL requires derivatives in uniform control flow, and a
+`for` with a uniform trip count preserves it, but implementations are
+strict; and **curvature within a quad**, since the estimate is a
+one-pixel finite difference and misestimates where `f′` swings hard
+across 2×2 pixels. A high-frequency `sin(bx)` is the case to look at,
+which is exactly the curve worth swapping in to show the surface off.
+
 #### `batch-i` allocates a distribution per element — **noted, not scheduled**
 
 `batch-i*` calls `(f j)` per index, and `(normal <expr> sigma)` builds a
@@ -1825,6 +1902,27 @@ The residual staleness risk is the browser cache serving an old build,
 which is what the BUILDSTAMP baked into the binary exists to expose:
 compare the stamp the page prints against the build you just made.
 
+#### `fake_webgpu.js` counts dispatches; it does not execute WGSL
+
+`dispatchWorkgroups()` increments a counter. So everything up to a
+dispatch is testable headlessly — the emitted kernel type-checks, the
+bindings resolve, the host backend agrees with `assess` — and **numbers
+coming back off a device are not**. A device-versus-host comparison needs
+a browser and a look.
+
+This is what pushed the staged compiler to lower to an **IR with two
+backends** rather than straight to WGSL, and that turned out better than
+the thing it replaced: it separates whether the compiler *read* the model
+correctly (structural, exactly reproducible, and now asserted
+bit-identical against `assess`) from whether f32 agrees with f64
+(numerical, already characterised in [§5a](#why-a-port-and-not-a-better-design)).
+Testing them together at one tolerance would let a structural bug hide
+under it.
+
+Worth knowing before starting any device-numeric work: that comparison is
+the first thing in this project that cannot be machine-checked, so it
+wants an eye rather than a test.
+
 #### Migrate the classic testcases into the ground-up suite
 
 Not urgent. The 13 `vx-test.scm` cases move
@@ -1838,6 +1936,27 @@ value is the stress profile (self-parsing 2300 lines), not the answer.
 ### Parked ideas
 
 Not scheduled, kept so they are not rediscovered from scratch.
+
+- **Differentiating the IR, when a posterior asks.** Autodiff's payoff is
+  MALA or short-trajectory HMC — the difference between a random-walk
+  kernel that mixes badly past a couple of dimensions and one that does
+  not. Rendering does not need it (see the near-SDF entry above).
+
+  The target is **not** `curve-elem`. It is the staged IR, differentiated
+  with respect to a named choice, which is a structural recursion over a
+  small closed grammar — `number`, `choice`, `choice-i`, `data`, `call`,
+  the four arithmetic ops, `sum-over`, `scan-over` — with `call` reaching
+  into a dual's source, since a dual's body is a datum too.
+
+  **Wait for the trigger, which is a posterior that demonstrably will not
+  mix under a random walk.** That moment says what the gradient has to
+  handle, and the answers are not guessable in advance: how many
+  dimensions; whether `scan-over` must be differentiated *through* (the
+  adjoint of a trajectory, a much larger thing than an expression);
+  whether `flip` needs a reparameterisation story at all. The pendulum's
+  parameter posterior is smooth and low-dimensional, so a random walk
+  will be fine there — it is the double pendulum, or anything with a
+  banana, that will ask.
 
 - **Per-cube orientation** in the cubes renderer.
 - **Overcooked-shaped actors** — goal-directed agents for the outside demo,

@@ -137,7 +137,63 @@
   '((sin . "sin") (cos . "cos") (tan . "tan") (asin . "asin") (acos . "acos")
     (exp . "exp") (log . "log") (sqrt . "sqrt") (abs . "abs")
     (floor . "floor") (ceil . "ceil") (fract . "fract") (sign . "sign")
-    (normalize . "normalize")))
+    (normalize . "normalize")
+    ;; The screen-space derivatives. Fragment-only — see wgsl-stage-of.
+    (dpdx . "dpdx") (dpdy . "dpdy") (fwidth . "fwidth")))
+
+;;--- the one place a stage matters --------------------------------------
+;; Almost every operation is legal in any shader, and this table is the
+;; exception list rather than the beginning of a stage system.
+;;
+;; dpdx and its family are computed by differencing across the 2x2 quad a
+;; FRAGMENT shader executes in. There is no quad in a compute shader, so
+;; the browser's shader compiler rejects them there — which is the one
+;; place a mistake must not be allowed to reach, since a shader log in a
+;; console is what this whole file exists to avoid.
+;;
+;; What they are FOR: a uniform-width stroke needs the distance to a
+;; curve, and normalising an implicit function by its screen-space
+;; gradient gives that distance already in PIXELS —
+;;
+;;   (/ (abs g) (length (vec2 (dpdx g) (dpdy g))))
+;;
+;; for g the residual field. The analytic alternative, |g|/sqrt(1+f'^2),
+;; gives plot units and then needs the slope rescaled by the axes' aspect
+;; before it means anything on screen; dpdy picks the vertical scale up on
+;; its own. So this is the better mechanism and not merely the cheaper
+;; one, and it is why the near-SDF wants no derivative machinery at all.
+(define wgsl-stage-of
+  '((dpdx . :fragment) (dpdy . :fragment) (fwidth . :fragment)))
+
+;; Which stage is being compiled, or #f for "not saying". A harness sets
+;; it around its own compile; nothing else should need to.
+(if (not (defined? 'wgsl-stage))
+    (begin (define wgsl-stage #f)))
+
+;; Refuse a stage-restricted operation when the stage does not match —
+;; INCLUDING when nothing said what the stage is. "Not saying" must not
+;; count as permission: an unstaged compile is precisely the case where
+;; nothing knows where the code will end up, which is the case where the
+;; browser gets to find out instead.
+(define (wgsl-check-stage op)
+  (let ((want (assq op wgsl-stage-of)))
+    (if (and want (not (eq? (cdr want) wgsl-stage)))
+        (error 'wgsl
+               (string-append
+                "(" (symbol->string op) ") is only available in a "
+                (symbol->string (cdr want)) " shader"
+                (if wgsl-stage
+                    (string-append ", and this is a "
+                                   (symbol->string wgsl-stage) " one")
+                    ", and this compile did not say which stage it is"))))))
+
+;; Run a compile with the stage declared, and put it back afterwards even
+;; if the compile raises — a harness that left the stage set would license
+;; a later unstaged compile to use fragment-only operations.
+(defmacro (with-wgsl-stage stage . body)
+  `(let ((was# wgsl-stage))
+     (set! wgsl-stage ,stage)
+     (unwind-protect (begin ,@body) (set! wgsl-stage was#))))
 
 ;; Two arguments of the same type, result that type.
 ;;
@@ -248,6 +304,10 @@
     (else (error 'wgsl "cannot compile:" expr))))
 
 (define (wgsl-form op args env)
+  ;; Before anything else, and for every form: a stage-restricted
+  ;; operation is refused where it cannot run. One check covers built-ins
+  ;; and declared functions alike, because the table is keyed by name.
+  (wgsl-check-stage op)
   (cond
     ;; (vec2 a b) / (vec3 a b c) / (vec4 ...) — all components f32.
     ((memq op '(vec2 vec3 vec4))
