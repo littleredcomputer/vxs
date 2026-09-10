@@ -66,9 +66,24 @@
                  (lambda (view start n)   (apply sum view start n args))))))
 
 ;; The standard families, over lib/dist.scm.
+;;
+;; Exponential and gamma were the odd pair out: lib/dist.scm has had all
+;; four capabilities for both of them for some time, and only this binding
+;; was missing — so a model could not name them at all, and nothing said
+;; why. Both take their second parameter as a RATE, matching the sampler
+;; and the score there.
+;;
+;; `gamma` is a family here and is NOT stageable, which is the ragged
+;; coverage working rather than an oversight: its score needs lgamma,
+;; which WGSL has not got, so lib/stage.scm refuses a model using it by
+;; name and the model stays on the fiber path.
 (define normal  (distribution 'normal  random-normal  logpdf-normal  fill-normal!  logpdf-sum-normal))
 (define uniform (distribution 'uniform random-uniform logpdf-uniform fill-uniform! logpdf-sum-uniform))
 (define flip    (distribution 'flip    random-flip    logpdf-flip    fill-flip!    logpdf-sum-flip))
+(define exponential
+  (distribution 'exponential random-exponential logpdf-exponential
+                fill-exponential! logpdf-sum-exponential))
+(define gamma   (distribution 'gamma   random-gamma   logpdf-gamma   fill-gamma!   logpdf-sum-gamma))
 ;; Beta is X/(X+Y) over two Gamma draws. It waited on Gamma's boost for
 ;; alpha < 1: Beta(0.5, 0.5) is Jeffreys' prior, and before the boost both
 ;; draws fabricated 1.0, so every sample was exactly 0.5.

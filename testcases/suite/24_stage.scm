@@ -166,6 +166,31 @@
 (assert-true "a distribution with no device score is refused (beta needs lgamma)"
              (refused? (lambda () (stage (uses-beta)))))
 
+(define-gen (uses-gamma) (at :g (gamma 2.0 1.0)))
+(assert-true "and gamma, for the same reason"
+             (refused? (lambda () (stage (uses-gamma)))))
+
+;; Exponential is the counter-case, and the pair is the point: both are
+;; families a model may name on the fiber path, and only one of them can
+;; go to a device. That boundary is lib/stat.wgsl's, not a limit here —
+;; and it moved once already, when writing the host score as a dual put
+;; logpdf_exponential on a device that had a sampler and nothing to weight
+;; it with.
+(define-gen (waits rate) (at :t (exponential rate)))
+(define exp-st (stage (waits 2.0)))
+(assert-true "exponential stages, and agrees with assess"
+             (< (abs (- (staged-logpdf exp-st {:t 0.75})
+                        (car (assess (waits 2.0) {:t 0.75}))))
+                1e-12))
+(assert-equal "its kernel calls the device score by name"
+              '(logpdf-exponential t 2.0) (staged-kernel exp-st))
+;; No declaration needed for either name, and both absences say something.
+;; logpdf-exponential is registered by its own define-dual; and a SCALAR
+;; choice becomes a kernel parameter rather than an accessor, so `t` is
+;; supplied by the environment, not called.
+(assert-equal "and type-checks with the choice supplied as a parameter"
+              :f32 (wgsl-type (staged-kernel exp-st) '((t . :f32))))
+
 (define-gen (repeats-an-address)
   (let* ((p (at :x (normal 0 1))) (q (at :x (normal 0 1)))) (+ p q)))
 (assert-true "the same address twice is refused"

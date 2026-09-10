@@ -62,19 +62,22 @@
 ;;
 ;; The absences are structural, not pending work. logpdf-gamma and
 ;; logpdf-beta need lgamma, which WGSL does not have and cannot cheaply
-;; get; lib/dist.scm says so at both definitions. logpdf-exponential is a
-;; near miss — the host has it, the device has random_exponential but no
-;; score to go with it, so it is one define-dual away rather than one
-;; approximation away.
+;; get; lib/dist.scm says so at both definitions.
+;;
+;; Exponential used to be listed here as a near miss — the host had a
+;; score and the device had random_exponential with nothing to weight it
+;; with. Writing the host version once, as a dual, put it on the device,
+;; so it is a full member now.
 ;;
 ;; Keeping the map here rather than in a comment is the point: a model
 ;; using beta is refused by name at staging, instead of emitting a call to
 ;; a function the device does not define.
 (define staged-families
   ;; (family logpdf-name parameter-count)
-  '((normal  logpdf-normal  2)
-    (uniform logpdf-uniform 2)
-    (flip    logpdf-flip    1)))
+  '((normal      logpdf-normal      2)
+    (uniform     logpdf-uniform     2)
+    (flip        logpdf-flip        1)
+    (exponential logpdf-exponential 1)))
 
 (define (staged-family f) (assq f staged-families))
 
@@ -414,15 +417,17 @@
                        (+ acc (staged-term body st choices env))))))))
       (else (error 'stage "unknown term" t)))))
 
+;; Dispatched through staged-families rather than a parallel `cond` over
+;; the same names. The table already says which logpdf each family scores
+;; with, and define-dual already registered that logpdf's Scheme half, so
+;; a second listing here would only be a copy that could fall behind — as
+;; it did, the day exponential joined the table and this did not notice.
 (define (staged-score dist value st choices idx)
-  (let* ((family (car dist))
-         (ps     (map (lambda (a) (staged-value a st choices idx)) (cdr dist)))
-         (v      (staged-value value st choices idx)))
-    (cond
-      ((eq? family 'normal)  (logpdf-normal  v (car ps) (cadr ps)))
-      ((eq? family 'uniform) (logpdf-uniform v (car ps) (cadr ps)))
-      ((eq? family 'flip)    (logpdf-flip    v (car ps)))
-      (else (error 'stage "unknown family" family)))))
+  (let ((entry (staged-family (car dist)))
+        (ps    (map (lambda (a) (staged-value a st choices idx)) (cdr dist)))
+        (v     (staged-value value st choices idx)))
+    (if (not entry) (error 'stage "unknown family" (car dist)))
+    (apply (staged-procedure (cadr entry)) (cons v ps))))
 
 (define (staged-value e st choices idx)
   (cond

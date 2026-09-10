@@ -228,6 +228,43 @@
 (assert-equal "and an unconstrained batched choice"
               'raised (guard (e (#t 'raised)) (importance (coin 10) {} 4 1)))
 
+;;--- exponential and gamma are families a model can name ----------------
+;; lib/dist.scm had all four capabilities for both of these — sampler,
+;; score, fill and buffer sum — and only the (distribution ...) binding was
+;; missing, so a model could not name them and nothing said why. The
+;; second parameter is a RATE in both halves.
+
+(define-gen (waiting-time rate) (at :t (exponential rate)))
+
+(assert-true "exponential samples, and on its support"
+             (> (:retval (:t (sample (waiting-time 2.0) 11))) 0.0))
+;; Score against the closed form: log(rate) - rate*t.
+(assert-true "and scores as log(rate) - rate*t"
+             (< (abs (- (car (assess (waiting-time 2.0) {:t 0.75}))
+                        (- (log 2.0) (* 2.0 0.75))))
+                1e-12))
+;; A rate of 2 has mean 1/2. Enough draws to be sure, few enough to be quick.
+(assert-true "with the mean its rate implies"
+             (let loop ((i 0) (s 0.0))
+               (if (= i 4000)
+                   (< (abs (- (/ s 4000.0) 0.5)) 0.03)
+                   (loop (+ i 1)
+                         (+ s (:retval (:t (sample (waiting-time 2.0) i))))))))
+
+(define-gen (a-gamma) (at :g (gamma 2.0 1.0)))
+(assert-true "gamma samples too, on its own support"
+             (> (:retval (:g (sample (a-gamma) 5))) 0.0))
+;; Gamma(2, rate 1) has mean alpha/rate = 2.
+(assert-true "with the mean its shape and rate imply"
+             (let loop ((i 0) (s 0.0))
+               (if (= i 4000)
+                   (< (abs (- (/ s 4000.0) 2.0)) 0.1)
+                   (loop (+ i 1) (+ s (:retval (:g (sample (a-gamma) i))))))))
+;; Off the support is -inf, not a large negative — the convention every
+;; other score here keeps.
+(assert-true "and -inf below the support"
+             (< (car (assess (a-gamma) {:g -1.0})) -1e300))
+
 ;;--- a model keeps its source -------------------------------------------
 ;; CARRIED, not transformed: what runs is the same closure it always was,
 ;; and the datum rides alongside for anything that wants to read the model

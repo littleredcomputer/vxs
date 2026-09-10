@@ -1192,6 +1192,18 @@ both need `lgamma`, which WGSL has not got.
 | `random-gamma r alpha lambda` | `logpdf-gamma` | `fill-gamma!` | `logpdf-sum-gamma` |
 | `random-beta r alpha beta` | `logpdf-beta` | `fill-beta!` | `logpdf-sum-beta` |
 
+Every row is also a **family** a model can name — `uniform`, `normal`,
+`flip`, `exponential`, `gamma`, `beta` — which bundles that row's four
+capabilities into one object that can sit at an address
+([§5](#5-generative-functions)). The row is what you call directly with a
+generator in hand; the family is what `at` is given. `exponential` and
+`gamma` took a while to get theirs: `lib/dist.scm` had all four for both
+of them well before the binding existed, so a model simply could not name
+them, and nothing said why.
+
+Which of them can also reach a **device** is a shorter list, and
+[§5c](#what-may-sit-in-a-kernel-and-what-may-not) has it.
+
 `random-gamma` **boosts below α = 1**. Marsaglia–Tsang's squeeze needs
 α ≥ 1; below that `d = α − 1/3` goes non-positive, the acceptance test can
 never pass, and a fabricated `1.0` came back — a plausible gamma value,
@@ -1556,7 +1568,7 @@ rejuvenation alike.
 
 | | |
 |---|---|
-| distributions that stage | `normal`, `uniform`, `flip` |
+| distributions that stage | `normal`, `uniform`, `flip`, `exponential` |
 | refused | `gamma`, `beta` — both need `lgamma`, which WGSL has not got |
 | state per `scan-i` | at most **three** components |
 

@@ -5,24 +5,35 @@
 ;; is point -> point: the same buffer the renderer reads, rewritten on the
 ;; GPU instead of by Scheme.
 ;;
-;; DELIBERATELY MINIMAL. The attribute vocabulary here is the smallest
-;; thing that makes a compute kernel work — the point index, the time, and
-;; get/set for position, size and colour. It is NOT the wrangle algebra:
-;; there is no @P, no attribute binding, no notion of a node. Those are the
-;; interesting design questions and they should be answered from several
-;; real programs, not invented under the pressure of getting one to run.
+;; TWO WAYS TO WRITE A BODY, and both are supported. `wrangle-wgsl` takes
+;; raw WGSL and `wrangle-scheme` takes the kernel language of lib/wgsl.scm,
+;; type-checked here and ending in the `point` terminal. The raw path stays
+;; as the escape hatch and has earned it — fold-i exists because a real
+;; program wanted something the language did not have, and a form that
+;; foreclosed the escape would have made that a blocker rather than a
+;; feature request.
 ;;
-;; The body is WGSL for now, not the kernel language of lib/wgsl.scm.
-;; Wiring the compiler in here is exactly the step that would force the
-;; vocabulary decision, so it waits.
+;; STILL NOT THE WRANGLE ALGEBRA. There is no @P and no notion of a node,
+;; and those remain design questions to answer from several real programs
+;; rather than to invent under the pressure of getting one to run. What
+;; does exist is attribute BINDING: scratch-attributes! declares named,
+;; typed, per-element storage, and a kernel then says `weight` and means
+;; this element's weight, the way VEX means @weight. Declared rather than
+;; dynamic, because a GPU buffer cannot be made up as it goes.
 ;;
 ;; What the body has in scope:
 ;;   i     u32, the point index (already bounds-checked)
 ;;   w     the uniform: w.time, w.count, w.seed
 ;;   pt_pos(i), pt_size(i), pt_colour(i)   read
 ;;   pt_write(i, pos, size, colour)        write
+;;   whatever scratch-attributes! and wrangle-params! declared
+;;   whatever shared-layout! declared, as (shared-NAME k)
 ;;   the whole of lib/rng.wgsl and lib/stat.wgsl — random_normal,
-;;   random_uniform, random_gamma, random_flip, and the logpdf_* family
+;;   random_uniform, random_gamma, random_flip
+;;   the logpdf_* family, which is NOT in lib/stat.wgsl any more: those
+;;   are define-dual'd in lib/dist.scm and arrive through
+;;   wgsl-definitions-source, so they are in scope for the same reason a
+;;   define-gpu function is
 ;;   heat_colour(t), cool_colour(t) from lib/colour.wgsl — display ramps,
 ;;   not attributes
 ;;
