@@ -158,8 +158,6 @@
 
 ;;--- backend two: the device --------------------------------------------
 
-(wgsl-declare! 'logpdf-normal "logpdf_normal" '(:f32 :f32 :f32) :f32)
-(wgsl-declare! 'logpdf-uniform "logpdf_uniform" '(:f32 :f32 :f32) :f32)
 (wgsl-declare! 'ys "ys_at" '(:u32) :f32)
 
 (assert-equal "the emitted kernel expression type-checks to a scalar"

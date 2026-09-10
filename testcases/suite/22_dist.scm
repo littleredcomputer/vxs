@@ -136,8 +136,61 @@
              (and (wgsl-has? "-0.70711") (wgsl-has? "2.30753") (wgsl-has? "0.27061")
                   (wgsl-has? "0.99229") (wgsl-has? "0.04481")))
 (assert-true "and its Newton constant"  (wgsl-has? "1.12837916709551257"))
-(assert-true "logpdf_normal's half-log-2pi matches"
-             (wgsl-has? "0.9189385175704956"))
+;; logpdf_normal is no longer hand-written there to drift FROM: it is
+;; define-dual'd in lib/dist.scm, so its constant has exactly one home and
+;; a transcription check would be checking nothing. What is worth
+;; asserting instead is that the single source really reaches a device —
+;; the emitted definition, rather than a copy of it.
+(assert-false "logpdf_normal is no longer hand-written in stat.wgsl"
+              (wgsl-has? "fn logpdf_normal"))
+(assert-true "the dual emits it instead, half-log-2pi and all"
+             (string-contains? (wgsl-definitions-source) "0.9189385175704956"))
+
+;;--- the log densities have exactly one home ----------------------------
+;; They used to have two: Scheme here, hand-written WGSL there, kept in
+;; step by transcription and defended by assertions like the ones above.
+;; define-dual removes the second copy rather than checking it, so what is
+;; worth testing now is that BOTH halves really exist and come from the
+;; one text — a Scheme procedure that computes, and a definition that
+;; reaches a shader.
+
+(define (dual-both-ways? name wgsl-name)
+  (and (wgsl-signature name)                                     ; declared
+       (wgsl-dual name)                                          ; and runnable here
+       (string-contains? (wgsl-definitions-source)
+                         (string-append "fn " wgsl-name "("))))  ; and emitted
+
+(assert-true "normal is dual"      (dual-both-ways? 'logpdf-normal  "logpdf_normal"))
+(assert-true "uniform is dual"     (dual-both-ways? 'logpdf-uniform "logpdf_uniform"))
+(assert-true "flip is dual"        (dual-both-ways? 'logpdf-flip    "logpdf_flip"))
+;; This one is new to the device: lib/stat.wgsl had random_exponential and
+;; no score to go with it, so a kernel could draw one and not weight it.
+;; Writing the host version once put it there.
+(assert-true "and exponential, which the device did not have at all"
+             (dual-both-ways? 'logpdf-exponential "logpdf_exponential"))
+
+;; The two that cannot follow, and the reason is structural rather than
+;; pending: both need lgamma, which WGSL does not have. lib/stage.scm
+;; refuses a model using them by name rather than emitting a call to a
+;; function no shader defines.
+(assert-false "gamma is not dual, because WGSL has no lgamma"
+              (if (wgsl-dual 'logpdf-gamma) #t #f))
+(assert-false "nor beta, for the same reason"
+              (if (wgsl-dual 'logpdf-beta) #t #f))
+
+;; Reconciling the two copies meant choosing between them where they
+;; disagreed, and they did: lib/stat.wgsl tested for NaN and this file did
+;; not. Without the test a NaN compares false against both bounds, is
+;; judged inside the support, and receives a finite log-density — a real
+;; number for a value that is not one. The host gained the check.
+(assert-true "a NaN is not scored as though it were inside the support"
+             ;; `nan` itself reads as a numeric literal here, so the value
+             ;; needs a name that is a symbol.
+             (let ((not-a-number (/ 0.0 0.0)))
+               (not (= (logpdf-uniform not-a-number 0.0 1.0)
+                       (logpdf-uniform 0.5 0.0 1.0)))))
+(assert-equal "while an ordinary value is unaffected"
+              (log 1.0) (logpdf-uniform 0.5 0.0 1.0))
 
 ;; Structural, not numeric: the samplers must keep drawing what they draw
 ;; now. random_normal takes ONE uniform; a change to Box-Muller would take

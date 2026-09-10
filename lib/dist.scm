@@ -22,6 +22,7 @@
 ;;; src/vx_vm.cpp, and the note there for why only the core moved down.
 
 (load "lib/threefry.scm")   ; the portable reference the native core is checked against
+(load "lib/wgsl.scm")       ; for define-dual — see the log densities below
 
 (define dist-pi 3.141592653589793)
 
@@ -175,11 +176,26 @@
   (* (/ 1.0 lambda) (random-gamma-theta-one r alpha)))
 
 ;;--- log densities ------------------------------------------------------
-;; The half that turns samples into weights. Kept in the same de-compiled
-;; shape as the WGSL, odd-looking intermediate names and all, because the
-;; point is that the two can be read side by side.
+;; The half that turns samples into weights, and the half that is now
+;; WRITTEN ONCE. These used to exist twice — here in Scheme and again as
+;; hand-written WGSL in lib/stat.wgsl — kept in step by transcribing one
+;; into the other and asserting afterwards that they still agreed. The
+;; de-compiled shape below, odd intermediate names and all, is a fossil of
+;; that arrangement: it was written to be read side by side with the WGSL.
+;;
+;; define-dual removes the second copy rather than checking it. The body
+;; is spliced unquoted for the VM and quoted for the kernel compiler, so
+;; there is no longer a transcription that could drift, and lib/stat.wgsl
+;; no longer defines these at all.
+;;
+;; WHAT STAYS BEHIND, and why it is not pending work. The SAMPLERS cannot
+;; follow: every one of them takes the generator explicitly here and finds
+;; it as per-invocation private state on the device, so the two genuinely
+;; have different signatures. logpdf-gamma and logpdf-beta cannot either —
+;; they need lgamma, which WGSL does not have. Those absences are exactly
+;; what lib/stage.scm refuses a model for, by name.
 
-(define (logpdf-normal v loc scale)
+(define-dual (logpdf-normal (v :f32) (loc :f32) (scale :f32))
   (let* ((d (/ v scale))
          (e (/ loc scale))
          (f (- d e))
@@ -187,7 +203,7 @@
          (k (+ 0.9189385175704956 (log scale))))
     (- h k)))
 
-(define (logpdf-flip v p)
+(define-dual (logpdf-flip (v :f32) (p :f32))
   (let* ((h (log (+ (- p) 1.0)))      ; log1p(-p)
          (i (log p))
          (k (- 1.0 v))
@@ -199,12 +215,18 @@
 ;; lib/stat.wgsl, which has random_exponential and no score for it — added
 ;; here first because the host is where scoring happens; the device wants
 ;; the same function whenever a kernel needs to weight one.
-(define (logpdf-exponential v lambda)
+;; The parameter is `rate` rather than `lambda` now that this is a dual:
+;; the name reaches the emitted WGSL, and shadowing a special form to
+;; produce it was never a good trade for one word.
+(define-dual (logpdf-exponential (v :f32) (rate :f32))
   ;; -inf below the support, not a large negative: that is what log(0) is,
   ;; it is what every other logpdf here returns off-support, and it behaves
   ;; correctly downstream — (exp -inf) is 0, so an impossible value gets
   ;; exactly zero probability rather than an extremely small one.
-  (if (< v 0.0) (log 0.0) (- (log lambda) (* lambda v))))
+  ;;
+  ;; On the device `if` is select, so BOTH arms are evaluated — which is
+  ;; safe here only because neither traps: log(0) is -inf, not a fault.
+  (if (< v 0.0) (log 0.0) (- (log rate) (* rate v))))
 
 ;; Gamma(alpha, rate=lambda). lambda is the RATE, matching random-gamma,
 ;; which multiplies a Gamma(alpha, theta=1) draw by 1/lambda.
@@ -223,10 +245,18 @@
          (* (- alpha 1.0) (log v))
          (- (* lambda v)))))
 
-(define (logpdf-uniform v low high)
-  (let* ((outside? (or (< v low) (> v high)))
-         (l (if outside? 0.0 (/ 1.0 (- high low)))))
-    (log l)))
+;; The NaN branch is not decoration, and it is what the two copies
+;; DISAGREED about: lib/stat.wgsl tested it and this file did not. Without
+;; it a NaN compares false against both bounds, so it is judged inside the
+;; support and scored as though it were an ordinary value — a finite
+;; log-density for a number that is not one. Reconciling the two copies
+;; meant picking the correct one, so the host gains the check.
+(define-dual (logpdf-uniform (v :f32) (low :f32) (high :f32))
+  (let* ((nan? (not (= v v)))
+         (outside? (or (< v low) (> v high)))
+         (l (if outside? 0.0 (/ 1.0 (- high low))))
+         (q (if nan? v l)))
+    (log q)))
 
 ;;--- bulk draws ---------------------------------------------------------
 ;; Filling a typed buffer rather than building a list, because a list of a

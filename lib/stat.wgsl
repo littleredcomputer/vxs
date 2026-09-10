@@ -1,14 +1,22 @@
 // Statistical primitives for GPU kernels.
 //
-// Colin's WGSL stat library, welded onto Threefry. The distributions and
-// their log-densities are unchanged; only the source of randomness moved.
-// Prepend lib/rng.wgsl before this file — random_uniform is the single
-// point where draws enter, and every other sampler is built on it.
+// Colin's WGSL stat library, welded onto Threefry. Prepend lib/rng.wgsl
+// before this file — random_uniform is the single point where draws
+// enter, and every other sampler is built on it.
 //
-// The logpdf_* functions are the interesting half for where this is
-// heading: a sampler alone gives you particles, but a sampler PLUS its
-// log-density gives you importance weights, and that is inference rather
-// than decoration.
+// WHAT LIVES HERE NOW: the SAMPLERS, and only those. The scalar
+// log-densities (logpdf_normal, logpdf_flip, logpdf_uniform) used to sit
+// alongside them, transcribed by hand from lib/dist.scm and kept in step
+// by assertion. They are now written once, in lib/dist.scm, with
+// define-dual — the same body compiled for this device and run by the VM
+// — and reach a shader through wgsl-definitions-source rather than
+// through this text. Do not add a scalar logpdf here: it would be a
+// second copy of something that no longer has a first one.
+//
+// The samplers cannot follow, and that is a real difference rather than
+// unfinished work: each takes its generator explicitly on the host and
+// finds it as per-invocation private state here, so the two signatures
+// are genuinely not the same function.
 //
 // `fail` counts gamma rejections that gave up after three tries. WGSL has
 // no cheap NaN to return, so the count is the only signal that a sample
@@ -54,17 +62,6 @@ fn random_normal(loc: f32, scale: f32) -> f32 {
   return loc + scale * u;
 }
 
-// De-compiled from JAX genjax.normal.logpdf
-fn logpdf_normal(v: f32, loc: f32, scale: f32) -> f32 {
-  let d = v / scale;
-  let e = loc / scale;
-  let f = d - e;
-  let g = pow(f, 2.0);
-  let h = -0.5 * g;
-  let i = log(scale);
-  let k = 0.9189385175704956 + i;
-  return h - k;
-}
 // recovered from de-compiled JAX.
 //
 // The ONLY function that draws randomness: everything else in this file is
@@ -84,34 +81,6 @@ fn random_flip(prob: f32) -> bool {
   return random_uniform(0.0, 1.0) < prob;
 }
 
-// recovered from de-compiled JAX
-fn logpdf_flip(v: f32, p: f32) -> f32 {
-  let g = -p;
-  let h = log(g + 1.0);  // log1p
-  let i = log(p);
-  let k = 1.0 - v;
-  let l = k == 0.0;
-  let n = h * k;
-  let o = select(n, 0.0, l);
-  let q = i == 0.0;
-  let r = i * v;
-  let s = select(r, 0.0, q);
-  return o + s;
-}
-
-// recovered from de-compiled JAX
-fn logpdf_uniform(v: f32, low: f32, high: f32) -> f32 {
-  let d = v != v;
-  let e = v < low;
-  let f = v > high;
-  // g = e, h = f
-  let i = e || f;
-  let j = high - low;
-  let k = 1.0 / j;
-  let l = select(k, 0.0, i);
-  let q = select(l, v, d);
-  return log(q);
-}
 
 fn random_exponential(lambda: f32) -> f32 {
   let u = 1.0 - random_uniform(0.0, 1.0);  // u is in (0, 1]

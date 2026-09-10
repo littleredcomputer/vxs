@@ -101,7 +101,6 @@
 ;; Emitted as a kernel-language expression rather than as text, so
 ;; lib/wgsl.scm checks it by exactly the rules it checks everything by.
 
-(wgsl-declare! 'logpdf-normal "logpdf_normal" '(:f32 :f32 :f32) :f32)
 (wgsl-declare! 'xs "xs_at" '(:u32) :f32)
 (wgsl-declare! 'ys "ys_at" '(:u32) :f32)
 

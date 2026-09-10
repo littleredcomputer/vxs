@@ -34,6 +34,11 @@
 ;; than relying on lib/gpu.scm having loaded it first: this file is loaded
 ;; directly by layer 18 and by anything that wants only the wrangle.
 (load "lib/wgsl.scm")
+;; For the log densities, which are define-dual'd there rather than
+;; hand-written in lib/stat.wgsl: a kernel calling logpdf-normal needs
+;; that definition emitted into the module, and this is where it comes
+;; from now.
+(load "lib/dist.scm")
 
 ;; For points-stride: the accessors below index the point buffer, so they
 ;; must agree with whatever fills it. Loading it here rather than trusting
@@ -57,8 +62,10 @@
 (wgsl-declare! 'random-normal      "random_normal"      '(:f32 :f32)     :f32)
 (wgsl-declare! 'random-exponential "random_exponential" '(:f32)         :f32)
 (wgsl-declare! 'random-gamma       "random_gamma"       '(:f32 :f32)     :f32)
-(wgsl-declare! 'logpdf-normal      "logpdf_normal"      '(:f32 :f32 :f32) :f32)
-(wgsl-declare! 'logpdf-uniform     "logpdf_uniform"     '(:f32 :f32 :f32) :f32)
+;; No logpdf-* declarations here any more. They are define-dual'd in
+;; lib/dist.scm, which registers both the signature and the DEFINITION —
+;; declaring them again would assert a signature for a function this
+;; module no longer contains the text of.
 (wgsl-declare! 'erfc               "erfc"               '(:f32)         :f32)
 (wgsl-declare! 'inv-erf            "inv_erf"            '(:f32)         :f32)
 (wgsl-declare! 'heat-colour        "heat_colour"        '(:f32)         :vec3f)
