@@ -388,4 +388,30 @@
 (assert-equal "and let* is the same form"
               :f32 (wgsl-type '(let* ((a 1.0) (b (* a 2.0))) b) '()))
 
+;;--- a hyphen is not a WGSL identifier character -------------------------
+;; A hyphen is the ordinary way to spell a compound name in Scheme and is
+;; illegal in WGSL. Emitting one produced text this checker accepted and
+;; the browser's shader compiler would have rejected — the exact class of
+;; failure the checker exists to move to Scheme. So every place a name
+;; reaches the output underscores it: a let-bound local, a function
+;; parameter both where it is declared and where the body refers to it,
+;; and the function's own name.
+
+(set! wgsl-counter 0)
+(assert-true "a hyphenated local is underscored"
+             (string-contains? (wgsl-body '(let ((my-var 1.0)) (* my-var 2.0)) '() "")
+                               "my_var_1"))
+(assert-false "and no hyphen survives into the text"
+              (string-contains? (wgsl-body '(let ((my-var 1.0)) my-var) '() "")
+                                "my-var"))
+
+(define-gpu (hyphen-probe (in-x :f32) (in-y :f32)) (+ in-x in-y))
+(assert-true "a hyphenated parameter is underscored where it is declared"
+             (string-contains? (wgsl-definitions-source) "in_x : f32"))
+(assert-true "and identically where the body refers to it"
+             (string-contains? (wgsl-definitions-source) "(in_x + in_y)"))
+(assert-true "as is the function's own name"
+             (string-contains? (wgsl-definitions-source) "fn hyphen_probe("))
+
+
 (suite-summary)

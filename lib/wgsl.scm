@@ -71,10 +71,20 @@
 
 ;; Locals are numbered so that flattening nested scopes into one WGSL
 ;; function body cannot collide, and so shadowing keeps working.
+;;
+;; The name is also UNDERSCORED, for the same reason a function's is: a
+;; hyphen is the ordinary way to spell a compound name in Scheme and is
+;; not a legal WGSL identifier character. Emitting `my-var_1` produced
+;; text this type checker accepted happily and the browser's shader
+;; compiler rejected — which is precisely the class of failure this file
+;; exists to move to Scheme, so it had no business surviving here.
 (define wgsl-counter 0)
 (define (wgsl-fresh base)
   (set! wgsl-counter (+ wgsl-counter 1))
-  (string-append base "_" (number->string wgsl-counter)))
+  (string-append (wgsl-underscore base) "_" (number->string wgsl-counter)))
+
+(define (wgsl-underscore s)
+  (list->string (map (lambda (c) (if (char=? c #\-) #\_ c)) (string->list s))))
 
 ;; Bind a result to a fresh local, so its code can be MENTIONED twice
 ;; without being EVALUATED twice. Compiled results are spliced as text, so
@@ -107,7 +117,10 @@
   (let ((hit (assq name env)))
     (if (not hit) (error 'wgsl "unbound variable in kernel:" name))
     (let ((v (cdr hit)))
-      (if (pair? v) v (cons v (symbol->string name))))))
+      ;; Underscored, and it must match how the parameter was DECLARED in
+      ;; wgsl-define-fn! — the two spellings are the same name and have to
+      ;; travel together.
+      (if (pair? v) v (cons v (wgsl-underscore (symbol->string name)))))))
 
 ;;--- the operator tables ------------------------------------------------
 
@@ -636,9 +649,7 @@
 (define (wgsl-signature name) (assq name wgsl-signatures))
 
 ;; Scheme spells names with hyphens, WGSL with underscores.
-(define (wgsl-fn-name name)
-  (list->string (map (lambda (c) (if (char=? c #\-) #\_ c))
-                     (string->list (symbol->string name)))))
+(define (wgsl-fn-name name) (wgsl-underscore (symbol->string name)))
 
 (define (wgsl-check-args op sig rs)
   (let ((want (caddr sig)))
@@ -704,7 +715,7 @@
      (string-append
       "fn " wname "("
       (wgsl-join (map (lambda (p)
-                        (string-append (symbol->string (car p)) " : "
+                        (string-append (wgsl-underscore (symbol->string (car p))) " : "
                                        (wgsl-type-name (cadr p))))
                       params)
                  ", ")
