@@ -31,6 +31,8 @@
 (load "testcases/suite/21_cubes.scm")
 (load "testcases/suite/22_dist.scm")
 (load "testcases/suite/23_gen.scm")
+(load "testcases/suite/24_stage.scm")
+(load "testcases/suite/25_scan.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")
