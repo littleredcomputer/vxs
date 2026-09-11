@@ -95,4 +95,4 @@
 ;; Told the model and the curve's NAME, and nothing about the shape of
 ;; either. The parameter list comes from the model's own choices.
 
-(plot-posterior! (curve xs SIGMA NPTS) 'curve-elem cols picks TRUTH)
+(plot-posterior! (curve xs SIGMA NPTS) 'curve-elem cols picks TRUTH ys)

@@ -53,7 +53,7 @@
     (normalize-weights! ws kk)
     (rng-fill-categorical! (rng-make 0 1 0) picks 0 ndraw ws)
     (set! captured #f)
-    (plot-posterior! gf name cols picks truth)
+    (plot-posterior! gf name cols picks truth ys)
     captured))
 
 (define two (fit-and-draw (line xs 0.5 N) 'line-elem '(1.5 -0.5) 16))
@@ -72,6 +72,22 @@
              (string-contains? two "for (var k_3 : u32 = 0u; k_3 < 16u;"))
 (assert-true "and the stroke is normalised by its screen-space gradient"
              (string-contains? two "length(vec2<f32>(dpdx(g_5), dpdy(g_5)))"))
+
+;; The observations are drawn too — a posterior without the data it was
+;; fitted to does not show what it is a posterior OF. Their count comes
+;; from the model's batched choice, so the plot is not told that either.
+(assert-true "there is a region for each observation coordinate"
+             (and (string-contains? two "fn shared_obs_x(")
+                  (string-contains? two "fn shared_obs_y(")))
+(assert-true "looped over the model's own observation count"
+             (string-contains? two "for (var m_11 : u32 = 0u; m_11 < 8u;"))
+;; A disc needs a distance in PIXELS, and the axes do not share a scale.
+;; Measuring in plot units would draw ellipses; res converts exactly, so
+;; no derivative is involved here at all.
+(assert-true "the offset is converted to pixels with res, not left in plot units"
+             (and (string-contains? two "res.x /") (string-contains? two "res.y /")))
+(assert-true "and overlapping dots take the max rather than summing"
+             (string-contains? two "acc_12 = max(acc_12,"))
 
 ;;--- the same plotter, a wider family -----------------------------------
 ;; THE ASSERTION THIS LAYER EXISTS FOR. Nothing in lib/curveplot.scm
