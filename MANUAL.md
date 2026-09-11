@@ -1570,13 +1570,28 @@ rejuvenation alike.
 |---|---|
 | distributions that stage | `normal`, `uniform`, `flip`, `exponential` |
 | refused | `gamma`, `beta` — both need `lgamma`, which WGSL has not got |
-| state per `scan-i` | at most **three** components |
+| state per `scan-i` | at most **fifteen** components |
 
-The three-component ceiling is the device's, not a shortcut: `fold-i`
-carries one accumulator, that accumulator holds the running score as well
-as the state, and a WGSL vector stops at four. Wide state wants the
-per-element scratch-attribute path, which is a different mechanism rather
-than an extension of this one.
+The ceiling is the device's, not a shortcut: `fold-i` carries one
+accumulator, that accumulator holds the running score as well as the
+state, and the widest register bundle WGSL has is a 4×4 matrix — sixteen
+slots, less one for the score. The accumulator widens as the state does,
+from a `vec2` up to a `mat4x4`, and the packing is arithmetic rather than
+a table: element *k* lives at column *k*/4, row *k*%4.
+
+A matrix here is a state **bundle**, not linear algebra. That is why
+`lib/wgsl.scm` exposes a constructor and `mat-col` and no matrix
+multiply: the operation exists in WGSL, means nothing for a bundle of
+state, and a checker that accepted `(* state1 state2)` would be accepting
+an expression with a type and no meaning. It is the move `:quat` already
+makes — the storage type carries the intent, the type system carries the
+shape.
+
+Fifteen is a great deal more than a trajectory usually needs: a pendulum
+takes two, a double pendulum four. The point of the width is not the
+width. It is that an algorithm whose working state fits in the fold has
+no reason to reach for per-element scratch, and scratch was the thing
+pulling toward wanting a terminal that is not a `point`.
 
 ### Everything else is refused by name
 

@@ -179,26 +179,58 @@
 
 ;;--- the ceiling, and the other refusals --------------------------------
 
-(define-gen (four-state h)
-  (at :v (scan-i 3 (j)
-           ((a 0.0 (+ a h)) (b 0.0 (+ b h)) (c 0.0 (+ c h)) (d 0.0 (+ d h)))
-           (normal a 1.0))))
-(assert-true "four state components are refused: the fold's vector holds the score too"
-             (guard (e (#t #t)) (stage (four-state 0.1)) #f))
+;; The accumulator widens as the state does: a vector while one fits, then
+;; a matrix, which is a state BUNDLE rather than linear algebra — which is
+;; why lib/wgsl.scm exposes no matrix multiply. The ceiling is the
+;; device's: the widest register bundle WGSL has is a 4x4 matrix, sixteen
+;; slots, less one for the running score.
 
 (wgsl-declare! 'v "v_at" '(:u32) :f32)
-(define-gen (three-state h)
-  (at :v (scan-i 3 (j)
-           ((a 0.0 (+ a h)) (b 0.0 (+ b h)) (c 0.0 (+ c h)))
-           (normal a 1.0))))
-(assert-true "three are accepted, packing into a vec4"
-             (string-contains? (wgsl-body (staged-kernel (stage (three-state 0.1)))
-                                          '() "")
-                               "vec4<f32>"))
-;; The score rides in the last lane, so a three-state scan reads it out of
-;; w where the pendulum's two-state scan reads it out of z.
-(assert-equal "and the score still comes back out as a scalar"
-              :f32 (wgsl-type (staged-kernel (stage (three-state 0.1))) '()))
+
+;; A model with n state components, each taking a trivial step, so the
+;; only thing under test is how they are PACKED. Built as a datum rather
+;; than with define-gen because n varies — and because only the stager
+;; reads it, so the procedure half is a placeholder that nothing calls.
+(define (scan-of n h)
+  (let* ((names (let loop ((i 0) (acc '()))
+                  (if (= i n)
+                      (reverse acc)
+                      (loop (+ i 1)
+                            (cons (string->symbol
+                                   (string-append "s" (number->string i)))
+                                  acc)))))
+         (states (map (lambda (nm) (list nm 0.0 (list '+ nm 'h))) names))
+         (body (list (list 'at :v (list 'scan-i 3 '(j) states
+                                        (list 'normal (car names) 1.0))))))
+    (stage ((gf (lambda (h) #f) body '(h)) h))))
+
+(define (packs-as? n h want)
+  (string-contains? (wgsl-body (staged-kernel (scan-of n h)) '() "") want))
+
+(assert-true "two state components pack into a vec3"  (packs-as? 2 0.1 "vec3<f32>"))
+(assert-true "three into a vec4"                      (packs-as? 3 0.1 "vec4<f32>"))
+;; The case that matters: a double pendulum's (th1 th2 om1 om2) is four,
+;; which no vector holds once the score rides along.
+(assert-true "four into a mat2x4"                     (packs-as? 4 0.1 "mat2x4<f32>"))
+(assert-true "eight still fit a mat2x4"               (packs-as? 7 0.1 "mat2x4<f32>"))
+(assert-true "and wider takes a mat3x4"               (packs-as? 8 0.1 "mat3x4<f32>"))
+(assert-true "fifteen, the most there is, takes a mat4x4"
+             (packs-as? 15 0.1 "mat4x4<f32>"))
+
+;; Whatever the packing, a term is still a scalar: the score comes back out
+;; of the last slot and the state does not survive the fold.
+(assert-equal "a vector-packed scan yields a scalar"
+              :f32 (wgsl-type (staged-kernel (scan-of 3 0.1)) '()))
+(assert-equal "and a matrix-packed one does too"
+              :f32 (wgsl-type (staged-kernel (scan-of 6 0.1)) '()))
+;; Element k lives at column k/4, row k%4 — so slot 6 of a mat2x4 is
+;; column 1, row 2.
+(assert-true "a matrix slot is addressed as column then component"
+             (string-contains? (wgsl-body (staged-kernel (scan-of 6 0.1)) '() "")
+                               "[1].z"))
+
+(assert-true "sixteen is refused, and says what the limit is"
+             (guard (e (#t #t)) (scan-of 16 0.1) #f))
 
 (define-gen (indexes-by-state xs)
   (at :v (scan-i 3 (j) ((a 0.0 (+ a 1.0))) (normal (view-ref xs a) 1.0))))

@@ -266,13 +266,22 @@
 
 ;; (scan-i n (j) ((name init step) ...) dist)
 ;;
-;; THE CEILING IS THREE STATE COMPONENTS, and it is a property of the
-;; device rather than a shortcut here: fold-i carries ONE accumulator, that
-;; accumulator has to hold the running score as well as the state, and a
-;; WGSL vector stops at four components. Wide state wants the per-element
-;; scratch-attribute path instead (MANUAL section 6), which is a different
-;; mechanism and not an extension of this one. Refused by name here so that
-;; the boundary is met at the model rather than discovered in a shader.
+;; THE CEILING IS FIFTEEN STATE COMPONENTS, and it is the device's rather
+;; than a shortcut here: fold-i carries ONE accumulator, that accumulator
+;; holds the running score as well as the state, and the widest thing WGSL
+;; will keep in a register bundle is a 4x4 matrix — sixteen slots, less
+;; one for the score.
+;;
+;; It used to be three, when only vectors were used. A matrix accumulator
+;; is a state BUNDLE rather than linear algebra (lib/wgsl.scm exposes no
+;; matrix multiply, deliberately), and raising the ceiling this way was the
+;; cheapest thing that kept the `point`-terminal question open: an
+;; algorithm whose working state fits in the fold has no reason to want
+;; per-element scratch, and scratch was the thing pulling toward needing a
+;; terminal that is not a point.
+;;
+;; Refused by name so the boundary is met at the model rather than
+;; discovered in a shader.
 (define (stage-scanned addr e env ctx)
   (let* ((n      (stage-count (cadr e) env ctx))
          (spec   (caddr e))
@@ -282,12 +291,13 @@
         (error 'stage "scan-i binds exactly one index" spec))
     (if (null? states)
         (error 'stage "a scan with no state is a batch-i" addr))
-    (if (> (length states) 3)
+    (if (> (length states) 15)
         (error 'stage
                (string-append
-                "a scan carries at most three state components — the fold's"
-                " accumulator holds the score too, and a device vector stops"
-                " at four. Wide state wants scratch attributes")
+                "a scan carries at most fifteen state components — the fold's"
+                " accumulator holds the running score too, and the widest"
+                " register bundle WGSL has is a 4x4 matrix. Wider state wants"
+                " per-element scratch, which is a different mechanism")
                (length states)))
     (for-each
      (lambda (s)
@@ -522,6 +532,31 @@
 ;; which one component can see another's new value.
 (define kernel-lanes '(x y z w))
 
+;; (capacity constructor matrix?), narrowest first. A vector up to four
+;; slots, then a matrix — which is a state BUNDLE here rather than linear
+;; algebra, and is why lib/wgsl.scm exposes no matrix multiply.
+;;
+;; Columns are always four components, so element k lives at column k/4,
+;; row k%4 — which is the whole of the addressing below.
+(define kernel-bundles
+  '((2 vec2 #f) (3 vec3 #f) (4 vec4 #f)
+    (8 mat2x4 #t) (12 mat3x4 #t) (16 mat4x4 #t)))
+
+(define (kernel-bundle n)
+  (let loop ((bs kernel-bundles))
+    (cond ((null? bs) #f)
+          ((<= n (car (car bs))) (car bs))
+          (else (loop (cdr bs))))))
+
+(define (kernel-slot acc k matrix?)
+  (if matrix?
+      (list 'swizzle (list 'mat-col acc (quotient k 4))
+            (list-ref kernel-lanes (remainder k 4)))
+      (list 'swizzle acc (list-ref kernel-lanes k))))
+
+(define (kernel-zeros n)
+  (let loop ((i 0) (acc '())) (if (= i n) acc (loop (+ i 1) (cons 0.0 acc)))))
+
 (define (kernel-scan t)
   (let* ((n      (cadr t))
          (idx    (caddr t))
@@ -529,31 +564,39 @@
          (body   (list-ref t 4))
          (names  (map car states))
          (width  (+ (length states) 1))
-         (ctor   (list-ref '(#f #f vec2 vec3 vec4) width))
+         (bundle (kernel-bundle width))
          (score  'acc-score))
-    (if (not ctor) (error 'stage "a scan needs one to three state components" t))
+    (if (not bundle)
+        (error 'stage "a scan carries at most fifteen state components" t))
     ;; The fold's VALUE is the whole packed accumulator, but a term
-    ;; contributes only its score — so the last lane comes back out. The
+    ;; contributes only its score — so the last slot comes back out. The
     ;; state was scaffolding for producing it and does not survive.
-    (list 'swizzle
-          (kernel-scan-fold n idx states body names ctor score)
-          (list-ref kernel-lanes (- width 1)))))
+    (kernel-slot (kernel-scan-fold n idx states body names bundle score)
+                 (- width 1) (caddr bundle))))
 
-(define (kernel-scan-fold n idx states body names ctor score)
-  (let ((all (append names (list score))))
+(define (kernel-scan-fold n idx states body names bundle score)
+  (let* ((cap     (car bundle))
+         (ctor    (cadr bundle))
+         (matrix? (caddr bundle))
+         (all     (append names (list score))))
+    ;; A bundle is filled exactly: a vector of the width needed, or a
+    ;; matrix padded to its full component count. The padding is dead
+    ;; weight in registers and costs nothing measurable.
+    (define (filled vals) (append vals (kernel-zeros (- cap (length vals)))))
     (list 'fold-i n
-          (cons ctor (append (map (lambda (s) (kernel-value (cadr s))) states)
-                             (list 0.0)))
+          (cons ctor (filled (append (map (lambda (s) (kernel-value (cadr s))) states)
+                                     (list 0.0))))
           (list idx 'acc)
           (list 'let
-                (let loop ((ns all) (ls kernel-lanes) (acc '()))
+                (let loop ((ns all) (k 0) (acc '()))
                   (if (null? ns)
                       (reverse acc)
-                      (loop (cdr ns) (cdr ls)
-                            (cons (list (car ns) (list 'swizzle 'acc (car ls))) acc))))
+                      (loop (cdr ns) (+ k 1)
+                            (cons (list (car ns) (kernel-slot 'acc k matrix?)) acc))))
                 (cons ctor
-                      (append (map (lambda (s) (kernel-value (caddr s))) states)
-                              (list (list '+ score (kernel-term body)))))))))
+                      (filled
+                       (append (map (lambda (s) (kernel-value (caddr s))) states)
+                               (list (list '+ score (kernel-term body))))))))))
 
 (define (kernel-score dist value)
   (let ((entry (staged-family (car dist))))

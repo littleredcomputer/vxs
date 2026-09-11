@@ -34,7 +34,48 @@
 ;; :u32 exists for one reason: fold-i's index, and the declared
 ;; functions that take it to reach into a buffer. WGSL has no implicit
 ;; coercion, so it cannot quietly become an f32 — use (f32 k).
-(define wgsl-types '(:f32 :u32 :bool :vec2f :vec3f :vec4f))
+;; The matrix types are here for ONE purpose: to be a wide accumulator for
+;; a bounded fold, so a scan can carry more state than a vector's four
+;; components. They are a state BUNDLE whose WGSL spelling happens to be a
+;; matrix — the same move :quat already makes, where the storage type
+;; carries the intent and the type system carries the shape.
+;;
+;; Which is why there is no matrix multiply, and should not be one until
+;; something actually wants linear algebra: exposing it would let the
+;; checker accept `(* state1 state2)`, an operation with a type and no
+;; meaning, in a file whose whole value is refusing exactly that.
+;;
+;; Columns are always FOUR components. WGSL allows matCxR for C and R in
+;; 2..4, but a vec3 column pads to 16 bytes inside a storage array, and
+;; picking one column height sidesteps that question permanently rather
+;; than documenting it. It also makes the element arithmetic trivial:
+;; element k lives at column k/4, row k%4.
+(define wgsl-types
+  '(:f32 :u32 :bool :vec2f :vec3f :vec4f :mat2x4f :mat3x4f :mat4x4f))
+
+;; (columns . total components), in increasing capacity.
+(define wgsl-mat-shapes
+  '((:mat2x4f 2 8) (:mat3x4f 3 12) (:mat4x4f 4 16)))
+
+(define (wgsl-mat-shape t) (assq t wgsl-mat-shapes))
+
+;; The narrowest type that holds n scalars, vectors first. #f when nothing
+;; does — sixteen is the ceiling and it is the device's, not a shortcut.
+(define (wgsl-bundle-type n)
+  (cond ((< n 1) #f)
+        ((<= n 1) :f32)
+        ((<= n 2) :vec2f)
+        ((<= n 3) :vec3f)
+        ((<= n 4) :vec4f)
+        ((<= n 8) :mat2x4f)
+        ((<= n 12) :mat3x4f)
+        ((<= n 16) :mat4x4f)
+        (else #f)))
+
+(define (wgsl-bundle-width t)
+  (cond ((eq? t :f32) 1) ((eq? t :vec2f) 2) ((eq? t :vec3f) 3) ((eq? t :vec4f) 4)
+        ((wgsl-mat-shape t) (caddr (wgsl-mat-shape t)))
+        (else 0)))
 
 (define (wgsl-type-name t)
   (cond ((eq? t :f32)   "f32")
@@ -48,6 +89,9 @@
         ((eq? t :vec2f) "vec2<f32>")
         ((eq? t :vec3f) "vec3<f32>")
         ((eq? t :vec4f) "vec4<f32>")
+        ((eq? t :mat2x4f) "mat2x4<f32>")
+        ((eq? t :mat3x4f) "mat3x4<f32>")
+        ((eq? t :mat4x4f) "mat4x4<f32>")
         (else (error 'wgsl "unknown type:" t))))
 
 (define (wgsl-vec-width t)
@@ -380,6 +424,52 @@
   (wgsl-check-const op args)
   (cond
     ;; (vec2 a b) / (vec3 a b c) / (vec4 ...) — all components f32.
+    ;; (mat2x4 a b c ...) — all components, COLUMN-MAJOR, which is the
+    ;; order WGSL's own component-wise matrix constructor takes. Columns
+    ;; are not accepted as arguments: a caller assembling a state bundle
+    ;; has scalars, and one way in is one way to get it wrong.
+    ((memq op '(mat2x4 mat3x4 mat4x4))
+     (let* ((t (cond ((eq? op 'mat2x4) :mat2x4f)
+                     ((eq? op 'mat3x4) :mat3x4f)
+                     (else :mat4x4f)))
+            (want (caddr (wgsl-mat-shape t)))
+            (rs (map (lambda (a) (wgsl a env)) args)))
+       (if (not (= (length rs) want))
+           (error 'wgsl (string-append (symbol->string op) " needs "
+                                       (number->string want)
+                                       " components, column-major, got")
+                  (length rs)))
+       (for-each (lambda (r)
+                   (if (not (eq? (wgsl-type-of r) :f32))
+                       (error 'wgsl
+                              (string-append (symbol->string op)
+                                             " components must be f32, got:")
+                              (wgsl-type-name (wgsl-type-of r)))))
+                 rs)
+       (wgsl-result t (wgsl-append-stmts rs)
+                    (string-append (wgsl-type-name t) "("
+                                   (wgsl-join (map wgsl-code-of rs) ", ") ")"))))
+
+    ;; (mat-col m i) — the i-th column, as a vec4f. The index is a literal
+    ;; because WGSL wants a constant there and because a computed one would
+    ;; be a gather into a register file, which is not a thing.
+    ((eq? op 'mat-col)
+     (if (not (= (length args) 2))
+         (error 'wgsl "mat-col: expected (mat-col m i)"))
+     (let* ((m (wgsl (car args) env))
+            (i (cadr args))
+            (shape (wgsl-mat-shape (wgsl-type-of m))))
+       (if (not shape)
+           (error 'wgsl "mat-col: not a matrix, got:"
+                  (wgsl-type-name (wgsl-type-of m))))
+       (if (or (not (integer? i)) (< i 0) (>= i (cadr shape)))
+           (error 'wgsl
+                  (string-append "mat-col: column must be a literal 0.."
+                                 (number->string (- (cadr shape) 1)) ", got")
+                  i))
+       (wgsl-result :vec4f (wgsl-stmts-of m)
+                    (string-append (wgsl-code-of m) "[" (number->string i) "]"))))
+
     ((memq op '(vec2 vec3 vec4))
      (let* ((want (cond ((eq? op 'vec2) 2) ((eq? op 'vec3) 3) (else 4)))
             (rs (map (lambda (a) (wgsl a env)) args)))
