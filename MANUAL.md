@@ -1852,10 +1852,14 @@ permission, because that is exactly the case where nothing knows where
 the code will run. `with-wgsl-stage` restores the stage even if the
 compile raises.
 
-Two things to check when the first curve is drawn, both cheap:
-**uniformity** — WGSL requires derivatives in uniform control flow, and a
-`for` with a uniform trip count preserves it, but implementations are
-strict; and **curvature within a quad**, since the estimate is a
+✅ **Uniformity: answered.** `demos/basis.scm` calls `dpdx` and `dpdy`
+inside a `fold-i` over the particles, and the shader compiles and draws —
+so a fold with a uniform trip count does preserve uniform control flow as
+far as a real implementation is concerned. The strokes hold their width
+where the curves steepen, which is the screen-space normalisation working
+rather than merely compiling.
+
+Still unchecked: **curvature within a quad**, since the estimate is a
 one-pixel finite difference and misestimates where `f′` swings hard
 across 2×2 pixels. A high-frequency `sin(bx)` is the case to look at,
 which is exactly the curve worth swapping in to show the surface off.
