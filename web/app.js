@@ -332,7 +332,12 @@
   }
 
   // Which presets draw through WebGPU rather than the 2D context.
-  const GPU_PRESETS = { plasma: true, rings: true, points: true, wrangle: true, actors: true, cubes: true, field: true, ensemble: true };
+  // Three places a preset must be named, and this is the one that decides
+  // which SURFACE it draws on. Missing from here, a GPU preset renders
+  // correctly into a hidden canvas and reports nothing at all.
+  const GPU_PRESETS = { plasma: true, rings: true, points: true, wrangle: true,
+                        actors: true, cubes: true, field: true, ensemble: true,
+                        basis: true };
 
   function showSurface(preset) {
     const wantsGpu = !!GPU_PRESETS[preset];
