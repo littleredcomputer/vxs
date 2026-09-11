@@ -1039,6 +1039,91 @@
      (wgsl-define-fn! ',(car spec) ',(cdr spec) ',body)
      (wgsl-put-dual! ',(car spec) ,(car spec))))
 
+;;--- shared read-only data ----------------------------------------------
+;; Data every invocation reads, rather than data each invocation owns.
+;; Lives here rather than in one harness because BOTH want it: a compute
+;; wrangle reads observations, and a fragment kernel reads — for instance
+;; — a table of particles it is drawing. Only the binding number differs,
+;; so only that is a parameter.
+;;
+;; DECLARED, not dynamic. A GPU buffer cannot be made up as it goes, since
+;; allocation precedes dispatch. So the declaration is the single source of
+;; truth and generates the accessors for both sides, rather than asking
+;; anyone to agree with an offset by hand — an offset computed in two
+;; places is one that will eventually disagree with itself, and the failure
+;; is a plausible wrong picture rather than an error.
+;;
+;;   (shared-layout! '((walls 48) (obs 41)))   ; then (shared-obs k)
+;;
+;; The WGSL identifier is `sdata`, not `shared` — `shared` is a reserved
+;; word there and a binding named that will not compile.
+(if (not (defined? 'shared-regions))
+    (begin (define shared-regions '())))   ; ((name offset length) ...)
+(if (not (defined? 'shared-length))
+    (begin (define shared-length 0)))      ; total floats
+
+(define (shared-layout! specs)
+  ;; Retract the previous layout's accessors first. A declaration is a
+  ;; promise that a function of that name is in the module, and replacing
+  ;; the layout is exactly what stops the old ones being emitted — so
+  ;; leaving them declared would promise functions nothing defines, which
+  ;; is what layer 18 checks for and what a browser reports as an
+  ;; unresolved call target.
+  (for-each (lambda (r)
+              (wgsl-forget-declaration!
+               (string->symbol (string-append "shared-" (symbol->string (car r))))))
+            shared-regions)
+  (let loop ((ss specs) (off 0) (acc '()))
+    (if (null? ss)
+        (begin
+          (set! shared-regions (reverse acc))
+          (set! shared-length off)
+          (for-each
+           (lambda (r)
+             (wgsl-declare! (string->symbol (string-append "shared-"
+                                                           (symbol->string (car r))))
+                            (string-append "shared_" (wgsl-fn-name (car r)))
+                            (list :u32) :f32))
+           shared-regions)
+          shared-length)
+        (let ((spec (car ss)))
+          (if (or (not (pair? spec)) (not (pair? (cdr spec)))
+                  (not (symbol? (car spec)))
+                  (not (integer? (cadr spec))) (< (cadr spec) 1))
+              (error "shared-layout!: expected (name length), length >= 1" spec))
+          (loop (cdr ss) (+ off (cadr spec))
+                (cons (list (car spec) off (cadr spec)) acc))))))
+
+(define (shared-region name)
+  (let loop ((rs shared-regions))
+    (cond ((null? rs) (error "shared: undeclared region" name))
+          ((eq? (caar rs) name) (car rs))
+          (else (loop (cdr rs))))))
+
+(define (shared-offset name) (cadr (shared-region name)))
+(define (shared-size name) (caddr (shared-region name)))
+
+;; Emitted only when something is declared, so a kernel that reads no
+;; shared data keeps exactly the bind group layout it had.
+(define (shared-preamble binding)
+  (if (null? shared-regions)
+      ""
+      (apply string-append
+             (string-append "@group(0) @binding(" (number->string binding)
+                            ") var<storage, read> sdata : array<f32>;\n")
+             (map (lambda (r)
+                    (string-append
+                     "fn shared_" (wgsl-fn-name (car r)) "(k : u32) -> f32 { return sdata["
+                     (number->string (cadr r)) "u + k]; }\n"))
+                  shared-regions))))
+
+(define (make-shared)
+  (let ((b (make-bytes (* shared-length 4))))
+    (bytes-seal! b)
+    b))
+
+(define (shared-view b) (bytes-view b :f32))
+
 ;;--- entry points -------------------------------------------------------
 
 ;; Compile a self-contained expression. Resets the local counter so the

@@ -548,7 +548,7 @@
 ;; floats. And anything changing per frame cannot be baked into source.
 
 (assert-equal "with nothing declared, no binding 3 appears"
-              "" (begin (shared-layout! '()) (shared-preamble)))
+              "" (begin (shared-layout! '()) (wrangle-shared-preamble)))
 
 (assert-equal "the layout totals its regions"
               89 (shared-layout! '((walls 48) (obs 41))))
@@ -561,7 +561,7 @@
               'raised (guard (e (#t 'raised)) (shared-layout! '((walls 0)))))
 (shared-layout! '((walls 48) (obs 41)))
 
-(define shpre (shared-preamble))
+(define shpre (wrangle-shared-preamble))
 ;; READ-ONLY, and named sdata rather than `shared` — `shared` is a reserved
 ;; word in WGSL and a binding using it will not compile.
 (assert-true "it binds at 3, read-only"

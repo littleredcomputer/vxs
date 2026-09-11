@@ -84,6 +84,15 @@
                                 (wgsl-type-name (wgsl-type-of compiled)))))
       (string-append
        shadertoy-preamble
+       ;; Shared read-only data, at binding 1 — binding 0 is the uniform.
+       ;; Empty unless something declared a layout, so a kernel that reads
+       ;; none keeps exactly the bind group it had.
+       ;;
+       ;; What a fragment kernel wants this for is a TABLE it draws from: a
+       ;; row of particles, each with its parameters, looped over per pixel.
+       ;; `shared-layout!` gives one region per parameter, K entries each,
+       ;; so a kernel says (shared-a i) and never writes an offset.
+       (shared-preamble 1)
        ;; The define-gpu and define-dual functions, which this harness used
        ;; NOT to emit — so a kernel could call one, type-check here, and
        ;; fail in the browser as an unresolved call target. lib/wrangle.scm

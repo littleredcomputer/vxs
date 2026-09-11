@@ -134,6 +134,41 @@
                     (use (index-of src "fn kernel(")))
                (and def use (< def use))))
 
+;;--- shared read-only data, at binding 1 ---------------------------------
+;; What a fragment kernel wants this for is a TABLE it draws from — a row
+;; of particles, each with its parameters, looped over per pixel. One
+;; region per parameter, K entries each, so the kernel says (shared-a k)
+;; and never writes an offset. The mechanism is lib/wgsl.scm's, shared
+;; with the wrangle, which supplies binding 3 where this supplies 1.
+
+(shared-layout! '((pa 8) (pb 8)))
+
+(assert-true "the storage buffer lands at binding 1, not the uniform's 0"
+             (string-contains? (shadertoy '(vec3 0 0 0))
+                               "@group(0) @binding(1) var<storage, read> sdata"))
+(assert-true "with a generated accessor per region"
+             (string-contains? (shadertoy '(vec3 0 0 0))
+                               "fn shared_pb(k : u32) -> f32 { return sdata[8u + k]; }"))
+
+;; The index is :u32 — an address, not a quantity — so it comes from a
+;; fold rather than from arithmetic, which is also how a kernel loops a
+;; table in the first place.
+(assert-equal "a region is read with a fold's index"
+              :f32 (wgsl-type '(fold-i 8 0.0 (k acc) (+ acc (shared-pa k)))
+                              shadertoy-env))
+(assert-equal "and a float index is refused, as everywhere else"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(shared-pa time) shadertoy-env)))
+
+;; Declaring a new layout RETRACTS the old accessors. They promised
+;; functions that are no longer emitted, and a promise nothing keeps is
+;; what layer 18 checks for and what a browser calls an unresolved call
+;; target.
+(shared-layout! '((pc 4)))
+(assert-true "the new region is declared"  (if (wgsl-signature 'shared-pc) #t #f))
+(assert-false "and the replaced ones are not"
+              (if (wgsl-signature 'shared-pa) #t #f))
+(shared-layout! '())
+
 (assert-true "a kernel may take a screen-space derivative here"
              (string-contains? (shadertoy '(vec3 (fwidth time) 0 0)) "fwidth("))
 (assert-true "and the near-SDF idiom compiles, distance in pixels"
