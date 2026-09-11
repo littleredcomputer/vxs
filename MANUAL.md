@@ -1828,6 +1828,44 @@ It also costs the thesis nothing: there is still exactly one definition
 of the curve. A hardware derivative **measures** it rather than being a
 second definition of it, so there is nothing that can drift.
 
+#### ⚠️ Infinities and NaN reach a device, but WGSL does not promise it
+
+`-inf`, `inf` and `nan` are literals the reader already understands, and
+a kernel may write them — so a model saying *this configuration is
+impossible* (the rocket exploded; score it `-inf`) needs no vocabulary it
+would not otherwise have. WGSL has no spelling for any of them and will
+not compute one at shader-creation time, so the emitter turns each into a
+call to a helper that divides by a **runtime** `var`.
+
+The caveat is the language's, not the mechanism's: **WGSL permits an
+implementation to assume infinities and NaNs do not arise**, and to yield
+an indeterminate value where one would. Hardware f32 produces them, so
+this works in practice — but it wants an eye on a real device before a
+score depends on it, and that check cannot be a test (see
+[fake_webgpu](#fake_webgpujs-counts-dispatches-it-does-not-execute-wgsl)).
+
+One consequence worth thinking about before a model leans on it: if
+*every* particle scores `-inf`, `logsumexp` computes `-inf − (−inf)` and
+the whole population turns to NaN. A finite floor — the most negative
+f32 — degrades into uniform weights instead, which is at least a
+survivable state. Whether "impossible" should mean the IEEE value or a
+floor is a question the first model to fail will answer better than this
+paragraph can.
+
+#### `lib/stat.wgsl`'s `gamma_core` could return a NaN now
+
+Its comment reads *"Argh. creating a NaN, which I would prefer to return,
+is nontrivial in wgsl"* — it fabricates `1.0`, a perfectly plausible
+gamma value, when the rejection loop gives up. The `var` trick above
+makes a NaN available.
+
+**Not done, deliberately.** The host fabricates `1.0` too and counts it
+in `dist-failures`, so changing one side alone would break the
+correspondence the whole port exists to keep. It is a change to *both*,
+or neither.
+
+#### Screen-space derivatives, and the stage gate
+
 `dpdx`, `dpdy` and `fwidth` are in the kernel language, and **gated on a
 stage**. `wgsl-stage-of` is an exception list, not the beginning of a
 stage system: `shadertoy` compiles as `:fragment` and admits them,

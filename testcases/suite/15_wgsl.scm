@@ -544,6 +544,34 @@
               :f32 (wgsl-type '(log time) E))
 (assert-equal "nor is a computed one" :f32 (wgsl-type '(log (* 0.0 time)) E))
 
+;;--- a non-finite literal becomes a call --------------------------------
+;; The reader already reads -inf, inf and nan as numbers, so a kernel
+;; spells them the way Scheme does. WGSL has no spelling for any of them
+;; and will not compute one at shader-creation time, so this is where they
+;; stop being literals: each becomes a helper that divides by a runtime
+;; zero, which is the only way to reach the IEEE value.
+;;
+;; A model that wants to say "this configuration is impossible" — the
+;; rocket exploded, score it -inf — therefore needs no vocabulary it would
+;; not otherwise have.
+
+(assert-equal "negative infinity emits a runtime helper"
+              "neg_inf()" (wgsl-code '-inf '()))
+(assert-equal "positive infinity too" "pos_inf()" (wgsl-code 'inf '()))
+(assert-equal "and NaN"               "nan_f32()" (wgsl-code 'nan '()))
+(assert-equal "they are still scalars" :f32 (wgsl-type '-inf '()))
+(assert-equal "and compose like any other value"
+              "(time + neg_inf())" (wgsl-code '(+ time -inf) E))
+(assert-equal "an ordinary literal is untouched" "2.5" (wgsl-code '2.5 '()))
+
+;; The helpers must be DEFINED wherever they are called, and before it —
+;; WGSL has no forward declarations. They are registered at load so they
+;; sit first in emission order.
+(assert-true "the helpers are in the definitions"
+             (string-contains? (wgsl-definitions-source) "fn neg_inf()"))
+(assert-true "over a runtime var, which is the whole trick"
+             (string-contains? (wgsl-definitions-source) "var z : f32 = 0.0;"))
+
 ;;--- loading the compiler twice must not forget anything -----------------
 ;; Every table here is module state, and a plain (define t '()) re-runs on
 ;; a second load and resets it. Transitive double-loading is the normal

@@ -84,6 +84,16 @@
                                 (wgsl-type-name (wgsl-type-of compiled)))))
       (string-append
        shadertoy-preamble
+       ;; The define-gpu and define-dual functions, which this harness used
+       ;; NOT to emit — so a kernel could call one, type-check here, and
+       ;; fail in the browser as an unresolved call target. lib/wrangle.scm
+       ;; had always included them; this one had not, and nothing noticed
+       ;; because no fragment kernel had wanted one yet.
+       ;;
+       ;; They come before the kernel because WGSL has no forward
+       ;; declarations, and that ordering is also what puts the non-finite
+       ;; helpers ahead of any use of `-inf`.
+       (wgsl-definitions-source) "\n"
        "fn kernel(uv : vec2<f32>, time : f32, res : vec2<f32>) -> vec3<f32> {\n"
        (wgsl-body body shadertoy-env "  ") "\n"
        "}\n"

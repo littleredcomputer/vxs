@@ -112,7 +112,43 @@
 
 ;; Always emits a decimal point: (number->string 1) is "1", which WGSL
 ;; reads as i32.
-(define (wgsl-number n) (number->string (* 1.0 n)))
+;; A NON-FINITE literal becomes a call, not a number. WGSL has no spelling
+;; for an infinity or a NaN and will not let you compute one at
+;; shader-creation time — `log(0.0)` and `-1.0 / 0.0` are both
+;; const-expressions whose value cannot be represented, so both are
+;; compile errors. The helpers below hide a runtime `var` to divide by,
+;; which is the only way to reach the IEEE value.
+;;
+;; So a kernel writes `-inf` the way Scheme already spells it — the reader
+;; reads it as a number, and this is where it stops being one. A model
+;; wanting to say "this configuration is impossible" needs no vocabulary
+;; it would not otherwise have.
+;;
+;; ⚠️ WGSL permits an implementation to assume infinities and NaNs do not
+;; arise, and to yield an indeterminate value where one would. Hardware
+;; f32 produces them, so this works in practice — but it is the language
+;; declining to promise, not a guarantee, and it wants an eye on a real
+;; device before a score depends on it.
+(define (wgsl-number n)
+  (cond ((finite? n) (number->string (* 1.0 n)))
+        ((infinite? n) (if (< n 0) "neg_inf()" "pos_inf()"))
+        (else "nan_f32()")))
+
+;; Emitted as DEFINITIONS rather than written into lib/stat.wgsl, because
+;; a shadertoy shader does not include that file and would otherwise call
+;; a function nothing defines.
+;;
+;; The `var` is the whole trick in each and must not become a `let` or a
+;; `const`: it makes the operand runtime storage, so the division is a
+;; runtime operation and yields the IEEE value instead of being evaluated
+;; by the compiler and rejected.
+(define (wgsl-register-nonfinite-helpers!)
+  (wgsl-put-definition!
+   'neg-inf "fn neg_inf() -> f32 {\n  var z : f32 = 0.0;\n  return -1.0 / z;\n}\n")
+  (wgsl-put-definition!
+   'pos-inf "fn pos_inf() -> f32 {\n  var z : f32 = 0.0;\n  return 1.0 / z;\n}\n")
+  (wgsl-put-definition!
+   'nan-f32 "fn nan_f32() -> f32 {\n  var z : f32 = 0.0;\n  return z / z;\n}\n"))
 
 ;; Returns (type . emitted-name). A caller's environment is written the
 ;; obvious way, ((uv . :vec2f) (time . :f32)), where the WGSL name matches
@@ -215,7 +251,8 @@
                       ") is " (if (infinite? r) "infinite" "not a number")
                       ", and WGSL evaluates a literal argument at"
                       " shader-creation time and rejects that."
-                      (if (eq? op 'log) " For -inf, call (neg-inf)." ""))))))))
+                      " Write the value itself — a non-finite literal"
+                      " such as -inf is emitted as a runtime helper.")))))))
 
 ;; Run a compile with the stage declared, and put it back afterwards even
 ;; if the compile raises — a harness that left the stage set would license
@@ -937,3 +974,9 @@
          (lines (append (wgsl-stmts-of r)
                         (list (string-append "return " (wgsl-code-of r) ";")))))
     (wgsl-join (map (lambda (l) (string-append indent l)) lines) "\n")))
+
+;; Registered at load, so they are FIRST in emission order and therefore
+;; declared before anything that calls them — WGSL has no forward
+;; declarations. Idempotent on a reload, since wgsl-put-definition!
+;; replaces by name and keeps the position.
+(wgsl-register-nonfinite-helpers!)

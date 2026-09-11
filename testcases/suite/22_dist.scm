@@ -192,25 +192,12 @@
 (assert-equal "while an ordinary value is unaffected"
               (log 1.0) (logpdf-uniform 0.5 0.0 1.0))
 
-;;--- -inf has to be spelled twice, and that is not drift ----------------
-;; The host gets -inf from ordinary IEEE division. WGSL has no literal for
-;; it and refuses to compute one at shader-creation time: `log(0.0)` and
+;;--- -inf survives the crossing -----------------------------------------
+;; The host reads `-inf` as a literal. WGSL has no spelling for one and
+;; refuses to compute one at shader-creation time — `log(0.0)` and
 ;; `-1.0 / 0.0` are both const-expressions whose value cannot be
-;; represented as an AbstractFloat, so both are compile errors. So the
-;; device side is hand-written WGSL over a runtime `var`, declared rather
-;; than derived — bilateral, not dual, because the languages differ here
-;; rather than the text being duplicated.
-
-(assert-true "the host spells -inf directly" (infinite? (neg-inf)))
-(assert-true "and negative"                  (< (neg-inf) 0.0))
-(assert-true "the device has a definition for it"
-             (wgsl-has? "fn neg_inf()"))
-(assert-true "declared, so a kernel may call it"
-             (if (wgsl-signature 'neg-inf) #t #f))
-;; Not a dual: there is no shared source to register, which is exactly the
-;; distinction the dual table draws.
-(assert-false "but not dual, since the two bodies are genuinely different"
-              (if (wgsl-dual 'neg-inf) #t #f))
+;; represented — so lib/wgsl.scm emits the literal as a call to a helper
+;; that divides by a runtime zero. One spelling, both sides.
 
 ;; The bug this fixed, kept as a regression: exponential's score is -inf
 ;; below its support, and the emitted device version reaches that through

@@ -102,6 +102,38 @@
 ;; and admits them. The assertion is that the HARNESS says so — the
 ;; mechanism itself is layer 15's.
 
+;;--- and it emits the definitions a kernel may call ----------------------
+;; It used not to. A kernel could call a define-gpu or define-dual
+;; function, type-check here, and then fail in the browser as an
+;; unresolved call target — the one failure this checker exists to catch
+;; rather than forward. lib/wrangle.scm had always emitted them; this
+;; harness had not, and nothing noticed because no fragment kernel had
+;; wanted one yet. The curve-fit plot wants one immediately.
+
+(define-gpu (shadertoy-probe (x :f32)) (* x 2.0))
+
+(assert-true "a define-gpu function reaches the shader"
+             (string-contains? (shadertoy '(vec3 (shadertoy-probe time) 0 0))
+                               "fn shadertoy_probe("))
+(assert-true "and the non-finite helpers do too, since a literal calls one"
+             (string-contains? (shadertoy '(vec3 -inf 0 0)) "fn neg_inf("))
+
+;; Declared BEFORE the kernel, because WGSL has no forward declarations.
+;; A definition that arrived after its use would compile here and fail
+;; there, which is the same failure wearing a different hat.
+(define (index-of hay needle)
+  (let ((h (string-length hay)) (n (string-length needle)))
+    (let loop ((k 0))
+      (cond ((> (+ k n) h) #f)
+            ((string=? (substring hay k (+ k n)) needle) k)
+            (else (loop (+ k 1)))))))
+
+(assert-true "definitions precede the kernel that calls them"
+             (let* ((src (shadertoy '(vec3 (shadertoy-probe time) 0 0)))
+                    (def (index-of src "fn shadertoy_probe("))
+                    (use (index-of src "fn kernel(")))
+               (and def use (< def use))))
+
 (assert-true "a kernel may take a screen-space derivative here"
              (string-contains? (shadertoy '(vec3 (fwidth time) 0 0)) "fwidth("))
 (assert-true "and the near-SDF idiom compiles, distance in pixels"
