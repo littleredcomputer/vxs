@@ -55,8 +55,13 @@
 ;;
 ;; The rule that still matters: the awaits sit outside any guard anyone
 ;; might add later, because guard cannot suspend a fiber and `touch` does.
+;; The optional third argument is SHARED read-only data — a table the
+;; kernel reads, declared with shared-layout! and reached as (shared-a k).
+;; Written every frame, like the wrangle's, so a program may keep editing
+;; it between frames without recompiling anything.
 (define (run-kernel-loop wgsl . opts)
-  (let ((canvas (if (null? opts) "gpu-canvas" (car opts))))
+  (let ((canvas (if (null? opts) "gpu-canvas" (car opts)))
+        (shared (if (and (pair? opts) (pair? (cdr opts))) (cadr opts) #f)))
     (future
       (let* ((adapter (touch (request-adapter)))
              (device  (touch (request-device adapter)))
@@ -64,7 +69,7 @@
         (let loop ((t 0.0) (last (/ (current-time) 1000.0)))
           (let* ((now (/ (current-time) 1000.0))
                  (t2 (if (paused?) t (+ t (- now last)))))
-            (gpu-run-kernel! device shader t2 canvas)
+            (gpu-run-kernel! device shader t2 canvas shared)
             (yield)
             (loop t2 now)))))))
 

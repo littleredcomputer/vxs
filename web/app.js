@@ -312,7 +312,7 @@
   // the same machinery that already watches a scratch file, loadable by
   // the harness directly, and free to use quasiquote.
   const PRESET_NAMES = [
-    'field', 'curvefit',
+    'field', 'curvefit', 'basis',
     'plasma', 'rings', 'cubes', 'ensemble',
     'actors', 'wrangle', 'points', 'fibers', 'repl'
   ];

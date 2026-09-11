@@ -1,0 +1,165 @@
+;;; The posterior of a curve family, drawn by the GPU.
+;;;
+;;; ONE PROCEDURE, THREE JOBS. A curve family is a `define-dual` from
+;;; (x, parameters...) to a value. The model scores with it, the VM
+;;; evaluates it as the oracle, and this file draws with it — so changing
+;;; the body, or the NUMBER of parameters, changes all three. There is no
+;;; second copy of the curve anywhere, which is the whole claim.
+;;;
+;;; Contrast lib/fitplot.scm, which draws the same posterior on the CPU
+;;; and has the quadratic written into it by hand. That is not a criticism
+;;; of it — it is what a plotter has to do when it cannot be told what the
+;;; curve is — and it is exactly the binding this removes.
+;;;
+;;; HOW THE PICTURE IS MADE. Not by drawing N curves and blending them:
+;;; per pixel, the kernel loops over the particles and accumulates
+;;; coverage, so the image IS the posterior predictive density, computed
+;;; rather than composited. No binning decision, no geometry, and a stroke
+;;; whose width is uniform because the distance is normalised by the
+;;; screen-space gradient (MANUAL section 6) and therefore measured in
+;;; pixels rather than in plot units.
+
+(load "lib/gpu.scm")
+(load "lib/stage.scm")
+
+;;--- what the kernel is told --------------------------------------------
+;; One shared region per parameter, NDRAW entries each, plus the truth.
+;; The layout is derived from the staged model's choices, so a model that
+;; gains a parameter gains a region and a kernel argument with it.
+
+(define (curveplot-scalars st)
+  ;; The scalar choices, in source order — which is also the order the
+  ;; curve's parameters were written in, since both come from the model.
+  (let loop ((cs (:choices st)) (acc '()))
+    (cond ((null? cs) (reverse acc))
+          ((eq? (cdr (car cs)) 'scalar) (loop (cdr cs) (cons (car (car cs)) acc)))
+          (else (loop (cdr cs) acc)))))
+
+(define (curveplot-region addr) (string->symbol (keyword->string addr)))
+
+;;--- the kernel ---------------------------------------------------------
+;; Built from the parameter list rather than written out, so it follows
+;; the model. `fn` is the curve's name; the call is (fn x p1 p2 ...) with
+;; the parameters read from this particle's slot in each region.
+
+(define (curveplot-kernel fn params ndraw x0 x1 y0 y1 ink)
+  (let* ((args (map (lambda (p)
+                      (list (string->symbol
+                             (string-append "shared-" (keyword->string p)))
+                            'k))
+                    params))
+         ;; The residual field, in plot coordinates: where this particle's
+         ;; curve sits relative to this pixel.
+         (g (list '- (cons fn (cons 'px args)) 'py)))
+    `(let* ((px (+ ,x0 (* ,(- x1 x0) (swizzle uv x))))
+            (py (+ ,y1 (* ,(- y0 y1) (swizzle uv y))))
+            (ink (fold-i ,ndraw 0.0 (k acc)
+                   (let* ((g ,g)
+                          ;; Distance in PIXELS. dpdy picks up the vertical
+                          ;; scale on its own, so the axes need not share one.
+                          (d (/ (abs g) (length (vec2 (dpdx g) (dpdy g))))))
+                     (+ acc (* ,ink (- 1.0 (smoothstep 0.0 1.5 d)))))))
+            ;; The truth, drawn once in amber, from the same curve.
+            ;; (u32 0), not 0: every kernel literal is an f32 by design, and
+            ;; a region index is an address rather than a quantity.
+            (tg ,(list '- (cons fn (cons 'px (map (lambda (p)
+                                                    (list (string->symbol
+                                                           (string-append "shared-truth-"
+                                                                          (keyword->string p)))
+                                                          '(u32 0)))
+                                                  params)))
+                       'py))
+            (td (/ (abs tg) (length (vec2 (dpdx tg) (dpdy tg)))))
+            (tr (- 1.0 (smoothstep 0.0 1.5 td))))
+       (vec3 (+ (* 0.10 ink) (* 0.95 tr))
+             (+ (* 0.85 ink) (* 0.70 tr))
+             (+ (* 0.80 ink) (* 0.15 tr))))))
+
+;;--- the whole picture --------------------------------------------------
+;; (plot-posterior! gf curve-name cols picks truth ...) -> a future
+;;
+;; `cols` is what `importance` returned and `picks` an :i32 view of
+;; particle indices resampled by weight — duplicates included, because a
+;; duplicate is what makes a concentrated posterior LOOK concentrated.
+
+(define (plot-posterior! gf fn cols picks truth . opts)
+  (let* ((st     (stage gf))
+         (params (curveplot-scalars st))
+         (ndraw  (view-length picks))
+         (pad    (if (pair? opts) (car opts) 0.15))
+         (ink    (if (and (pair? opts) (pair? (cdr opts))) (cadr opts) 0.07)))
+    (if (not (= (length params) (length truth)))
+        (error 'plot-posterior!
+               "the model's scalar choices and the truth must correspond"
+               (list (length params) (length truth))))
+    ;; Two regions per parameter: the resampled particles, and the one
+    ;; true value. The truth rides in the same buffer so the kernel reads
+    ;; it exactly as it reads a particle — one accessor pattern, not two.
+    (shared-layout!
+     (append (map (lambda (p) (list (curveplot-region p) ndraw)) params)
+             (map (lambda (p)
+                    (list (string->symbol
+                           (string-append "truth-" (keyword->string p))) 1))
+                  params)))
+    (let* ((bytes (make-shared))
+           (v     (shared-view bytes)))
+      (for-each
+       (lambda (p)
+         (let ((col (map-ref cols p))
+               (off (shared-offset (curveplot-region p))))
+           (let loop ((i 0))
+             (if (< i ndraw)
+                 (begin (view-set! v (+ off i) (view-ref col (view-ref picks i)))
+                        (loop (+ i 1)))))))
+       params)
+      (let loop ((ps params) (ts truth))
+        (if (pair? ps)
+            (begin
+              (view-set! v (shared-offset
+                            (string->symbol
+                             (string-append "truth-" (keyword->string (car ps)))))
+                         (car ts))
+              (loop (cdr ps) (cdr ts)))))
+      ;; The window frames the PARTICLES, so it follows the curve family
+      ;; rather than assuming one. A curve that leaves the frame is still
+      ;; the news; a frame that cannot contain the family is only a bug.
+      (let* ((b  (curveplot-bounds fn v params ndraw))
+             (x0 (car b)) (x1 (cadr b)) (y0 (caddr b)) (y1 (cadddr b))
+             (dy (* pad (- y1 y0))))
+        (run-kernel-loop
+         (shadertoy (curveplot-kernel fn params ndraw
+                                      x0 x1 (- y0 dy) (+ y1 dy) ink))
+         "vxs-gpu-canvas" bytes)))))
+
+;; Where the particles actually go, sampled across the x range. Cheap —
+;; NDRAW by a handful of probes — and it is what lets the same plotter
+;; frame a quadratic and a sine without being told which it has.
+(define (curveplot-bounds fn v params ndraw)
+  (let* ((x0 -2.2) (x1 2.2) (probes 9))
+    (let loop ((i 0) (lo 1e30) (hi -1e30))
+      (if (= i ndraw)
+          (list x0 x1 lo hi)
+          (let probe ((s 0) (lo lo) (hi hi))
+            (if (> s probes)
+                (loop (+ i 1) lo hi)
+                (let* ((x (+ x0 (* (/ (- x1 x0) probes) s)))
+                       (y (curveplot-eval fn v params i x)))
+                  (probe (+ s 1) (min lo y) (max hi y)))))))))
+
+;; The curve, evaluated on the HOST for particle i — the same arithmetic
+;; the kernel will do, which is what makes the framing agree with the
+;; picture. It calls the dual's Scheme half, so there is still one curve
+;; and no second definition to disagree with the first.
+(define (curveplot-eval fn v params i x)
+  (let ((d (wgsl-dual fn)))
+    (if (not d)
+        (error 'plot-posterior!
+               (string-append (symbol->string fn)
+                              ": not a dual — the plot needs a curve it can"
+                              " evaluate here as well as on the device."
+                              " Define it with define-dual")
+               fn))
+    (apply (cdr d)
+           (cons x (map (lambda (p)
+                          (view-ref v (+ (shared-offset (curveplot-region p)) i)))
+                        params)))))

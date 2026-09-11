@@ -1057,10 +1057,18 @@
 ;;
 ;; The WGSL identifier is `sdata`, not `shared` — `shared` is a reserved
 ;; word there and a binding named that will not compile.
-(if (not (defined? 'shared-regions))
-    (begin (define shared-regions '())))   ; ((name offset length) ...)
-(if (not (defined? 'shared-length))
-    (begin (define shared-length 0)))      ; total floats
+;; DELIBERATELY NOT GUARDED, unlike the signature and definition tables
+;; above, and the distinction is worth stating because it is easy to get
+;; backwards. Those tables are populated DURING load — define-dual in
+;; lib/dist.scm registers into them — so a second load must not reset them
+;; or the registrations vanish. A layout is declared at RUN time, by a
+;; program, and never by a library at load time. So re-loading must reset
+;; it: that is how a demo gets a clean slate instead of inheriting the
+;; regions of whichever one ran before it, which would emit a binding
+;; nothing binds. testcases/test_gpu_presets.js checks exactly that, and
+;; caught this the first time it was guarded.
+(define shared-regions '())    ; ((name offset length) ...)
+(define shared-length 0)       ; total floats
 
 (define (shared-layout! specs)
   ;; Retract the previous layout's accessors first. A declaration is a

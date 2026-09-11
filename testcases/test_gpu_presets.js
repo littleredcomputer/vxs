@@ -28,7 +28,8 @@ installFakeWebGPU({ compileMessages: () => [] });
 
 const createVxsModule = require(path.join(__dirname, '..', 'web', 'vxs.js'));
 
-const GPU_PRESETS = ['plasma', 'rings', 'points', 'wrangle', 'actors', 'cubes', 'field', 'ensemble'];
+const GPU_PRESETS = ['plasma', 'rings', 'points', 'wrangle', 'actors', 'cubes', 'field', 'ensemble',
+                     'basis'];
 
 // Does web/app.js actually PARSE as JavaScript?
 //

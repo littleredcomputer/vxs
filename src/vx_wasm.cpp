@@ -490,7 +490,7 @@ EM_JS(int, js_gpu_draw, (int deviceId, int shaderId, const char *canvasIdPtr), {
 // Explicit bind group layout, never layout:"auto" - with auto, layouts are
 // derived per pipeline, so bind groups become pipeline-specific and every
 // recompile invalidates them, foreclosing exactly the hot-swap this is for.
-EM_JS(int, js_gpu_run_kernel, (int deviceId, int shaderId, const char *canvasIdPtr, double time), {
+EM_JS(int, js_gpu_run_kernel, (int deviceId, int shaderId, const char *canvasIdPtr, double time, const unsigned char *dataPtr, int dataLen), {
   var canvasId = UTF8ToString(canvasIdPtr);
   globalThis.vxsGpuError = "";
   try {
@@ -504,19 +504,29 @@ EM_JS(int, js_gpu_run_kernel, (int deviceId, int shaderId, const char *canvasIdP
     if (!ctx) { globalThis.vxsGpuError = "getContext('webgpu') returned null"; return -3; }
 
     globalThis.vxsKernelCache = globalThis.vxsKernelCache || {};
-    var key = canvasId + " " + shaderId;
+    // The shared buffer's presence is part of the key: a pipeline's bind
+    // group layout has to match the shader it was built for, so a kernel
+    // that reads a table and one that does not are different pipelines.
+    var shared = dataLen > 0;
+    var key = canvasId + " " + shaderId + (shared ? " s" : "");
     var entry = globalThis.vxsKernelCache[key];
     if (!entry || entry.device !== device) {
       var format = navigator.gpu.getPreferredCanvasFormat();
       ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
       var module = shader.module;
-      var bgl = device.createBindGroupLayout({
-        entries: [{
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform' }
-        }]
+      var bglEntries = [{
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' }
+      }];
+      // Binding 1 is what lib/shadertoy.scm's shared-preamble declares.
+      // read-only-storage, matching var<storage, read> there.
+      if (shared) bglEntries.push({
+        binding: 1,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: 'read-only-storage' }
       });
+      var bgl = device.createBindGroupLayout({ entries: bglEntries });
       var pipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
         vertex:   { module: module, entryPoint: 'vs' },
@@ -527,17 +537,42 @@ EM_JS(int, js_gpu_run_kernel, (int deviceId, int shaderId, const char *canvasIdP
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
-      var bind = device.createBindGroup({
-        layout: bgl,
-        entries: [{ binding: 0, resource: { buffer: ubuf } }]
-      });
-      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bind: bind };
+      entry = { device: device, pipeline: pipeline, ubuf: ubuf, bgl: bgl,
+                bind: null, sbuf: null, sbufSize: 0 };
+      if (!shared) {
+        entry.bind = device.createBindGroup({
+          layout: bgl,
+          entries: [{ binding: 0, resource: { buffer: ubuf } }]
+        });
+      }
       globalThis.vxsKernelCache[key] = entry;
+    }
+
+    // Grown rather than reallocated per frame, exactly as the instanced
+    // path does. The bind group is rebuilt only when the buffer is.
+    if (shared && (!entry.sbuf || entry.sbufSize < dataLen)) {
+      if (entry.sbuf) entry.sbuf.destroy();
+      entry.sbuf = device.createBuffer({
+        size: (dataLen + 15) & ~15,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      entry.sbufSize = dataLen;
+      entry.bind = device.createBindGroup({
+        layout: entry.bgl,
+        entries: [
+          { binding: 0, resource: { buffer: entry.ubuf } },
+          { binding: 1, resource: { buffer: entry.sbuf } }
+        ]
+      });
     }
 
     // Matches struct U in lib/shadertoy.scm: time, width, height, pad.
     device.queue.writeBuffer(entry.ubuf, 0,
       new Float32Array([time, canvas.width, canvas.height, 0.0]));
+    // Copied OUT of the wasm heap: writeBuffer on a view into it would be
+    // reading memory the VM may move or reuse before the copy happens.
+    if (shared) device.queue.writeBuffer(entry.sbuf, 0,
+      new Uint8Array(HEAPU8.subarray(dataPtr, dataPtr + dataLen)));
 
     var encoder = device.createCommandEncoder();
     var pass = encoder.beginRenderPass({
@@ -1241,7 +1276,8 @@ static int js_gpu_available() { return 0; }
 static void js_request_adapter(int) {}
 static void js_request_device(int, int) {}
 static int js_gpu_draw(int, int, const char *) { return -1; }
-static int js_gpu_run_kernel(int, int, const char *, double) { return -1; }
+static int js_gpu_run_kernel(int, int, const char *, double,
+                             const unsigned char *, int) { return -1; }
 static int js_gpu_draw_instances(int, int, const char *, const unsigned char *, int, int, double, double, double, double, double) { return -1; }
 static int js_gpu_create_buffer(int, const unsigned char *, int) { return -1; }
 static int js_gpu_wrangle(int, int, int, int, double, int, const unsigned char *, int, int, int, int) { return -1; }
@@ -1380,7 +1416,19 @@ static void register_wasm_primitives(VM &vm) {
     std::string canvas_id = (argc > 3 && Heap::is_string(args[3]))
         ? std::string(args[3].as_ptr<ObjString>()->view())
         : std::string("gpu-canvas");
-    int rc = js_gpu_run_kernel(static_cast<int>(d->id), static_cast<int>(sh->id), canvas_id.c_str(), t);
+    // Optional shared read-only data, bound at 1 — a table the kernel
+    // reads, which is what lib/shadertoy.scm's shared-preamble declares.
+    // Absent means the pipeline has no such binding at all, rather than an
+    // empty one, since a bind group layout must match its shader.
+    const unsigned char *shared_ptr = nullptr;
+    int shared_len = 0;
+    if (argc > 4 && !args[4].is_false()) {
+      ObjBytes *sb = vm.require_bytes(args[4], "gpu-run-kernel!");
+      shared_ptr = sb->data.data();
+      shared_len = static_cast<int>(sb->data.size());
+    }
+    int rc = js_gpu_run_kernel(static_cast<int>(d->id), static_cast<int>(sh->id),
+                               canvas_id.c_str(), t, shared_ptr, shared_len);
     if (rc != 0) {
       char *msg = js_gpu_last_error();
       std::string detail = msg ? msg : "unknown";
@@ -1388,7 +1436,7 @@ static void register_wasm_primitives(VM &vm) {
       vm.raise_contract("gpu-run-kernel!: " + detail);
     }
     return Value::boolean_true();
-  }, 3, 4));
+  }, 3, 5));
 
   // (gpu-draw-instances! device wgsl bytes count time camera [canvas-id])
   //
