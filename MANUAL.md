@@ -1828,6 +1828,23 @@ It also costs the thesis nothing: there is still exactly one definition
 of the curve. A hardware derivative **measures** it rather than being a
 second definition of it, so there is nothing that can drift.
 
+`dpdx`, `dpdy` and `fwidth` are in the kernel language, and **gated on a
+stage**. `wgsl-stage-of` is an exception list, not the beginning of a
+stage system: `shadertoy` compiles as `:fragment` and admits them,
+`wrangle-scheme` compiles as `:compute` and refuses them, and an
+un-staged compile refuses them too — "not saying" must not count as
+permission, because that is exactly the case where nothing knows where
+the code will run. `with-wgsl-stage` restores the stage even if the
+compile raises.
+
+Two things to check when the first curve is drawn, both cheap:
+**uniformity** — WGSL requires derivatives in uniform control flow, and a
+`for` with a uniform trip count preserves it, but implementations are
+strict; and **curvature within a quad**, since the estimate is a
+one-pixel finite difference and misestimates where `f′` swings hard
+across 2×2 pixels. A high-frequency `sin(bx)` is the case to look at,
+which is exactly the curve worth swapping in to show the surface off.
+
 #### ⚠️ Infinities and NaN reach a device, but WGSL does not promise it
 
 `-inf`, `inf` and `nan` are literals the reader already understands, and
@@ -1863,25 +1880,6 @@ makes a NaN available.
 in `dist-failures`, so changing one side alone would break the
 correspondence the whole port exists to keep. It is a change to *both*,
 or neither.
-
-#### Screen-space derivatives, and the stage gate
-
-`dpdx`, `dpdy` and `fwidth` are in the kernel language, and **gated on a
-stage**. `wgsl-stage-of` is an exception list, not the beginning of a
-stage system: `shadertoy` compiles as `:fragment` and admits them,
-`wrangle-scheme` compiles as `:compute` and refuses them, and an
-un-staged compile refuses them too — "not saying" must not count as
-permission, because that is exactly the case where nothing knows where
-the code will run. `with-wgsl-stage` restores the stage even if the
-compile raises.
-
-Two things to check when the first curve is drawn, both cheap:
-**uniformity** — WGSL requires derivatives in uniform control flow, and a
-`for` with a uniform trip count preserves it, but implementations are
-strict; and **curvature within a quad**, since the estimate is a
-one-pixel finite difference and misestimates where `f′` swings hard
-across 2×2 pixels. A high-frequency `sin(bx)` is the case to look at,
-which is exactly the curve worth swapping in to show the surface off.
 
 #### `batch-i` allocates a distribution per element — **noted, not scheduled**
 
