@@ -1745,6 +1745,32 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
+#### ⚠️ Two `fold-i`s in one kernel collide on the accumulator name
+
+A kernel body containing two folds emits `var acc_2` **twice** at function
+scope. If the two accumulators have different types the shader is invalid;
+if they have the same type it compiles and the first reader silently gets
+the second fold's value.
+
+The cause is deliberate behaviour meeting an unanticipated case.
+`wgsl-compile` resets `wgsl-counter` to zero, so emitted text depends only
+on the expression and is comparable by string in the tests — and
+`wrangle-point-terminal` compiles each of its arguments through it
+separately. Every attribute expression therefore restarts the counter, and
+two folds land on the same name.
+
+The fix is to reset once per kernel rather than once per sub-expression: a
+non-resetting entry point used inside the terminal, with `wrangle-scheme`
+resetting at the top. It is not done because it renumbers every emitted
+name and so every test that compares kernel text — a decision about the
+test strategy, not a local repair.
+
+Live consequence, worth knowing before it is met: **no kernel can contain
+two reductions.** A score and a sufficient statistic together, or two
+models scored in one pass, is the shape a Gibbs update tends to want.
+`demos/measure.scm` works around it with one fold per shader and two
+dispatches into different attributes of the same scratch.
+
 ---
 
 ### Planned
@@ -1940,6 +1966,56 @@ particle exists at a time. A parallel-safe version of that same
 vectorisation needs K×N storage — the two-axis column
 [§6](#a-gather-primitive) refuses. The optimisation is licensed by
 sequentiality, so it cannot cross to the device with the model.
+
+#### ✅ The staged kernel, answered by a real device
+
+§5c's two backends were compared only in f64 until `demos/measure.scm`
+ran the emitted kernel. It dispatches the staged log-joint over 512
+importance particles, reads the scores back, and compares them against
+`staged-logpdf`. Every input is written into an f32 buffer and read back
+out before either side sees it, so the two differ in the width of the
+arithmetic and in nothing else.
+
+At n = 32 observations, against the f64 oracle:
+
+| | mean error | bias | worst relative |
+|---|---|---|---|
+| plain fold | 2.59 ulp | −2.01 ulp | 3.6e-7 |
+| blocked ×4 | **0.79 ulp** | **+0.12 ulp** | 2.4e-7 |
+
+Sub-ulp and unbiased is the representable floor, so the reading is that
+the kernel computes the same function and the residue is f32 itself.
+Worst relative sits at about twice f32's epsilon.
+
+**What the bias was, and the trap in finding it.** `with-staged-f32`
+narrows the VM to the device's width, and it was written to test whether
+the plain fold's −2 ulp bias came from the accumulator. It showed the bias
+surviving, which looked like an acquittal and was not: rounding both sides
+in the same sequential order makes a shared flaw cancel in the
+subtraction. Controlling a variable by making it identical on both sides
+hides its size rather than measuring it. The bias was the accumulation all
+along, and reassociating the fold removed it.
+
+**Compensated summation does not survive this compiler.** Kahan was
+implemented and measured. On the host it changes 311 of the 512 particles
+and cuts summation error 3×; on the device it returned results
+bit-identical to the plain sum for all 512. `(t - sum) - y` is
+algebraically zero and the optimiser deleted it. Removed rather than kept
+as dead code that looks alive. The same fate awaits double-single pairs,
+which rest on the same two-sum — and there is nothing to widen to, since
+WGSL has no f64 and Metal no double. Of the three ways to fix a float sum,
+reassociation is the only one available here.
+
+**`with-staged-f32` is kept but is not an oracle.** It predicted blocked
+×4 would gain 1.9× where the device gained 3.3× — it mispredicted the
+device's own arithmetic by nearly two, in the one quantity it models. So
+it stays as the instrument it is, and the standing conclusion is that the
+device's arithmetic is the only reliable statement about the device's
+arithmetic. Emulating f32 on the host to tighten the comparison would
+inherit exactly that error.
+
+Blocked summation is **off by default**: see `lib/stage.scm` on why n = 32
+does not need it and why n = 10,000 would.
 
 ### Infrastructure
 

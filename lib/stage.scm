@@ -377,6 +377,40 @@
        :buffers (reverse (:buffers ctx))
        :terms   (reverse (:terms ctx))})))
 
+;;--- strict f32: rounding the VM where the device would ------------------
+;; The backends differ in one respect deliberately — f64 here, f32 there —
+;; so a comparison across them is a measurement rather than a test. This
+;; narrows that gap on purpose: with the flag set, the VM rounds to f32 at
+;; every point the IR NAMES an operation, which is where the accumulator
+;; lives. It exists to answer one question that a raw measurement cannot —
+;; whether a residual difference is the accumulation's width or the two
+;; sides disagreeing about what to compute.
+;;
+;; WHAT IT CANNOT REACH, because the limit bounds the conclusion: a
+;; registered helper is a Scheme PROCEDURE, so the arithmetic inside a
+;; define-dual body runs in f64 and is rounded only on the way out.
+;; logpdf-normal's own subexpressions, and curve-elem's two multiplies,
+;; keep an f64 intermediate the device has not got. So what survives this
+;; is that residue, plus the few ULP a device's own `log` and `exp` are
+;; permitted to differ by — never the accumulation, which the IR owns.
+(define staged-f32? #f)
+
+(defmacro (with-staged-f32 . body)
+  `(let ((was# staged-f32?))
+     (set! staged-f32? #t)
+     (unwind-protect (begin ,@body) (set! staged-f32? was#))))
+
+;; One reused four-byte slot. Writing a number into an f32 view and
+;; reading it back IS the rounding — there is no separate primitive, and a
+;; view is what this language already has for saying a storage width.
+(define staged-f32-slot
+  (let ((b (make-bytes 4))) (bytes-seal! b) (bytes-view b :f32)))
+
+(define (sf32 x)
+  (if staged-f32?
+      (begin (view-set! staged-f32-slot 0 x) (view-ref staged-f32-slot 0))
+      x))
+
 ;;--- backend one: the VM ------------------------------------------------
 ;; Evaluates the IR in f64, which is what makes it usable as the oracle
 ;; the device is checked against — and what lets it be compared with
@@ -386,7 +420,7 @@
   (let loop ((ts (:terms st)) (acc 0.0))
     (if (null? ts)
         acc
-        (loop (cdr ts) (+ acc (staged-term (car ts) st choices '()))))))
+        (loop (cdr ts) (sf32 (+ acc (staged-term (car ts) st choices '())))))))
 
 (define (staged-term t st choices idx)
   (let ((head (car t)))
@@ -401,8 +435,8 @@
            (if (= j n)
                acc
                (loop (+ j 1)
-                     (+ acc (staged-term body st choices
-                                         (cons (cons name j) idx))))))))
+                     (sf32 (+ acc (staged-term body st choices
+                                               (cons (cons name j) idx)))))))))
       ((eq? head 'scan-over)
        (let* ((n      (cadr t))
               (name   (caddr t))
@@ -413,7 +447,7 @@
          ;; component and a loop index are both just names to the evaluator
          ;; — the difference between them was enforced at staging.
          (let loop ((j 0)
-                    (s (map (lambda (st2) (staged-value (cadr st2) st choices idx))
+                    (s (map (lambda (st2) (sf32 (staged-value (cadr st2) st choices idx)))
                             states))
                     (acc 0.0))
            (if (= j n)
@@ -422,9 +456,9 @@
                  (loop (+ j 1)
                        ;; Every step reads `env`, which still holds the OLD
                        ;; state — the components update together.
-                       (map (lambda (st2) (staged-value (caddr st2) st choices env))
+                       (map (lambda (st2) (sf32 (staged-value (caddr st2) st choices env)))
                             states)
-                       (+ acc (staged-term body st choices env))))))))
+                       (sf32 (+ acc (staged-term body st choices env)))))))))
       (else (error 'stage "unknown term" t)))))
 
 ;; Dispatched through staged-families rather than a parallel `cond` over
@@ -437,11 +471,14 @@
         (ps    (map (lambda (a) (staged-value a st choices idx)) (cdr dist)))
         (v     (staged-value value st choices idx)))
     (if (not entry) (error 'stage "unknown family" (car dist)))
-    (apply (staged-procedure (cadr entry)) (cons v ps))))
+    (sf32 (apply (staged-procedure (cadr entry)) (cons v ps)))))
 
 (define (staged-value e st choices idx)
   (cond
-    ((number? e) e)
+    ;; A literal is an f32 literal on the device, so rounding it is part of
+    ;; being faithful. A loop index arrives through the symbol branch below
+    ;; and stays an exact integer, which is what indexing needs.
+    ((number? e) (sf32 e))
     ((symbol? e)
      (let ((b (assq e idx)))
        (if b (cdr b) (error 'stage "unbound index" e))))
@@ -452,19 +489,19 @@
           (let ((v (map-ref choices (cadr e))))
             (if (not (number? v))
                 (error 'stage "a scalar choice needs a number" (cadr e)))
-            v))
+            (sf32 v)))
          ((eq? head 'choice-i)
-          (view-ref (map-ref choices (cadr e))
-                    (staged-value (caddr e) st choices idx)))
+          (sf32 (view-ref (map-ref choices (cadr e))
+                          (staged-value (caddr e) st choices idx))))
          ((eq? head 'data)
-          (view-ref (cdr (assq (cadr e) (:buffers st)))
-                    (staged-value (caddr e) st choices idx)))
+          (sf32 (view-ref (cdr (assq (cadr e) (:buffers st)))
+                          (staged-value (caddr e) st choices idx))))
          ((eq? head 'call)
-          (apply (staged-procedure (cadr e))
-                 (map (lambda (a) (staged-value a st choices idx)) (cddr e))))
+          (sf32 (apply (staged-procedure (cadr e))
+                       (map (lambda (a) (staged-value a st choices idx)) (cddr e)))))
          ((memq head '(+ - * /))
-          (apply (staged-operator head)
-                 (map (lambda (a) (staged-value a st choices idx)) (cdr e))))
+          (sf32 (apply (staged-operator head)
+                       (map (lambda (a) (staged-value a st choices idx)) (cdr e)))))
          (else (error 'stage "unknown expression" e)))))
     (else (error 'stage "unknown expression" e))))
 
@@ -516,10 +553,81 @@
       ((eq? head 'sum-over)
        ;; The device's bounded fold. Its index is :u32 — an address, not a
        ;; quantity — which is why nothing below ever uses it as a number.
-       (list 'fold-i (cadr t) 0.0 (list (caddr t) 'acc)
-             (list '+ 'acc (kernel-term (cadddr t)))))
+       (if staged-blocked?
+           (kernel-blocked-sum (cadr t) (caddr t) (kernel-term (cadddr t)))
+           (list 'fold-i (cadr t) 0.0 (list (caddr t) 'acc)
+                 (list '+ 'acc (kernel-term (cadddr t))))))
       ((eq? head 'scan-over) (kernel-scan t))
       (else (error 'stage "unknown term" t)))))
+
+;;--- blocked summation, for the likelihood fold -------------------------
+;; A bare f32 accumulator grows toward the total while each new addend
+;; stays small, so the addend's low bits fall below the accumulator's ULP
+;; and are rounded away — once per term, with the error growing as O(n).
+;;
+;; THREE WAYS TO FIX A FLOAT SUM, AND ONLY ONE IS AVAILABLE HERE.
+;;
+;;   A wider accumulator is the obvious answer and does not exist: WGSL
+;;   has no f64 and Metal has no double, so there is nothing to widen to.
+;;
+;;   Compensated summation (Kahan, and the double-single pair built on the
+;;   same two-sum) recovers the dropped bits by carrying them forward. It
+;;   was implemented here and MEASURED: the host confirmed the
+;;   compensation changes 311 of 512 particles and cuts summation error
+;;   3x, and the device returned results bit-identical to the plain sum
+;;   for all 512. The compiler deleted it, as it is entitled to —
+;;   (t - sum) - y is algebraically zero. Removed rather than kept as dead
+;;   code that looks alive.
+;;
+;;   Reassociation survives, because there is no identity to cancel. That
+;;   is what this is.
+;;
+;; FOUR partial sums in a vec4, rotating which lane receives each term:
+;;
+;;   acc = vec4(acc.y, acc.z, acc.w, acc.x + term)
+;;
+;; so lane k accumulates every fourth term and the dependent add chain per
+;; lane is n/4 rather than n. The rotation is real data movement and the
+;; result is a genuine reassociation, so there is no identity to cancel —
+;; a compiler that reassociates is doing what this asks for rather than
+;; undoing it. It also needs no divisibility: any n rotates.
+;;
+;; MEASURED ON A DEVICE, curve model at n = 32, K = 512, against the f64
+;; oracle: mean error 2.59 ulp -> 0.79 ulp, and the bias 2.01 ulp -> 0.12
+;; ulp. Sub-ulp and unbiased, which is the representable floor.
+;;
+;; OFF BY DEFAULT, deliberately. At n = 32 the plain sum's error is
+;; already far below anything that reads a log-joint: the bias is the
+;; benign kind for Metropolis-Hastings, which accepts on a DIFFERENCE of
+;; log-joints at nearby parameters and cancels a common bias, and the
+;; residual noise is orders of magnitude under any sane proposal scale.
+;; What earns this its place in the file is that the error grows with n —
+;; a likelihood over ten thousand points is 10,000 roundings deep rather
+;; than 2,500, and there the argument changes. Reach for it then.
+;;
+;; A note on cost: four accumulators instead of one, so four registers
+;; where a scan nested inside a fold may already be using the bundle
+;; machinery. The four chains are independent, so this may well be the
+;; faster form too — unmeasured.
+(define staged-blocked? #f)
+
+(defmacro (with-staged-blocked . body)
+  `(let ((was# staged-blocked?))
+     (set! staged-blocked? #t)
+     (unwind-protect (begin ,@body) (set! staged-blocked? was#))))
+
+;; The fold is let-bound because its four lanes must be mentioned four
+;; times, and mentioning the fold itself would emit the loop four times.
+(define (kernel-blocked-sum n idx term)
+  (list 'let
+        (list (list 'bsum
+                    (list 'fold-i n (list 'vec4 0.0 0.0 0.0 0.0) (list idx 'acc)
+                          (list 'vec4 (list 'swizzle 'acc 'y)
+                                      (list 'swizzle 'acc 'z)
+                                      (list 'swizzle 'acc 'w)
+                                      (list '+ (list 'swizzle 'acc 'x) term)))))
+        (list '+ (list 'swizzle 'bsum 'x) (list 'swizzle 'bsum 'y)
+                 (list 'swizzle 'bsum 'z) (list 'swizzle 'bsum 'w))))
 
 ;; A scan is the same bounded fold with a WIDER accumulator: the state
 ;; components and the running score, packed into one vector because fold-i

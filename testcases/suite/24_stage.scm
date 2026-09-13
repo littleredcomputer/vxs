@@ -223,4 +223,79 @@
                          (staged-logpdf (stage (calls-a-declared-only 0.5))
                                         {:x 1.0}))))
 
+;;--- strict f32: narrowing the oracle on purpose -------------------------
+;; The two backends differ in precision by design, so comparing them is a
+;; measurement rather than a test. `with-staged-f32` exists to separate the
+;; two things a measurement cannot tell apart: whether a residual gap is
+;; the accumulator's WIDTH or the two sides disagreeing about WHAT to
+;; compute. It rounds where the IR names an operation, which is where the
+;; accumulator lives.
+;;
+;; Note what it cannot reach, since it bounds every conclusion drawn from
+;; it: a registered helper is a Scheme procedure, so curve-elem's two
+;; multiplies and logpdf-normal's subexpressions still run in f64 and are
+;; rounded only on the way out.
+
+(assert-true "strict f32 is off unless asked for" (not staged-f32?))
+
+(assert-true "and the form restores the flag"
+             (begin (with-staged-f32 1) (not staged-f32?)))
+
+;; unwind-protect, not a plain begin: a raising body must not leave the
+;; oracle silently narrowed for everything that runs after it.
+(assert-true "even when the body raises"
+             (begin (guard (e (#t #f)) (with-staged-f32 (error 'stage "boom")))
+                    (not staged-f32?)))
+
+;; That the mode DOES something, stated on a value whose f32 form is not
+;; its f64 form. Asserting that a log-joint moves would be brittle; this
+;; is exact.
+(assert-true "rounding is a real narrowing"
+             (not (= 0.1 (with-staged-f32 (sf32 0.1)))))
+(assert-true "and is idempotent, so nesting the form changes nothing"
+             (= (with-staged-f32 (sf32 0.1))
+                (with-staged-f32 (sf32 (with-staged-f32 (sf32 0.1))))))
+
+;;--- blocked summation in the emitted fold ------------------------------
+;; A likelihood fold adds many terms into a growing f32 total, so each
+;; addend's low bits fall below the accumulator's ULP and the error grows
+;; as O(n). Four partial sums in a rotating vec4 shorten the dependent
+;; chain to n/4. It is a pure REASSOCIATION, which is the whole point:
+;; compensated summation was tried, and the device's compiler deleted it
+;; because (t - sum) - y is algebraically zero. There is nothing here for
+;; an optimiser to cancel.
+
+(assert-true "blocked is off unless asked for" (not staged-blocked?))
+(assert-true "and the form restores the flag"
+             (begin (with-staged-blocked 1) (not staged-blocked?)))
+
+(assert-true "the plain fold starts from a scalar zero"
+             (equal? 0.0 (caddr (list-ref (staged-kernel st) 4))))
+
+(define kb (with-staged-blocked (staged-kernel st)))
+
+(assert-equal "the blocked fold accumulates four lanes"
+              '(vec4 0.0 0.0 0.0 0.0)
+              (caddr (cadr (car (cadr (list-ref kb 4))))))
+
+;; Still a scalar log-joint, so nothing downstream of the kernel can tell
+;; which summation order it got.
+(assert-equal "the blocked kernel still type-checks to a scalar"
+              :f32 (wgsl-type kb KENV))
+(assert-true "and it is a different kernel from the plain one"
+             (not (equal? (staged-kernel st) kb)))
+
+(define (f32gap a b c)
+  (let ((ch {:a a :b b :c c :ys ys}))
+    (abs (- (staged-logpdf st ch)
+            (with-staged-f32 (staged-logpdf st ch))))))
+
+;; Bounded, not zero: the claim is that the narrow evaluation is the same
+;; computation at a smaller width, so it must stay within a few ulp of the
+;; wide one rather than agree with it.
+(assert-true "the f32 log-joint stays within a few ulp of the f64 one"
+             (< (f32gap 2.0 -1.0 0.5) 1e-3))
+(assert-true "at another particle"      (< (f32gap -0.7 3.1 -2.2) 1e-3))
+(assert-true "and far out in the tails" (< (f32gap 9.0 -9.0 9.0) 1e-2))
+
 (suite-summary)
