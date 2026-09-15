@@ -2017,6 +2017,65 @@ inherit exactly that error.
 Blocked summation is **off by default**: see `lib/stage.scm` on why n = 32
 does not need it and why n = 10,000 would.
 
+#### Conjugate structure reads from the IR; the kernel does not exist yet
+
+`lib/gibbs.scm` answers whether a model has a closed-form conditional at
+an address, and recovers its coefficients if it does. It reads the staged
+IR rather than the model source, because the IR is already normal form,
+and the whole reading is static — nothing is witnessed by running the
+model.
+
+```scheme
+(gibbs-structure st :a)   ; => {:kind normal-normal :prior (m0 s0) :children (...)}
+(gibbs-posterior st g ch) ; => (loc . scale)
+```
+
+For the curve model the coefficient of `:a` comes back as
+`(* (data xs j) (data xs j))` and its offset as
+`(+ (* (choice :b) (data xs j)) (choice :c))` — both read out of
+`curve-elem`'s **body**, since from the call site the mean is only
+`(call curve-elem ...)`. Another choice appearing in the offset is correct
+rather than leakage: a Gibbs conditional holds every other address fixed,
+so `(choice :b)` there is a conditioned constant.
+
+**A Gibbs update can be checked, and the first attempt at saying otherwise
+was wrong.** A second derivation from the same structural claim repeats
+the same mistake, so the two-path comparison that serves everything else
+here fails — two-path detection assumes the paths fail independently. But
+the claim divides. That the conditional is *Gaussian* is a property of the
+text, proved by the refusals. Which Gaussian it *is* then follows from the
+model and can be measured: a Gaussian conditional makes the log-joint
+exactly quadratic in the address, so three evaluations of `staged-logpdf`
+recover the mean and scale as an identity — no fit, no residual, no step
+size to tune. `gibbs-posterior-by-probe` is that instrument, it touches no
+coefficient the derivation produced, and the closed form agrees with it to
+1e-11 with the result independent of the step over a 300x range.
+
+**Checked against an independent implementation, and bit-identical.** The
+same pair has a hand-written update in a Warp-lineage compiler this design
+takes its bearings from, and that compiler builds the update the other way
+round: the coefficient from an explicit design function, the residual from
+an explicit loop over the other coefficients. Transcribed to f64 and run
+on the same data, loc and scale agree with `gibbs-posterior` for all three
+coefficients at **zero difference**. Two derivations, two languages, one
+formula — and the affine decomposition was written and passing before the
+reference was read, so the agreement is a check rather than a copy.
+
+Refused by name: a mean quadratic in the address, the address in a child's
+scale or in a divisor, an address flowing through a DECLARED-only helper
+(no body in this language, so affineness cannot be read — the message says
+`define-dual`), an unknown address, a batched choice. A DECLARED helper
+applied to *data* does not block anything, because an expression free of
+the address is a constant for this update whatever it contains.
+
+What is missing is the whole device half, and two things gate it. The
+subset has **no gather**, so `mu[z]` cannot be expressed and every
+conjugacy that needs an assignment — a mixture's mean, a Dirichlet over
+categories — is out of reach until [§6](#a-gather-primitive) lands. And a
+Gibbs kernel wants a score and a sufficient statistic in one pass, which
+is two reductions, which currently collide on the accumulator name. So
+this is the fiber path only, and honestly so.
+
 ### Infrastructure
 
 #### ✅ A staleness guard for `web/vxs.wasm` — **retired, premise gone**

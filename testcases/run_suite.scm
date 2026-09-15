@@ -34,6 +34,7 @@
 (load "testcases/suite/24_stage.scm")
 (load "testcases/suite/25_scan.scm")
 (load "testcases/suite/26_curveplot.scm")
+(load "testcases/suite/27_gibbs.scm")
 
 (if (total-summary)
     (display "\n>>> ALL SUITES COMPLETED WITH ZERO ERRORS.\n\n")

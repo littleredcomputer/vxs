@@ -979,6 +979,9 @@
       (wgsl-join (map (lambda (l) (string-append "  " l)) lines) "\n")
       "\n}\n"))
     (wgsl-declare! name wname (map cadr params) ret)
+    ;; After the compile, so a body that does not type-check is not kept
+    ;; as though it were a citizen.
+    (wgsl-put-body! name params body)
     ret))
 
 ;; (define-gpu (name (arg type) ...) body)
@@ -1032,6 +1035,47 @@
           (else (loop (cdr xs) (cons (car xs) acc) found)))))
 
 (define (wgsl-dual name) (assq name wgsl-duals))
+
+;; The BODIES, by name — kept for the same reason define-gen keeps a
+;; model's source, and it is the same argument one level down. A helper
+;; that entered the kernel domain handed its body over as a datum already
+;; (define-gpu and define-dual both splice it quoted); compiling it to
+;; text and dropping the datum throws away the only readable statement of
+;; what the function MEANS.
+;;
+;; What needs it: a call is opaque in the staged IR, so
+;; (call curve-elem (data xs j) (choice :a) ...) hides whether the mean is
+;; affine in :a — which is exactly the question a conjugate update turns
+;; on. Reading the body answers it by proof. The alternative is to
+;; evaluate the helper at two points and fit a line, which is unsound for
+;; the same reason probing a model for its address sequence is: a
+;; quadratic passes through any two points, and a wrong update would be
+;; inherited identically by both backends, so the oracle could not catch
+;; it.
+;;
+;; The cost is nothing. This table holds one s-expression per function
+;; that paid the entry tax, and the tax is what bounds the table: the set
+;; of bodies kept is exactly the set of names a kernel may call.
+(if (not (defined? 'wgsl-bodies))
+    (begin (define wgsl-bodies '())))
+
+(define (wgsl-put-body! name params body)
+  (let loop ((xs wgsl-bodies) (acc '()) (found #f))
+    (cond ((null? xs)
+           (set! wgsl-bodies
+                 (reverse (if found acc (cons (cons name (cons params body)) acc)))))
+          ((eq? (car (car xs)) name)
+           (loop (cdr xs) (cons (cons name (cons params body)) acc) #t))
+          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+
+;; (name params . body), or #f for a DECLARED function, which has no body
+;; in this language to read.
+(define (wgsl-fn-body name)
+  (let ((b (assq name wgsl-bodies)))
+    (if b (cdr b) #f)))
+
+(define (wgsl-body-params b) (car b))
+(define (wgsl-body-expr b) (cdr b))
 
 (defmacro (define-dual spec body)
   `(begin
