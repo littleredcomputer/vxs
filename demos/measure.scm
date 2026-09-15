@@ -106,14 +106,14 @@
 ;; writes. Nothing is drawn — the points buffer exists because a wrangle
 ;; dispatch takes one, not because there is a picture.
 ;;
-;; TWO SHADERS RATHER THAN ONE, and not by preference. Putting both folds
-;; in one body emits `var acc_2` twice at function scope, because
-;; wgsl-compile resets the name counter per sub-expression — deliberately,
-;; so emitted text is comparable by string in the tests — and
-;; wrangle-point-terminal compiles each attribute argument separately. The
-;; two folds therefore land on the same accumulator name and the scalar one
-;; reads the blocked vec4. Two dispatches into two different attributes of
-;; the same scratch avoid it: one fold per kernel, one readback for both.
+;; TWO SHADERS RATHER THAN ONE, and now by preference. It began as a
+;; workaround: both folds in one body emitted `var acc_2` twice, because
+;; the name counter restarted for each attribute argument of the terminal,
+;; and the scalar reader silently got the blocked vec4. That is fixed (see
+;; §6), so one kernel writing both attributes would work. The split stays
+;; because one fold per shader is the clearer thing to compare — and
+;; because the two dispatches land in two attributes of the same scratch,
+;; so a single readback still carries both answers on identical inputs.
 (define wsrc
   (wrangle-scheme `(point position pscale colour (lj ,(staged-kernel st)))))
 

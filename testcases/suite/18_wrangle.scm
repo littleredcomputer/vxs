@@ -751,4 +751,38 @@
 (wrangle-params! '(sigma radius gain))
 (scratch-attributes! '())
 
+
+;;--- two reductions in one body ----------------------------------------
+;; Locals are hoisted to function scope, so two folds in one body must not
+;; land on the same name. They used to: wgsl-compile resets the name
+;; counter so emitted text depends only on the expression, and the point
+;; terminal compiled each of its arguments through it — restarting the
+;; counter per argument. Two folds both spelled `acc` then emitted
+;; `var acc_2` twice, once f32 and once vec2<f32>, and the first reader
+;; silently got the second fold's value.
+;;
+;; Reproduced with the SAME accumulator name in both, which is the case
+;; that cannot be worked around by naming them differently — and it is the
+;; case a staged kernel hits, since a score and a sufficient statistic in
+;; one pass is two reductions over the same address.
+(scratch-attributes! '((weight :f32) (age :f32)))
+(let ((two (wrangle-scheme
+            '(point position pscale colour
+                    (weight (fold-i 4 0.0 (j acc) (+ acc (f32 j))))
+                    (age    (swizzle (fold-i 4 (vec2 0.0 0.0) (j acc)
+                                       (vec2 (+ (swizzle acc x) (f32 j))
+                                             (swizzle acc y)))
+                                     x))))))
+  (assert-true "two folds in one body do not declare the same local twice"
+               (= 1 (let count ((i 0) (n 0))
+                      (if (> (+ i 7) (string-length two))
+                          n
+                          (count (+ i 1)
+                                 (if (string=? (substring two i (+ i 7)) "acc_2 :")
+                                     (+ n 1) n))))))
+  (assert-true "the scalar one keeps its type"
+               (string-contains? two "var acc_2 : f32"))
+  (assert-true "and the wider one gets a name of its own"
+               (string-contains? two "var acc_4 : vec2<f32>")))
+
 (suite-summary)

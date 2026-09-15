@@ -122,8 +122,11 @@
              (string-contains? ksrc "curve_elem(xs_at(j_1), a, b, c)"))
 (assert-true "the scores are the declared device functions"
              (string-contains? ksrc "logpdf_normal(a, 0.0, 1.5)"))
+;; The accumulator is named for WHAT IT ACCUMULATES, so the emitted text
+;; says which term the fold belongs to instead of leaving a reader to
+;; count folds.
 (assert-true "and the fold accumulates rather than being summed after the fact"
-             (string-contains? ksrc "acc_2 = (acc_2 + logpdf_normal(ys_at(j_1)"))
+             (string-contains? ksrc "acc_ys_2 = (acc_ys_2 + logpdf_normal(ys_at(j_1)"))
 
 ;;--- the model still runs -----------------------------------------------
 ;; Staging reads the source; it must not have disturbed what running it

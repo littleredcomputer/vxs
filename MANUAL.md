@@ -1745,31 +1745,40 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
-#### ⚠️ Two `fold-i`s in one kernel collide on the accumulator name
+#### ✅ Two `fold-i`s in one kernel no longer collide — **done**
 
-A kernel body containing two folds emits `var acc_2` **twice** at function
-scope. If the two accumulators have different types the shader is invalid;
-if they have the same type it compiles and the first reader silently gets
-the second fold's value.
+A kernel body with two folds used to emit `var acc_2` **twice** at function
+scope. With different types the shader is invalid; with the same type it
+compiles and the first reader silently gets the second fold's value.
 
-The cause is deliberate behaviour meeting an unanticipated case.
-`wgsl-compile` resets `wgsl-counter` to zero, so emitted text depends only
-on the expression and is comparable by string in the tests — and
-`wrangle-point-terminal` compiles each of its arguments through it
-separately. Every attribute expression therefore restarts the counter, and
-two folds land on the same name.
+Two causes, and both had to go.
 
-The fix is to reset once per kernel rather than once per sub-expression: a
-non-resetting entry point used inside the terminal, with `wrangle-scheme`
-resetting at the top. It is not done because it renumbers every emitted
-name and so every test that compares kernel text — a decision about the
-test strategy, not a local repair.
+`lib/wgsl.scm` already gensyms an accumulator from the name the `fold-i`
+form gives it, so two hand-written folds called `acc` and `tot` always
+coexisted. But `wgsl-compile` resets the name counter — deliberately, so
+emitted text depends only on the expression and is comparable by string in
+the tests — and `wrangle-point-terminal` compiled each of its arguments
+through it. The counter therefore restarted per attribute, and two folds
+landed on the same digit even when their bases differed. `wgsl-nested`
+compiles a sub-expression without the reset, and the terminal uses it; the
+property the reset exists for still holds, one level up, per **kernel**
+rather than per argument.
 
-Live consequence, worth knowing before it is met: **no kernel can contain
-two reductions.** A score and a sufficient statistic together, or two
-models scored in one pass, is the shape a Gibbs update tends to want.
-`demos/measure.scm` works around it with one fold per shader and two
-dispatches into different attributes of the same scratch.
+And `lib/stage.scm` handed every staged fold the same base name, so two
+staged folds collided regardless. A staged accumulator is now named for
+what it accumulates — `acc_ys` — which is distinct by construction where
+the addresses differ, and reads better besides: the emitted text says
+which term the fold belongs to instead of leaving a reader to count folds.
+
+The case that had to work is a **score and a sufficient statistic in one
+pass**, which is two reductions over the same address, and which no
+renaming scheme can separate on its own. That is why the counter fix was
+the necessary half.
+
+Cost, against the estimate: one test assertion, not the renumbering of
+every kernel-text comparison this entry used to predict. The other three
+such assertions compile directly rather than through a terminal and never
+moved.
 
 ---
 
@@ -2071,10 +2080,10 @@ the address is a constant for this update whatever it contains.
 What is missing is the whole device half, and two things gate it. The
 subset has **no gather**, so `mu[z]` cannot be expressed and every
 conjugacy that needs an assignment — a mixture's mean, a Dirichlet over
-categories — is out of reach until [§6](#a-gather-primitive) lands. And a
-Gibbs kernel wants a score and a sufficient statistic in one pass, which
-is two reductions, which currently collide on the accumulator name. So
-this is the fiber path only, and honestly so.
+categories — is out of reach until [§6](#a-gather-primitive) lands. The
+other gate is gone: a Gibbs kernel wants a score and a sufficient
+statistic in one pass, and two reductions in one kernel now coexist. So
+this is the fiber path only, for one reason rather than two.
 
 ### Infrastructure
 

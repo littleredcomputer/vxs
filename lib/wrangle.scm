@@ -511,9 +511,12 @@
 (define (wrangle-point-terminal args env)
   (if (< (length args) 3)
       (error 'wgsl "(point) needs a position, a size and a colour"))
-  (let* ((rp (wgsl-compile (car args) env))
-         (rs (wgsl-compile (cadr args) env))
-         (rc (wgsl-compile (caddr args) env)))
+  ;; wgsl-nested, not wgsl-compile: these are sub-expressions of one body,
+  ;; and their locals share a function scope. Resetting the name counter
+  ;; per argument is what let two folds collide on `acc_2`.
+  (let* ((rp (wgsl-nested (car args) env))
+         (rs (wgsl-nested (cadr args) env))
+         (rc (wgsl-nested (caddr args) env)))
     (if (not (eq? (wgsl-type-of rp) :vec3f))
         (error 'wgsl (string-append "(point): position must be a vec3f, got "
                                     (wgsl-type-name (wgsl-type-of rp)))))
@@ -544,7 +547,7 @@
                    (want (cond ((eq? type :u32) :u32)
                                ((eq? type :quat) :vec4f)
                                (else type)))
-                   (r (wgsl-compile (cadr spec) env)))
+                   (r (wgsl-nested (cadr spec) env)))
               (if (not (eq? (wgsl-type-of r) want))
                   (error 'wgsl (string-append "(point): attribute "
                                               (symbol->string name) " wants "

@@ -1185,6 +1185,20 @@
   (set! wgsl-counter 0)
   (wgsl expr env))
 
+;; Compile a SUB-expression of one already being compiled: same rules, no
+;; reset. The distinction matters where several expressions are compiled
+;; into ONE function body, because locals are hoisted to function scope
+;; and the counter is the only thing keeping them apart.
+;;
+;; What went wrong without it: a terminal form compiles each of its
+;; arguments through wgsl-compile, so every attribute expression restarted
+;; the counter, and two `fold-i` forms in one body both emitted `var
+;; acc_2` — one f32 and one vec4<f32>, with the first reader silently
+;; getting the second fold's value. The property the reset exists for
+;; still holds, just per KERNEL rather than per argument: the emitted text
+;; depends only on the expression compiled at the top.
+(define (wgsl-nested expr env) (wgsl expr env))
+
 ;; Just the expression text — errors if the expression needed statements,
 ;; since that text alone would not be valid on its own.
 (define (wgsl-code expr env)

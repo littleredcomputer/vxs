@@ -543,21 +543,59 @@
       ((null? ts) 0.0)
       ;; A single term is already the whole log-joint. Wrapping it in a
       ;; one-argument (+ x) would be a sum with nothing to add.
-      ((null? (cdr ts)) (kernel-term (car ts)))
-      (else (cons '+ (map (lambda (t) (kernel-term t)) ts))))))
+      ((null? (cdr ts)) (kernel-term (car ts) (term-acc (car ts))))
+      (else (cons '+ (map (lambda (t) (kernel-term t (term-acc t))) ts))))))
 
-(define (kernel-term t)
+;;--- naming the accumulator --------------------------------------------
+;; lib/wgsl.scm already gensyms a fold's accumulator FROM THE NAME the
+;; fold-i form gives it — (wgsl-fresh (symbol->string accv)) — and the
+;; digits come from a counter that wgsl-compile resets per sub-expression,
+;; deliberately, so emitted text depends only on the expression and is
+;; comparable by string in the tests.
+;;
+;; That reset is harmless while the bases DIFFER: two hand-written folds
+;; called `acc` and `tot` emit acc_2 and tot_2 and coexist. What broke was
+;; this file handing every staged fold the same base, so two staged folds
+;; in one kernel were guaranteed to land on the same name — one declaring
+;; `var acc_2 : f32` and the other `var acc_2 : vec4<f32>`, with the first
+;; reader silently getting the second fold's value.
+;;
+;; So the accumulator is named for WHAT IT ACCUMULATES. Addresses are
+;; unique — staging refuses a repeat — so this is distinct by construction
+;; rather than by a counter, and the emitted `acc_ys_2` says which term it
+;; belongs to instead of leaving a reader to count folds. A nested
+;; reduction deepens the name rather than reusing it.
+(define (term-address t)
+  (cond
+    ((eq? (car t) 'score)
+     (let ((v (caddr t)))
+       (if (and (pair? v) (memq (car v) '(choice choice-i))) (cadr v) #f)))
+    ((eq? (car t) 'sum-over)  (term-address (cadddr t)))
+    ((eq? (car t) 'scan-over) (term-address (list-ref t 4)))
+    (else #f)))
+
+(define (term-acc t)
+  (let ((a (term-address t)))
+    (if a
+        (string->symbol (string-append "acc-" (keyword->string a)))
+        'acc)))
+
+(define (acc-deeper name)
+  (string->symbol (string-append (symbol->string name) "-i")))
+
+(define (kernel-term t acc)
   (let ((head (car t)))
     (cond
       ((eq? head 'score) (kernel-score (cadr t) (caddr t)))
       ((eq? head 'sum-over)
        ;; The device's bounded fold. Its index is :u32 — an address, not a
        ;; quantity — which is why nothing below ever uses it as a number.
-       (if staged-blocked?
-           (kernel-blocked-sum (cadr t) (caddr t) (kernel-term (cadddr t)))
-           (list 'fold-i (cadr t) 0.0 (list (caddr t) 'acc)
-                 (list '+ 'acc (kernel-term (cadddr t))))))
-      ((eq? head 'scan-over) (kernel-scan t))
+       (let ((body (kernel-term (cadddr t) (acc-deeper acc))))
+         (if staged-blocked?
+             (kernel-blocked-sum (cadr t) (caddr t) body acc)
+             (list 'fold-i (cadr t) 0.0 (list (caddr t) acc)
+                   (list '+ acc body)))))
+      ((eq? head 'scan-over) (kernel-scan t acc))
       (else (error 'stage "unknown term" t)))))
 
 ;;--- blocked summation, for the likelihood fold -------------------------
@@ -618,16 +656,17 @@
 
 ;; The fold is let-bound because its four lanes must be mentioned four
 ;; times, and mentioning the fold itself would emit the loop four times.
-(define (kernel-blocked-sum n idx term)
-  (list 'let
-        (list (list 'bsum
-                    (list 'fold-i n (list 'vec4 0.0 0.0 0.0 0.0) (list idx 'acc)
-                          (list 'vec4 (list 'swizzle 'acc 'y)
-                                      (list 'swizzle 'acc 'z)
-                                      (list 'swizzle 'acc 'w)
-                                      (list '+ (list 'swizzle 'acc 'x) term)))))
-        (list '+ (list 'swizzle 'bsum 'x) (list 'swizzle 'bsum 'y)
-                 (list 'swizzle 'bsum 'z) (list 'swizzle 'bsum 'w))))
+(define (kernel-blocked-sum n idx term acc)
+  (let ((bsum (string->symbol (string-append (symbol->string acc) "-lanes"))))
+    (list 'let
+          (list (list bsum
+                      (list 'fold-i n (list 'vec4 0.0 0.0 0.0 0.0) (list idx acc)
+                            (list 'vec4 (list 'swizzle acc 'y)
+                                        (list 'swizzle acc 'z)
+                                        (list 'swizzle acc 'w)
+                                        (list '+ (list 'swizzle acc 'x) term)))))
+          (list '+ (list 'swizzle bsum 'x) (list 'swizzle bsum 'y)
+                   (list 'swizzle bsum 'z) (list 'swizzle bsum 'w)))))
 
 ;; A scan is the same bounded fold with a WIDER accumulator: the state
 ;; components and the running score, packed into one vector because fold-i
@@ -665,7 +704,7 @@
 (define (kernel-zeros n)
   (let loop ((i 0) (acc '())) (if (= i n) acc (loop (+ i 1) (cons 0.0 acc)))))
 
-(define (kernel-scan t)
+(define (kernel-scan t acc)
   (let* ((n      (cadr t))
          (idx    (caddr t))
          (states (cadddr t))
@@ -673,16 +712,16 @@
          (names  (map car states))
          (width  (+ (length states) 1))
          (bundle (kernel-bundle width))
-         (score  'acc-score))
+         (score  (string->symbol (string-append (symbol->string acc) "-score"))))
     (if (not bundle)
         (error 'stage "a scan carries at most fifteen state components" t))
     ;; The fold's VALUE is the whole packed accumulator, but a term
     ;; contributes only its score — so the last slot comes back out. The
     ;; state was scaffolding for producing it and does not survive.
-    (kernel-slot (kernel-scan-fold n idx states body names bundle score)
+    (kernel-slot (kernel-scan-fold n idx states body names bundle score acc)
                  (- width 1) (caddr bundle))))
 
-(define (kernel-scan-fold n idx states body names bundle score)
+(define (kernel-scan-fold n idx states body names bundle score acc)
   (let* ((cap     (car bundle))
          (ctor    (cadr bundle))
          (matrix? (caddr bundle))
@@ -694,17 +733,21 @@
     (list 'fold-i n
           (cons ctor (filled (append (map (lambda (s) (kernel-value (cadr s))) states)
                                      (list 0.0))))
-          (list idx 'acc)
+          (list idx acc)
           (list 'let
-                (let loop ((ns all) (k 0) (acc '()))
+                ;; `binds`, not `acc`: this is the list of let-bindings being
+                ;; built, and calling it acc would shadow the accumulator's
+                ;; NAME, which is now a parameter rather than a constant.
+                (let loop ((ns all) (k 0) (binds '()))
                   (if (null? ns)
-                      (reverse acc)
+                      (reverse binds)
                       (loop (cdr ns) (+ k 1)
-                            (cons (list (car ns) (kernel-slot 'acc k matrix?)) acc))))
+                            (cons (list (car ns) (kernel-slot acc k matrix?)) binds))))
                 (cons ctor
                       (filled
                        (append (map (lambda (s) (kernel-value (caddr s))) states)
-                               (list (list '+ score (kernel-term body))))))))))
+                               (list (list '+ score
+                                           (kernel-term body (acc-deeper acc)))))))))))
 
 (define (kernel-score dist value)
   (let ((entry (staged-family (car dist))))
