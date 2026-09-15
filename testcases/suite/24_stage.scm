@@ -301,4 +301,39 @@
 (assert-true "at another particle"      (< (f32gap -0.7 3.1 -2.2) 1e-3))
 (assert-true "and far out in the tails" (< (f32gap 9.0 -9.0 9.0) 1e-2))
 
+;;--- the families that reached the device without a WGSL port ----------
+;; What puts a family in staged-families is having a score that is a DUAL.
+;; laplace and cauchy were never in lib/stat.wgsl at all — they were
+;; written here as duals and arrived on the device by that alone, which is
+;; the arrangement working in the direction it was built for.
+
+(define-gen (robust npts)
+  (let ((m (at :m (cauchy 0 2.0))))
+    (at :ys (batch-i npts (j) (laplace m 1.0)))))
+
+(define rst (stage (robust 4)))
+(define rch {:m 0.5 :ys (bytes-view (make-bytes (* 4 8)) :f64)})
+
+(assert-equal "a model of cauchy and laplace stages"
+              '(:m . scalar) (car (:choices rst)))
+(assert-true "and its log-joint agrees with assess bit-for-bit"
+             (= 0.0 (abs (- (car (assess (robust 4) rch))
+                            (staged-logpdf rst rch)))))
+(assert-true "the emitted kernel calls both device scores"
+             (let ((k (staged-kernel rst)))
+               (and (string-contains? (wgsl-body k '((m . :f32)) "") "logpdf_cauchy")
+                    (string-contains? (wgsl-body k '((m . :f32)) "") "logpdf_laplace"))))
+
+;; And the two that did NOT reach it are refused by name rather than
+;; quietly omitted: categorical needs an indexed buffer read, which is the
+;; gather this file refuses, and dirichlet needs lgamma as well.
+(define cwts (bytes-view (make-bytes (* 3 8)) :f64))
+(view-set! cwts 0 1.0) (view-set! cwts 1 1.0) (view-set! cwts 2 1.0)
+(define-gen (discrete ws) (at :z (categorical ws)))
+(assert-true "a model using categorical is refused: no device score"
+             (refused? (lambda () (stage (discrete cwts)))))
+(define-gen (simplex a) (at :p (dirichlet a)))
+(assert-true "and one using dirichlet likewise"
+             (refused? (lambda () (stage (simplex cwts)))))
+
 (suite-summary)

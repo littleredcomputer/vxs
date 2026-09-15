@@ -1034,4 +1034,125 @@
                                  (trial (+ t 1))
                                  #f)))))))
 
+;;--- the four that are not ports ---------------------------------------
+;; Everything above is checked against lib/stat.wgsl, because a port's
+;; claim is that it agrees with what it ported. These four have no WGSL to
+;; agree with, so each is checked against its own density evaluated by
+;; hand at a point where that density is something recognisable.
+
+(define (close? a b) (< (abs (- a b)) 1e-12))
+(define dr (rng-make 0 31 0))
+
+;; At the location, |v-loc| vanishes and the whole density is the
+;; normaliser: -log(2b).
+(assert-true "laplace at its location is -log(2b)"
+             (close? (logpdf-laplace 1.0 1.0 2.0) (- (log 4.0))))
+;; One scale away it loses exactly one nat more.
+(assert-true "and one scale away it loses exactly one"
+             (close? (logpdf-laplace 3.0 1.0 2.0) (- (- (log 4.0)) 1.0)))
+(assert-true "it is symmetric about the location"
+             (close? (logpdf-laplace 3.5 1.0 2.0) (logpdf-laplace (- 1.5) 1.0 2.0)))
+
+;; Same idea: at the location the Cauchy is 1/(pi b).
+(assert-true "cauchy at its location is -log(pi b)"
+             (close? (logpdf-cauchy 0.0 0.0 1.0) (- (log dist-pi))))
+;; At one half-width the density halves, so the score drops by log 2.
+(assert-true "and at one half-width it drops by log 2"
+             (close? (logpdf-cauchy 1.0 0.0 1.0) (- (- (log dist-pi)) (log 2.0))))
+
+;; A summed score must equal the sum of the scalar ones. These hoist the
+;; normaliser out of the loop, which is the one arrangement a scalar
+;; version cannot make, and therefore the one place they could disagree.
+(define lv (bytes-view (make-bytes (* 5 8)) :f64))
+(let loop ((i 0)) (if (< i 5) (begin (view-set! lv i (* 0.7 (- i 2))) (loop (+ i 1)))))
+
+(define (scalar-sum score view n . args)
+  (let loop ((i 0) (acc 0.0))
+    (if (= i n) acc (loop (+ i 1) (+ acc (apply score (view-ref view i) args))))))
+
+(assert-true "the summed laplace score matches the scalar one"
+             (close? (logpdf-sum-laplace lv 0 5 0.3 1.7)
+                     (scalar-sum logpdf-laplace lv 5 0.3 1.7)))
+(assert-true "and the summed cauchy score likewise"
+             (close? (logpdf-sum-cauchy lv 0 5 0.3 1.7)
+                     (scalar-sum logpdf-cauchy lv 5 0.3 1.7)))
+
+;;--- categorical: a view for a parameter --------------------------------
+;; The weights are LINEAR and unnormalised, which is what lets a caller
+;; hand over a buffer it is already using. The score divides by the total.
+(define cw (bytes-view (make-bytes (* 4 8)) :f64))
+(view-set! cw 0 1.0) (view-set! cw 1 3.0) (view-set! cw 2 4.0) (view-set! cw 3 2.0)
+
+(assert-true "categorical normalises its weights itself"
+             (close? (logpdf-categorical 2 cw) (log 0.4)))
+(assert-true "and the scores exponentiate to one"
+             (close? 1.0 (let loop ((i 0) (acc 0.0))
+                           (if (= i 4) acc
+                               (loop (+ i 1) (+ acc (exp (logpdf-categorical i cw))))))))
+;; Off-support is -inf, as it is for every other density here: an index
+;; outside the table is impossible, not merely unlikely.
+(assert-true "an index outside the table is impossible, not unlikely"
+             (and (= (logpdf-categorical 4 cw) (- (/ 1.0 0.0)))
+                  (= (logpdf-categorical -1 cw) (- (/ 1.0 0.0)))))
+;; A zero weight is a category that cannot occur, which is different from
+;; one that occurs rarely, and log 0 says so.
+(assert-true "so is a category with no weight"
+             (let ((z (bytes-view (make-bytes (* 2 8)) :f64)))
+               (view-set! z 0 0.0) (view-set! z 1 1.0)
+               (= (logpdf-categorical 0 z) (- (/ 1.0 0.0)))))
+;; Every draw must be a usable index. The sampler clamps to the last
+;; positive weight rather than walking off the end.
+(assert-true "every draw is an index into the table"
+             (let trial ((t 0))
+               (if (= t 200)
+                   #t
+                   (let ((v (random-categorical dr cw)))
+                     (if (and (>= v 0) (< v 4)) (trial (+ t 1)) #f)))))
+
+;;--- dirichlet: a vector for a value ------------------------------------
+(define da (bytes-view (make-bytes (* 3 8)) :f64))
+(view-set! da 0 2.0) (view-set! da 1 3.0) (view-set! da 2 5.0)
+
+(define dv (random-dirichlet dr da))
+
+(assert-equal "a dirichlet draw has one component per concentration"
+              3 (view-length dv))
+(assert-true "and lands on the simplex"
+             (close? 1.0 (let loop ((i 0) (acc 0.0))
+                           (if (= i 3) acc (loop (+ i 1) (+ acc (view-ref dv i)))))))
+(assert-true "with every component positive"
+             (let loop ((i 0))
+               (cond ((= i 3) #t)
+                     ((> (view-ref dv i) 0.0) (loop (+ i 1)))
+                     (else #f))))
+
+;; Dirichlet(1,1) is uniform on the 1-simplex, so its density is flat at
+;; log(1!) = 0 wherever it is evaluated. A recognisable point to check the
+;; normaliser against.
+(assert-true "dirichlet(1,1) is flat on the simplex"
+             (let ((ones (bytes-view (make-bytes (* 2 8)) :f64))
+                   (p    (bytes-view (make-bytes (* 2 8)) :f64))
+                   (q    (bytes-view (make-bytes (* 2 8)) :f64)))
+               (view-set! ones 0 1.0) (view-set! ones 1 1.0)
+               (view-set! p 0 0.5)  (view-set! p 1 0.5)
+               (view-set! q 0 0.01) (view-set! q 1 0.99)
+               (and (close? 0.0 (logpdf-dirichlet p ones))
+                    (close? 0.0 (logpdf-dirichlet q ones)))))
+
+;; Beta(a,b) IS Dirichlet(a,b) on its first component, and lib/dist.scm
+;; already has an independently written logpdf-beta. So the two must
+;; agree — a check across two densities rather than against a hand
+;; computation.
+(assert-true "dirichlet(a,b) agrees with beta(a,b) on the first component"
+             (let ((ab (bytes-view (make-bytes (* 2 8)) :f64))
+                   (v  (bytes-view (make-bytes (* 2 8)) :f64)))
+               (view-set! ab 0 2.0) (view-set! ab 1 5.0)
+               (view-set! v 0 0.3) (view-set! v 1 0.7)
+               (close? (logpdf-dirichlet v ab) (logpdf-beta 0.3 2.0 5.0))))
+
+(assert-true "a value of the wrong length is refused"
+             (guard (e (#t #t))
+                    (logpdf-dirichlet (bytes-view (make-bytes (* 2 8)) :f64) da)
+                    #f))
+
 (suite-summary)

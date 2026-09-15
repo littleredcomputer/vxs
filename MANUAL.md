@@ -1179,6 +1179,45 @@ per-invocation private state on the device, so the two genuinely have
 different signatures. `logpdf-gamma` and `logpdf-beta` stay here too —
 both need `lgamma`, which WGSL has not got.
 
+### Four that are not ports
+
+`laplace`, `cauchy`, `categorical` and `dirichlet` were written here
+first, so they have no WGSL order to follow and are grouped by
+distribution rather than by capability — each one's sampler, score, fill
+and sum read together. The ported section keeps its own arrangement
+precisely because it has a second file to agree with.
+
+Two of them reach the device and two do not, by the same rule as
+everything else: a score that is a `define-dual` is a score the device
+has. `laplace` and `cauchy` are ordinary arithmetic, so they stage —
+**and they were never in `lib/stat.wgsl` at all**, which is the
+dual arrangement working in the direction it was built for rather than
+catching up with a port. `categorical` needs an indexed buffer read and
+`dirichlet` needs `lgamma`, so both stay on the fiber path and a model
+using them is refused by name.
+
+Two of them stretched the vocabulary rather than extending it:
+
+- **`categorical` takes a view for a parameter** — the first family whose
+  parameter is not a scalar. Nothing in the distribution record had to
+  change, because parameters are closed over and the record never cared
+  what they were. The weights are **linear and unnormalised**; the score
+  divides by the total, so a caller may hand over a buffer it is already
+  using rather than run a normalising pass to satisfy the sampler.
+- **`dirichlet` has a view for a value** — the first family whose draw is
+  a vector. `batch` set that precedent, and `unsupported` already existed
+  for the capabilities such a distribution cannot have. A Dirichlet is
+  *not* n independent draws, so it is not a batch; it only has the same
+  shape at the address.
+
+`random-laplace` is a sign times an Exponential — two uniforms, side then
+magnitude. Not the textbook inverse CDF, which diverges at both ends of
+the unit interval where `rng-unit!` attains one of them; the usual answer
+is to clamp `u` away from the ends, which alters the tails in the exact
+region a heavy-tailed distribution exists to get right. Composing two
+samplers that already handle their own endpoints fabricates nothing
+instead.
+
 ```scheme
 (define r (rng-make ptnum seed stream))   ; mirrors rng_init
 ```
@@ -1568,8 +1607,10 @@ rejuvenation alike.
 
 | | |
 |---|---|
-| distributions that stage | `normal`, `uniform`, `flip`, `exponential` |
+| distributions that stage | `normal`, `uniform`, `flip`, `exponential`, `laplace`, `cauchy` |
 | refused | `gamma`, `beta` — both need `lgamma`, which WGSL has not got |
+| refused | `categorical` — its weights want an indexed buffer read, which is a gather |
+| refused | `dirichlet` — needs `lgamma`, and its value is a vector |
 | state per `scan-i` | at most **fifteen** components |
 
 The ceiling is the device's, not a shortcut: `fold-i` carries one

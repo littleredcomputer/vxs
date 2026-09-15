@@ -56,18 +56,23 @@
 ;; staged object serve assess-comparison, importance and rejuvenation.
 
 ;;--- which distributions may stage --------------------------------------
-;; This list IS the answer to "can this model go on a device", and it is
-;; short for a reason that is not laziness: lib/stat.wgsl has scores for
-;; these three and no others.
+;; This list IS the answer to "can this model go on a device", and what
+;; puts a family on it is having a score that is a DUAL — one body, valid
+;; as Scheme and as kernel code. There is no hand-written logpdf_* left in
+;; lib/stat.wgsl for this list to agree with, so membership is a property
+;; of how the density was written rather than of a second file.
 ;;
 ;; The absences are structural, not pending work. logpdf-gamma and
 ;; logpdf-beta need lgamma, which WGSL does not have and cannot cheaply
-;; get; lib/dist.scm says so at both definitions.
+;; get; logpdf-categorical needs an indexed buffer read, which is the
+;; gather this file refuses; logpdf-dirichlet needs both. lib/dist.scm
+;; says so at each definition.
 ;;
 ;; Exponential used to be listed here as a near miss — the host had a
 ;; score and the device had random_exponential with nothing to weight it
-;; with. Writing the host version once, as a dual, put it on the device,
-;; so it is a full member now.
+;; with. Writing the host version once, as a dual, put it on the device.
+;; Laplace and cauchy arrived the same way and were never in the WGSL at
+;; all, which is the arrangement working in the other direction.
 ;;
 ;; Keeping the map here rather than in a comment is the point: a model
 ;; using beta is refused by name at staging, instead of emitting a call to
@@ -77,7 +82,12 @@
   '((normal      logpdf-normal      2)
     (uniform     logpdf-uniform     2)
     (flip        logpdf-flip        1)
-    (exponential logpdf-exponential 1)))
+    (exponential logpdf-exponential 1)
+    ;; Not ports of lib/stat.wgsl — written as duals here, which IS how a
+    ;; score reaches the device now that there is no hand-written
+    ;; logpdf_* left to keep in step with.
+    (laplace     logpdf-laplace     2)
+    (cauchy      logpdf-cauchy      2)))
 
 (define (staged-family f) (assq f staged-families))
 

@@ -330,3 +330,181 @@
 ;; scalar sampler takes and belongs to the distribution layer. Conflating
 ;; them is what made fill-uniform! silently ignore low and high.
 (define (fill-unit! r view start count) (rng-fill-unit! r view start count))
+
+;;=======================================================================
+;;  Distributions that are NOT ports
+;;=======================================================================
+;; Everything above mirrors lib/stat.wgsl, in its order, because that
+;; correspondence is what makes this file an oracle. These four were
+;; written here first, so there is no WGSL order to follow — and they are
+;; grouped by DISTRIBUTION rather than by capability, so each one's
+;; sampler, score, fill and sum read together. The ported section keeps
+;; its own arrangement precisely because it has a second file to agree
+;; with.
+;;
+;; Two of the four reach the device and two do not, and the split is the
+;; same one as everywhere else here: laplace and cauchy have scores that
+;; are ordinary arithmetic, so they are duals and lib/stage.scm lists
+;; them. categorical needs a buffer read and dirichlet needs lgamma, so
+;; they stay on the fiber path and a model using them is refused by name.
+
+;;--- laplace ------------------------------------------------------------
+;; A sign times an Exponential: two uniforms, side first, then magnitude.
+;;
+;; Not the textbook inverse CDF, which is
+;; loc - b*sgn(u-1/2)*ln(1-2|u-1/2|) and diverges at BOTH ends of the unit
+;; interval. rng-unit! attains one of them, so the usual answer is to clamp
+;; u away from the ends — which alters the tails in the exact region a
+;; heavy-tailed distribution exists to get right. Composing two samplers
+;; that already handle their own endpoints fabricates nothing instead.
+(define (random-laplace r loc scale)
+  (let* ((neg (random-flip r 0.5))
+         (mag (random-exponential r (/ 1.0 scale))))
+    (if neg (- loc mag) (+ loc mag))))
+
+(define-dual (logpdf-laplace (v :f32) (loc :f32) (scale :f32))
+  (- (- (abs (/ (- v loc) scale))) (log (* 2.0 scale))))
+
+(define fill-laplace! (generic-fill random-laplace))
+
+(define (logpdf-sum-laplace view start count loc scale)
+  ;; log(2b) is constant across the buffer, so it is subtracted once
+  ;; rather than count times — the arrangement a scalar score cannot make.
+  (let ((k (log (* 2.0 scale))))
+    (let loop ((i 0) (acc 0.0))
+      (if (= i count)
+          (- acc (* count k))
+          (loop (+ i 1)
+                (- acc (abs (/ (- (view-ref view (+ start i)) loc) scale))))))))
+
+(define (sum-laplace! view start count loc scale)
+  (logpdf-sum-laplace view start count loc scale))
+
+;;--- cauchy -------------------------------------------------------------
+;; One uniform, and the textbook inverse CDF. It does not need laplace's
+;; care because the divergence is not one: tan walks to a very large
+;; number at the ends rather than to an infinity, since pi/2 is not
+;; representable, and a Cauchy's support is the whole line anyway. A huge
+;; sample from the tail of a Cauchy is a correct sample.
+(define (random-cauchy r loc scale)
+  (+ loc (* scale (tan (* dist-pi (- (random-uniform r 0.0 1.0) 0.5))))))
+
+(define-dual (logpdf-cauchy (v :f32) (loc :f32) (scale :f32))
+  (let ((z (/ (- v loc) scale)))
+    (- (- (log (* 3.141592653589793 scale))) (log (+ 1.0 (* z z))))))
+
+(define fill-cauchy! (generic-fill random-cauchy))
+
+(define (logpdf-sum-cauchy view start count loc scale)
+  (let ((k (log (* dist-pi scale))))
+    (let loop ((i 0) (acc 0.0))
+      (if (= i count)
+          (- acc (* count k))
+          (let ((z (/ (- (view-ref view (+ start i)) loc) scale)))
+            (loop (+ i 1) (- acc (log (+ 1.0 (* z z))))))))))
+
+(define (sum-cauchy! view start count loc scale)
+  (logpdf-sum-cauchy view start count loc scale))
+
+;;--- categorical --------------------------------------------------------
+;; The parameter is a VIEW of weights, which makes this the first
+;; distribution here whose parameter is not a scalar. The weights are
+;; LINEAR and need not be normalised — rng-categorical! computes the total
+;; itself, and the score below divides by it — so a caller may pass the
+;; same buffer it is using for something else, and a normalising pass that
+;; exists only to satisfy the sampler never happens.
+;;
+;; The VALUE is an index, carried as an ordinary number because that is
+;; what a view holds. Exact to 2^24 in f32 and 2^53 in f64, which is well
+;; past any plausible category count.
+(define (random-categorical r ws)
+  (rng-categorical! r ws 0 (view-length ws)))
+
+(define (view-sum ws)
+  (let loop ((i 0) (acc 0.0))
+    (if (= i (view-length ws)) acc (loop (+ i 1) (+ acc (view-ref ws i))))))
+
+;; Not a dual: reading a weight needs an indexed buffer read, which is the
+;; gather lib/stage.scm refuses, so there is no device half to write yet.
+(define (logpdf-categorical v ws)
+  (let ((k (view-length ws))
+        (i (inexact->exact (round v))))
+    ;; Off-support is -inf, as everywhere else here: an index outside the
+    ;; table, or one whose weight is zero, is impossible rather than
+    ;; merely unlikely.
+    (if (or (< i 0) (>= i k))
+        (- (/ 1.0 0.0))
+        (let ((w (view-ref ws i)))
+          (if (<= w 0.0)
+              (- (/ 1.0 0.0))
+              (- (log w) (log (view-sum ws))))))))
+
+(define fill-categorical! (generic-fill random-categorical))
+
+(define (logpdf-sum-categorical view start count ws)
+  ;; The total is one scan over the weights, hoisted out of the loop over
+  ;; the buffer — which is the whole reason a summed score exists.
+  (let ((tot (log (view-sum ws)))
+        (k   (view-length ws)))
+    (let loop ((i 0) (acc 0.0))
+      (if (= i count)
+          acc
+          (let ((j (inexact->exact (round (view-ref view (+ start i))))))
+            (if (or (< j 0) (>= j k))
+                (- (/ 1.0 0.0))
+                (let ((w (view-ref ws j)))
+                  (if (<= w 0.0)
+                      (- (/ 1.0 0.0))
+                      (loop (+ i 1) (+ acc (- (log w) tot)))))))))))
+
+(define (sum-categorical! view start count ws)
+  (logpdf-sum-categorical view start count ws))
+
+;;--- dirichlet ----------------------------------------------------------
+;; The first distribution here whose VALUE is a vector rather than a
+;; number. That needs no new machinery: `batch` already sits at an address
+;; with a view for a value, and the record already has `unsupported` for
+;; the capabilities such a distribution does not have. A Dirichlet is not
+;; n independent draws, so it is not a batch — but it has the same shape
+;; at the address, which is what matters to everything downstream.
+;;
+;; f64 rather than the f32 `batch` allocates. A batched choice is a
+;; candidate GPU column and matches the device's width on purpose; a
+;; Dirichlet has no device score at all, so there is no column to agree
+;; with, and the components of a simplex can be small enough that the
+;; logarithm below wants the precision.
+;;
+;; CONSUMES a gamma draw per component, in index order, each of which is a
+;; rejection loop of variable length. So the stream position after a
+;; Dirichlet is not a function of K alone — noted because order of
+;; consumption is part of the contract everywhere else in this file.
+(define (random-dirichlet r alpha)
+  (let* ((k (view-length alpha))
+         (out (bytes-view (make-bytes (* k 8)) :f64)))
+    (let loop ((i 0) (tot 0.0))
+      (if (= i k)
+          (let norm ((j 0))
+            (if (= j k)
+                out
+                (begin (view-set! out j (/ (view-ref out j) tot))
+                       (norm (+ j 1)))))
+          (let ((g (random-gamma r (view-ref alpha i) 1.0)))
+            (view-set! out i g)
+            (loop (+ i 1) (+ tot g)))))))
+
+;; lgamma(sum a) - sum lgamma(a_i) + sum (a_i - 1) log(v_i)
+(define (logpdf-dirichlet v alpha)
+  (let ((k (view-length alpha)))
+    (if (not (= (view-length v) k))
+        (error 'distribution "dirichlet: the value and the concentration differ in length"))
+    (let loop ((i 0) (asum 0.0) (lg 0.0) (acc 0.0))
+      (if (= i k)
+          (+ (- (lgamma asum) lg) acc)
+          (let ((a (view-ref alpha i))
+                (x (view-ref v i)))
+            (if (<= x 0.0)
+                (- (/ 1.0 0.0))
+                (loop (+ i 1)
+                      (+ asum a)
+                      (+ lg (lgamma a))
+                      (+ acc (* (- a 1.0) (log x))))))))))

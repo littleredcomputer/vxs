@@ -89,6 +89,38 @@
 ;; draws fabricated 1.0, so every sample was exactly 0.5.
 (define beta    (distribution 'beta    random-beta    logpdf-beta    fill-beta!    logpdf-sum-beta))
 
+;; The four that are not ports of lib/stat.wgsl. Laplace and cauchy have
+;; ordinary-arithmetic scores, so they are duals and lib/stage.scm stages
+;; them; categorical and dirichlet do not reach the device and a model
+;; using them is refused by name rather than silently left out.
+(define laplace (distribution 'laplace random-laplace logpdf-laplace
+                              fill-laplace! logpdf-sum-laplace))
+(define cauchy  (distribution 'cauchy  random-cauchy  logpdf-cauchy
+                              fill-cauchy! logpdf-sum-cauchy))
+
+;; Its parameter is a VIEW of linear, unnormalised weights, which makes it
+;; the first family here to take a non-scalar parameter. Nothing in the
+;; record had to change for that: parameters are closed over, and the
+;; record never cared what they were.
+(define categorical
+  (distribution 'categorical random-categorical logpdf-categorical
+                fill-categorical! logpdf-sum-categorical))
+
+;; And the first whose VALUE is a vector. `batch` set that precedent — a
+;; distribution may sit at an address with a view for a value — and the
+;; two capabilities a vector-valued draw cannot have are declared missing
+;; here rather than discovered by calling them. A Dirichlet is NOT n
+;; independent draws, so it is not a batch; it only has the same shape at
+;; the address.
+(define dirichlet
+  (let ((form '(dirichlet)))
+    (lambda (alpha)
+      (make-dist (list 'dirichlet (view-length alpha))
+                 (lambda (k) (random-dirichlet k alpha))
+                 (lambda (v) (logpdf-dirichlet v alpha))
+                 (unsupported 'fill form)
+                 (unsupported 'sum  form)))))
+
 ;; (batch d n) — one choice whose value is n draws.
 ;;
 ;; Converts d's (fill, sum) into (sample, score) at a larger shape, and is
