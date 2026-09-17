@@ -36,3 +36,8 @@ src/vx_embedded_libs.h
 # test suite needs nothing extra.
 web/vxs.js
 web/vxs.wasm
+
+# Editor swap files
+.*.swp
+*.swp
+*.swo
