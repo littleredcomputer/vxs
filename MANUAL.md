@@ -1918,18 +1918,60 @@ already had this right and says so; the guard path did not.
 `28_mh` exceeds a two-minute budget rather than failing — twenty thousand
 MH sweeps with a mark-sweep per allocation. And one real bug is open:
 
-#### 🐛 A nested future/touch segfaults under `--gc-stress`
+#### `--gc-poison`, and what it says about the nested-future crash
 
-`testcases/repro/fiber_pump_gc.scm` — four lines, exit 139. lldb puts it
-in `run_dispatch` reading `frame->closure->chunk` through a null, so a
-frame's closure was freed while its fiber was still running. `mark_roots`
-reaches a fiber only through `active_fibers` or the
-`current_fiber → parent_fiber` chain, and OP_TOUCH's rescue path runs
-`step_all_active_fibers` from inside the touching fiber's own step, which
-makes each candidate current in turn. Something in that window is
-reachable from neither route — but the obvious guess is already refuted:
-the outer fiber **is** in `active_fibers` in this case. Wants a watchpoint,
-not more reading.
+```bash
+./src/vx-scheme --gc-stress --gc-poison <script>
+```
+
+Poisoning **quarantines** a freed object instead of releasing it: the
+header stays allocated, its type becomes `ObjType::Poisoned` so any later
+use falls through every switch, and a side log records what it *was* and
+which collection took it. The point is that a dangling pointer keeps
+referring to something the collector owns, so the question stops being
+"what died" — which malloc has already destroyed the evidence for, and
+which is why the same crash printed `#<unknown>` one run and `#<fiber>`
+the next — and becomes **who was holding it**. It leaks by construction;
+a debug mode for a small repro, nothing else.
+
+On `testcases/repro/fiber_pump_gc.scm` it turns a bare SIGSEGV into:
+
+```
+run_dispatch entry: frame 0 of 1 holds a Closure freed by collection 3
+  [current=set active=1 chain=1]
+  | fiber in_active=NO is_current=yes in_current_chain=yes
+    state=1 backing_future=no
+```
+
+Read that as: a fiber in **Running** state (1), holding a single frame
+whose closure was collected, with **no backing future** and **not in
+`active_fibers`** — and at the moment of the free the
+`current_fiber → parent_fiber` chain had length **1** and did not contain
+it.
+
+**Which is a violated invariant, not just a rooting gap.** `mark_roots`
+reaches a fiber only through `active_fibers` or that chain, so a Running
+fiber in neither is unreachable. And `is_dispatching` asserts exactly the
+property that fails here —
+
+> step_fiber links each fiber to the one it interrupted (parent_fiber) and
+> makes itself current, so the chain from current_fiber IS the set of
+> fibers that are presently running.
+
+— which means the same hole is a latent use-after-free in the *scheduler*
+independent of the collector: `step_all_active_fibers` skips
+`is_dispatching(f)` precisely so it never re-enters a live dispatch, and a
+Running fiber missing from the chain would not be skipped.
+
+So the fix belongs in whoever runs a fiber without linking it, not in
+`mark_roots`. Two candidate windows, neither yet confirmed: `call_closure`'s
+throwaway `Fiber scratch`, which holds a frame from `push_closure_frame`
+before `step_fiber` makes it current; and any path that re-enters
+`run_dispatch` on an already-running fiber without going through
+`step_fiber`. Three hypotheses have already been refuted by experiment —
+parent chains of active fibers, the winder pop, and nested scratch
+orphaning — so the next step is a breakpoint on `step_fiber`'s entry
+logging every transition, not more reading.
 
 #### ✅ `map` dropped a subr's result into the cons that stored it — **fixed**
 

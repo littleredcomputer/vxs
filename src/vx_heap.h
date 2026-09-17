@@ -1,5 +1,6 @@
 #pragma once
 
+#include <unordered_map>
 #include "vx_value.h"
 #include <cstdint>
 #include <cstdlib>
@@ -35,7 +36,12 @@ enum class ObjType : uint8_t {
   Bytes,
   View,
   Generator,
-  Record
+  Record,
+  // Not a real object kind. destroy_obj stamps it on a QUARANTINED object
+  // under --gc-poison, so any later use falls through every switch on type
+  // instead of reading a recycled allocation. Last in the enum so no
+  // existing case order changes.
+  Poisoned
 };
 
 // Base object header for all heap-allocated objects
@@ -531,7 +537,7 @@ public:
   Heap()
       : head_obj(nullptr), bytes_allocated(0),
         gc_threshold(512 * 1024), min_gc_threshold(512 * 1024),
-        gc_stress(false), gc_paused_depth(0), vm(nullptr),
+        gc_stress(false), gc_poison(false), gc_paused_depth(0), vm(nullptr),
         total_bytes_allocated(0), total_objects_allocated(0),
         total_objects_freed(0), gc_count(0), last_gc_freed(0) {}
 
@@ -562,6 +568,29 @@ public:
   // O(heap) per allocation, so this is a test mode and nothing else.
   inline void set_gc_stress(bool on) { gc_stress = on; }
   inline bool is_gc_stress() const { return gc_stress; }
+  inline void set_gc_poison(bool on) { gc_poison = on; }
+  inline bool is_gc_poison() const { return gc_poison; }
+
+  // "" when the pointer is not a quarantined object; otherwise what it was
+  // and which collection took it.
+  // Set by the VM before collecting, so a poison record can say what the
+  // root set looked like at the moment of the free.
+  std::function<std::string()> poison_context = [] { return std::string(); };
+
+  std::string poison_of(const Obj *obj) const {
+    auto it = poison_log.find(obj);
+    if (it == poison_log.end()) return "";
+    std::string ctx;
+    auto c = poison_ctx.find(obj);
+    if (c != poison_ctx.end()) ctx = " [" + c->second + "]";
+    static const char *names[] = {
+      "Cons","Vector","String","Symbol","Closure","Subr","Fiber","Future",
+      "Map","Upvalue","Port","Handle","Bytes","View","Generator","Record","Poisoned"};
+    unsigned t = static_cast<unsigned>(it->second.first);
+    return std::string("a ") + (t < 17 ? names[t] : "?") +
+           " freed by collection " + std::to_string(it->second.second) + ctx;
+  }
+
 
   inline void pause_gc() { ++gc_paused_depth; }
   inline void resume_gc() {
@@ -972,15 +1001,41 @@ private:
       // scheduler owns and reaps. Nothing else can free it, so this must.
       case ObjType::Generator: static_cast<ObjGenerator*>(obj)->~ObjGenerator(); break;
       case ObjType::Record:  static_cast<ObjRecord*>(obj)->~ObjRecord(); break;
+      case ObjType::Poisoned: break;   // already quarantined; nothing owns anything
+    }
+    // QUARANTINE instead of freeing, under --gc-poison.
+    //
+    // A use-after-free is hard to diagnose because the evidence is gone:
+    // malloc hands the memory to somebody else and the dangling pointer
+    // reads whatever now lives there, which is why the symptom was
+    // "#<unknown>" one time and "#<fiber>" the next. Keeping the header
+    // allocated means the pointer still refers to something WE control,
+    // so poison_of() below can say what it was and when it died --
+    // turning "what died" into "who was holding it".
+    //
+    // Leaks by construction. A debug mode for a small repro, nothing else.
+    if (gc_poison) {
+      poison_log[obj] = {obj->type, gc_count};
+      // Was the root set even intact when this died? mark_roots reaches a
+      // fiber only via active_fibers or the current_fiber -> parent_fiber
+      // chain, so a null current_fiber during a collection orphans every
+      // fiber that is not active.
+      poison_ctx[obj] = poison_context();
+      obj->type = ObjType::Poisoned;
+      return;
     }
     std::free(obj);
   }
+
 
   Obj *head_obj;
   size_t bytes_allocated;
   size_t gc_threshold;
   size_t min_gc_threshold;
   bool gc_stress;
+  bool gc_poison;
+  std::unordered_map<const Obj *, std::pair<ObjType, size_t>> poison_log;
+  std::unordered_map<const Obj *, std::string> poison_ctx;
   int gc_paused_depth;
   VM *vm;
   std::vector<Obj *> gray_stack;

@@ -445,6 +445,16 @@ void VM::mark_roots(Heap &h) {
 
 void Heap::collect_garbage() {
   if (gc_paused_depth > 0 || !vm) return;
+  if (gc_poison) {
+    poison_context = [this] {
+      std::string s = "current=" +
+          std::string(vm->current_fiber ? "set" : "NULL") +
+          " active=" + std::to_string(vm->active_fibers.size()) + " chain=";
+      size_t n = 0;
+      for (Fiber *f = vm->current_fiber; f; f = f->parent_fiber) ++n;
+      return s + std::to_string(n);
+    };
+  }
 
   // 1. Mark phase
   vm->mark_roots(*this);
@@ -612,6 +622,7 @@ void VM::run_pending_winders(Fiber &f, size_t down_to) {
 // deadline is checked only here, never in a nested call_closure dispatch.
 VM::StepResult VM::run_dispatch(Fiber &f, size_t max_instructions, size_t stop_at_depth,
                                 std::chrono::steady_clock::time_point deadline) {
+  if (report_poisoned_frame(f, "run_dispatch entry")) return StepResult::Error;
   CallFrame *frame = &f.frames.back();
   const uint8_t *ip = frame->ip;
   const BytecodeChunk *chunk = frame->closure->chunk.get();
@@ -1225,6 +1236,10 @@ restart:
               return StepResult::Preempted;
             }
             step_all_active_fibers(max_instructions, std::chrono::milliseconds::max(), &f);
+            // The nested round collects; say so here if it took one of
+            // OUR frames, while the cause is still one line away.
+            if (report_poisoned_frame(f, "after the nested scheduler round"))
+              return StepResult::Error;
             if (fut->is_completed) break;
             // Can anything still make progress? Every other fiber being
             // blocked on an unsettled future means no, and spinning would

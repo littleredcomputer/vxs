@@ -432,6 +432,10 @@ int main(int argc, char **argv) {
   // forcing collections to fire far more (or less) often than they would
   // organically.
   //
+  // --gc-poison: quarantine freed objects instead of releasing them, so a
+  // dangling pointer still refers to something the collector owns and can
+  // report on. Pairs with --gc-stress.
+  //
   // --gc-stress: collect before every allocation, which makes an
   // unrooted-value bug fire at its first opportunity instead of its
   // thousandth. Applied after the prelude has loaded.
@@ -449,6 +453,7 @@ int main(int argc, char **argv) {
   bool force_repl = false;
   unsigned long long gc_threshold = 0;  // 0 = leave the default alone
   bool gc_stress = false;
+  bool gc_poison = false;
   for (int i = 1; i < argc; ++i) {
     std::string flag = argv[i];
     if (flag == "--gc-threshold" && i + 1 < argc) {
@@ -456,6 +461,8 @@ int main(int argc, char **argv) {
       ++i;
     } else if (flag == "--gc-stress") {
       gc_stress = true;
+    } else if (flag == "--gc-poison") {
+      gc_poison = true;
     } else if (flag == "--no-prelude") {
       with_prelude = false;
     } else if (flag == "--repl" || flag == "-i") {
@@ -471,6 +478,7 @@ int main(int argc, char **argv) {
   if (gc_threshold) vm.heap.set_gc_threshold(gc_threshold);
   // After construction, so the prelude is not run under it.
   if (gc_stress) vm.heap.set_gc_stress(true);
+  if (gc_poison) vm.heap.set_gc_poison(true);
 
   if (argc > 1) {
     std::string arg1 = argv[1];

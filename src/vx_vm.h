@@ -562,6 +562,41 @@ struct VM {
     active_fibers.clear();
   }
 
+  // Under --gc-poison, name a frame whose closure the collector took.
+  // Without it the failure is a null dereference in run_dispatch's
+  // prologue reading frame->closure->chunk, which says what broke and
+  // nothing about who was holding it.
+  inline bool report_poisoned_frame(Fiber &f, const char *where) {
+    if (!heap.is_gc_poison()) return false;
+    for (size_t i = 0; i < f.frames.size(); ++i) {
+      Obj *c = reinterpret_cast<Obj *>(f.frames[i].closure);
+      if (!c) continue;
+      std::string p = heap.poison_of(c);
+      if (!p.empty()) {
+        // Read the state BEFORE setting Error, or the report describes
+        // this function rather than the fiber.
+        const int prior_state = static_cast<int>(f.state);
+        f.state = Fiber::State::Error;
+        bool in_active = false;
+        for (Fiber *a : active_fibers) if (a == &f) { in_active = true; break; }
+        bool is_current = (current_fiber == &f);
+        bool in_chain = false;
+        for (Fiber *c = current_fiber; c; c = c->parent_fiber)
+          if (c == &f) { in_chain = true; break; }
+        f.error_message = std::string("[VM Error] ") + where + ": frame " +
+            std::to_string(i) + " of " + std::to_string(f.frames.size()) +
+            " holds " + p +
+            " | fiber in_active=" + (in_active ? "yes" : "NO") +
+            " is_current=" + (is_current ? "yes" : "no") +
+            " in_current_chain=" + (in_chain ? "yes" : "NO") +
+            " state=" + std::to_string(prior_state) +
+            " backing_future=" + (Heap::is_future(f.backing_future) ? "yes" : "no");
+        return true;
+      }
+    }
+    return false;
+  }
+
   void mark_roots(Heap &h);
   inline void collect_garbage() { heap.collect_garbage(); }
 
