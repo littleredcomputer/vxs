@@ -579,8 +579,21 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
 void VM::run_pending_winders(Fiber &f, size_t down_to) {
   Fiber::State saved_state = f.state;
   std::string saved_error = f.error_message;
+  // `w` IS ROOTED, and pop_back is why. mark_fiber reaches a pending
+  // cleanup through f->winders and nowhere else, so the pop removes the
+  // last thing the collector can see — and call_closure allocates, so the
+  // collection it triggers frees the very closure it is about to run. The
+  // callee is then recycled memory, which surfaces as "Attempted to call
+  // non-procedure" naming whatever now occupies it.
+  //
+  // The same mistake as subr_map's `out`: take a value out of a rooted
+  // place into a bare C++ local, then allocate. Reproduce with --gc-stress
+  // and five lines -- a guard whose body raises, around an unwind-protect
+  // whose cleanup touches a captured variable.
+  Value w = Value::nil();
+  push_temp_root(&w);
   while (f.winders.size() > down_to) {
-    Value w = f.winders.back();
+    w = f.winders.back();
     f.winders.pop_back();
     if (!Heap::is_closure(w)) continue;
     // call_closure needs a runnable fiber; the original disposition
@@ -588,6 +601,7 @@ void VM::run_pending_winders(Fiber &f, size_t down_to) {
     f.state = Fiber::State::Running;
     call_closure(w.as_ptr<ObjClosure>(), {});
   }
+  pop_temp_root();   // w
   f.state = saved_state;
   f.error_message = saved_error;
 }
@@ -1284,19 +1298,38 @@ restart:
     // pop (see in_flight_raises' note on LIFO nesting).
     Value raised = in_flight_raises.back();
     in_flight_raises.pop_back();
-    push_temp_root(&raised);
-    // Unwinding skipped every pop_temp_root between the throw and here,
-    // and each skipped one leaves the collector a pointer to a dead
-    // stack local.
+
+    // TRUNCATE BEFORE ROOTING, not after. Unwinding skipped every
+    // pop_temp_root between the throw and here, and each skipped one
+    // leaves the collector a pointer to a dead stack local — so the
+    // truncation has to happen. But it truncates to a depth from BEFORE
+    // this frame existed, so anything rooted first is thrown away with
+    // the stale entries, and the matching pop then takes somebody else's
+    // root. Clear the dead ones, then establish ours.
     truncate_temp_roots(h.temp_roots);
     truncate_temp_obj_roots(h.temp_obj_roots);
+
+    // BOTH of these must survive what follows. mark_fiber reaches a
+    // parked guard's clauses through f->handlers and nothing else, so the
+    // pop_back above left h.handler visible only to this C++ local — and
+    // run_pending_winders calls a cleanup, which allocates. The
+    // collection that follows freed the clause closure, and the push
+    // below then handed OP_CALL recycled memory, reported as "Attempted
+    // to call non-procedure" naming whatever now sits there.
+    //
+    // A cleanup that allocates is all it takes; the five-line case is a
+    // guard whose body raises around an unwind-protect whose cleanup
+    // conses. Deterministic under --gc-stress, invisible without it.
+    push_temp_root(&raised);
+    push_temp_root(&h.handler);
 
     // Unwind FIRST, then run the clauses: R7RS says they evaluate in the
     // dynamic environment of the guard, not of the raise.
     f.frames.resize(h.frame_depth);
     f.stack.resize(h.stack_depth);
     run_pending_winders(f, h.winder_depth);
-    pop_temp_root();
+    pop_temp_root();   // h.handler
+    pop_temp_root();   // raised
 
     // The catch site is a bare OP_CALL 1, so leave it what a call wants:
     // the closure, then its argument.

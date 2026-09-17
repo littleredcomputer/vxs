@@ -531,7 +531,7 @@ public:
   Heap()
       : head_obj(nullptr), bytes_allocated(0),
         gc_threshold(512 * 1024), min_gc_threshold(512 * 1024),
-        gc_paused_depth(0), vm(nullptr),
+        gc_stress(false), gc_paused_depth(0), vm(nullptr),
         total_bytes_allocated(0), total_objects_allocated(0),
         total_objects_freed(0), gc_count(0), last_gc_freed(0) {}
 
@@ -540,6 +540,28 @@ public:
   }
 
   inline void set_vm(VM *v) { vm = v; }
+
+  // GC STRESS: collect before EVERY allocation.
+  //
+  // The threshold knob is not enough to shake out rooting bugs, and the
+  // reason is in collect_garbage: afterwards the threshold becomes
+  // max(min_gc_threshold, bytes_allocated * 2), so once the heap is large
+  // a low floor stops mattering and collections go back to being rare.
+  // That is what made one such bug fire once every 1621 iterations and
+  // move whenever unrelated code changed -- including instrumentation,
+  // which made bisecting it self-defeating.
+  //
+  // Collecting unconditionally makes the whole class DETERMINISTIC: any
+  // value live across an allocation and reachable from nothing the
+  // collector can see dies on its first allocation rather than its
+  // thousandth. Note where the collection lands relative to the
+  // constructor -- allocate() collects BEFORE building the object, so the
+  // arguments a caller passed by value (cons's car and cdr, say) are
+  // exactly the values under test.
+  //
+  // O(heap) per allocation, so this is a test mode and nothing else.
+  inline void set_gc_stress(bool on) { gc_stress = on; }
+  inline bool is_gc_stress() const { return gc_stress; }
 
   inline void pause_gc() { ++gc_paused_depth; }
   inline void resume_gc() {
@@ -896,7 +918,7 @@ public:
   // Direct allocator
   template <typename T, typename... Args>
   inline T *allocate(Args &&...args) {
-    if (bytes_allocated > gc_threshold && vm && gc_paused_depth == 0) {
+    if ((gc_stress || bytes_allocated > gc_threshold) && vm && gc_paused_depth == 0) {
       collect_garbage();
     }
     void *mem = std::malloc(sizeof(T));
@@ -958,6 +980,7 @@ private:
   size_t bytes_allocated;
   size_t gc_threshold;
   size_t min_gc_threshold;
+  bool gc_stress;
   int gc_paused_depth;
   VM *vm;
   std::vector<Obj *> gray_stack;

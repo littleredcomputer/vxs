@@ -432,6 +432,10 @@ int main(int argc, char **argv) {
   // forcing collections to fire far more (or less) often than they would
   // organically.
   //
+  // --gc-stress: collect before every allocation, which makes an
+  // unrooted-value bug fire at its first opportunity instead of its
+  // thousandth. Applied after the prelude has loaded.
+  //
   // --no-prelude: skip lib/prelude.scm and run on the bare kernel. Both
   // are parsed BEFORE the VM is constructed, because the prelude is
   // evaluated during construction — there is no later point at which
@@ -444,11 +448,14 @@ int main(int argc, char **argv) {
   bool with_prelude = true;
   bool force_repl = false;
   unsigned long long gc_threshold = 0;  // 0 = leave the default alone
+  bool gc_stress = false;
   for (int i = 1; i < argc; ++i) {
     std::string flag = argv[i];
     if (flag == "--gc-threshold" && i + 1 < argc) {
       gc_threshold = std::strtoull(argv[i + 1], nullptr, 10);
       ++i;
+    } else if (flag == "--gc-stress") {
+      gc_stress = true;
     } else if (flag == "--no-prelude") {
       with_prelude = false;
     } else if (flag == "--repl" || flag == "-i") {
@@ -462,6 +469,8 @@ int main(int argc, char **argv) {
 
   VM vm(with_prelude);
   if (gc_threshold) vm.heap.set_gc_threshold(gc_threshold);
+  // After construction, so the prelude is not run under it.
+  if (gc_stress) vm.heap.set_gc_stress(true);
 
   if (argc > 1) {
     std::string arg1 = argv[1];

@@ -660,13 +660,28 @@ private:
   void push_closure_frame(Fiber &f, ObjClosure *closure, const std::vector<Value> &args) {
     f.push(Value::from_ptr(closure));
     if (closure->is_variadic) {
-      for (size_t i = 0; i < closure->arity; ++i) f.push(args[i]);
+      // EVERY argument goes on the stack first, including the surplus,
+      // and the rest list is folded from there rather than from `args`.
+      //
+      // `args` is an unrooted std::vector<Value>: mark_roots cannot see
+      // into it, and heap.cons below allocates, so reading an element
+      // across one of those conses can read an object the collection just
+      // freed. `rest_list` was rooted and the ELEMENTS were not, so the
+      // list came back the right length holding unrelated values -- a
+      // variadic procedure's rest arg arriving as somebody else's data.
+      //
+      // The fiber stack is a root (mark_fiber walks it), so parking them
+      // there first is the fix, and it costs no allocation: the surplus
+      // slots are dropped again below and the list takes their place.
+      for (size_t i = 0; i < args.size(); ++i) f.push(args[i]);
+      const size_t top = f.stack.size();      // one past the last argument
       Value rest_list = Value::nil();
       push_temp_root(&rest_list);
       for (size_t i = args.size(); i > closure->arity; --i) {
-        rest_list = heap.cons(args[i - 1], rest_list);
+        rest_list = heap.cons(f.stack[top - args.size() + i - 1], rest_list);
       }
       pop_temp_root();
+      f.stack.resize(top - args.size() + closure->arity);
       f.push(rest_list);
     } else {
       for (Value a : args) f.push(a);
