@@ -1868,6 +1868,69 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
+#### `--gc-stress`, and the bug class it makes visible
+
+```bash
+./src/vx-scheme --gc-stress <script>      # collect before EVERY allocation
+```
+
+`--gc-threshold` was already here and is **not** aggressive enough: after
+each collection the threshold becomes `max(min_gc_threshold,
+bytes_allocated * 2)`, so once the heap is large a low floor stops
+mattering. That is why one rooting bug fired once every 1621 iterations,
+moved whenever unrelated code changed, and moved when *instrumented* —
+`load` compiles a whole file before running it, so appending a marker to a
+suite shifted the heap before execution and the failure went away.
+Bisecting by perturbation is self-defeating on this class.
+
+Collecting unconditionally makes it deterministic. A value live across an
+allocation and invisible to the collector dies at its **first**
+opportunity. Note where the collection lands relative to the constructor:
+`allocate()` collects *before* building the object, so arguments a caller
+passed by value are exactly the values under test. Applied after the
+prelude loads. O(heap) per allocation — a test mode, nothing else.
+
+It turned "layer 06 crashes somewhere, sometimes, depending on what ran
+before it" into "layer 06 crashes in five milliseconds, alone, at this
+line".
+
+**THE SHAPE, four times over.** Take a value out of a rooted place into a
+bare C++ local, then allocate.
+
+| where | the rooted place | what freed it |
+|---|---|---|
+| `subr_map` | — (a subr's bare return) | `heap.cons(out, res)` |
+| `run_pending_winders` | `f->winders` | the cleanup's `call_closure` |
+| the guard-catch path | `f->handlers` | `run_pending_winders` |
+| `push_closure_frame` | — (an unrooted `std::vector`) | `heap.cons` folding the rest list |
+
+The last one is the one to read twice: `rest_list` **was** rooted and the
+*elements* were not, so a variadic procedure's rest argument arrived the
+right length holding somebody else's data. Nothing crashed.
+
+Also fixed in the guard-catch path: `truncate_temp_roots` ran *after*
+`push_temp_root`, truncating to a depth from before the frame existed and
+discarding the root just taken — so the matching pop took someone else's.
+**Truncate the dead entries first, then establish yours.** `call/cc`
+already had this right and says so; the guard path did not.
+
+**Where the suite stands under stress.** 26 of 28 layers clean.
+`28_mh` exceeds a two-minute budget rather than failing — twenty thousand
+MH sweeps with a mark-sweep per allocation. And one real bug is open:
+
+#### 🐛 A nested future/touch segfaults under `--gc-stress`
+
+`testcases/repro/fiber_pump_gc.scm` — four lines, exit 139. lldb puts it
+in `run_dispatch` reading `frame->closure->chunk` through a null, so a
+frame's closure was freed while its fiber was still running. `mark_roots`
+reaches a fiber only through `active_fibers` or the
+`current_fiber → parent_fiber` chain, and OP_TOUCH's rescue path runs
+`step_all_active_fibers` from inside the touching fiber's own step, which
+makes each candidate current in turn. Something in that window is
+reachable from neither route — but the obvious guess is already refuted:
+the outer fiber **is** in `active_fibers` in this case. Wants a watchpoint,
+not more reading.
+
 #### ✅ `map` dropped a subr's result into the cons that stored it — **fixed**
 
 Found from the other end entirely. Pointing `lib/mh.scm` at the pendulum —
