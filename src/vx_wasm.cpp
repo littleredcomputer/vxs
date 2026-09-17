@@ -2140,7 +2140,12 @@ static SeqOutcome eval_forms_sequentially(
     Compiler compiler(*g_vm);
     ObjClosure *closure = compiler.compile_top_level(form);
 
-    Fiber fiber;
+    Fiber fiber(__FILE__, __LINE__);
+    // Pinned: pump_until_settled below drives the scheduler while this
+    // fiber is Suspended, and between step_fiber calls nothing else roots
+    // it -- see VM::pinned_fibers. The same hole crashed the native
+    // embedder on a nested future/touch.
+    VM::FiberPin pin(*g_vm, fiber);
     fiber.push(Value::from_ptr(closure));
     fiber.stack.resize(std::max<size_t>(1, closure->max_locals), Value::unspecified());
     fiber.frames.push_back({closure, closure->chunk->code.data(), 0});

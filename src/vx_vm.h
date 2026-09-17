@@ -324,8 +324,51 @@ struct Fiber {
   // what it asks.
   bool driven_by_generator = false;
 
-  inline Fiber()
-      : state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {}
+  // WHERE THIS FIBER WAS MADE. Three sites construct one and they are
+  // hard to tell apart in a report: a future's child, a generator's, and
+  // call_closure's throwaway scratch all look identical once something has
+  // gone wrong with them. __FILE__/__LINE__ at the call is free and makes
+  // a diagnostic name the culprit instead of describing it.
+  //
+  // A live registry comes with it, because the invariant worth checking
+  // needs the LIST: is_dispatching asserts that the current_fiber ->
+  // parent_fiber chain is exactly the set of fibers presently Running, and
+  // mark_roots reaches a fiber only through that chain or active_fibers.
+  // Neither claim is checkable without knowing which fibers exist.
+  const char *birth_file;
+  int birth_line;
+
+  // Set when a heap object ADOPTS this fiber -- a generator owns its
+  // fiber, and blacken_obj marks it through the generator. Such a fiber is
+  // legitimately absent from active_fibers and from the current chain, so
+  // check_running_fibers_rooted must not report it. Without this the
+  // check drowned its own signal in 39,000 false positives.
+  Obj *owner = nullptr;
+
+  static std::vector<Fiber *> &live() {
+    static std::vector<Fiber *> v;
+    return v;
+  }
+
+  inline Fiber(const char *file = "?", int line = 0)
+      : birth_file(file), birth_line(line),
+        state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {
+    live().push_back(this);
+  }
+
+  inline ~Fiber() {
+    auto &v = live();
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (v[i] == this) { v[i] = v.back(); v.pop_back(); break; }
+    }
+  }
+
+  inline std::string origin() const {
+    const char *b = birth_file ? birth_file : "?";
+    const char *slash = b;
+    for (const char *p = b; *p; ++p) if (*p == '/') slash = p + 1;
+    return std::string(slash) + ":" + std::to_string(birth_line);
+  }
 
   inline void push(Value v) {
     stack.push_back(v);
@@ -392,6 +435,35 @@ struct VM {
 
   // Active concurrent fibers
   std::vector<Fiber *> active_fibers;
+
+  // Fibers an EMBEDDER owns and drives itself. They are not the
+  // scheduler's to step -- so they must not go in active_fibers -- but
+  // they are live across scheduler turns and hold frames, so the
+  // collector has to see them.
+  //
+  // This is the hole that crashed a nested future/touch: main.cpp and
+  // vx_wasm.cpp each build a top-level Fiber on the C++ stack, step it,
+  // and on a suspend drive step_all_active_fibers and resume it. Between
+  // those two calls step_fiber's guard has already restored current_fiber
+  // and cleared parent_fiber, so the fiber was Suspended, not current, and
+  // not active: reachable from nothing. The scheduler allocated, and its
+  // frame-0 closure was collected out from under it.
+  std::vector<Fiber *> pinned_fibers;
+
+  // RAII, because the requirement is "for as long as the embedder holds
+  // it" and that is a scope.
+  struct FiberPin {
+    VM &vm;
+    Fiber *f;
+    FiberPin(VM &v, Fiber &fib) : vm(v), f(&fib) { vm.pinned_fibers.push_back(f); }
+    ~FiberPin() {
+      auto &v = vm.pinned_fibers;
+      for (size_t i = 0; i < v.size(); ++i)
+        if (v[i] == f) { v[i] = v.back(); v.pop_back(); break; }
+    }
+    FiberPin(const FiberPin &) = delete;
+    FiberPin &operator=(const FiberPin &) = delete;
+  };
   Fiber *current_fiber;
 
   // The ObjSubr currently executing — NativeSubrFn's signature (VM&,
@@ -583,7 +655,8 @@ struct VM {
         bool in_chain = false;
         for (Fiber *c = current_fiber; c; c = c->parent_fiber)
           if (c == &f) { in_chain = true; break; }
-        f.error_message = std::string("[VM Error] ") + where + ": frame " +
+        f.error_message = std::string("[VM Error] ") + where + ": fiber born at " +
+            f.origin() + ", frame " +
             std::to_string(i) + " of " + std::to_string(f.frames.size()) +
             " holds " + p +
             " | fiber in_active=" + (in_active ? "yes" : "NO") +
@@ -596,6 +669,15 @@ struct VM {
     }
     return false;
   }
+
+  // Check, at every collection under --gc-poison, the invariant two very
+  // different things depend on: is_dispatching claims the
+  // current_fiber -> parent_fiber chain IS the set of fibers presently
+  // Running, and mark_roots reaches a fiber only through that chain or
+  // active_fibers. A Running fiber in neither is both unreachable to the
+  // collector AND invisible to the guard that stops the scheduler
+  // re-entering a live dispatch, so it is one bug wearing two hats.
+  void check_running_fibers_rooted();
 
   void mark_roots(Heap &h);
   inline void collect_garbage() { heap.collect_garbage(); }
@@ -674,7 +756,7 @@ struct VM {
 
     // No active fiber (e.g. compile-time defmacro expansion) — nothing to
     // piggyback on, so fall back to a throwaway one, same as before.
-    Fiber scratch;
+    Fiber scratch(__FILE__, __LINE__);
     push_closure_frame(scratch, closure, args);
     StepResult res = step_fiber(scratch, 100000000);
     if (res != StepResult::Completed || scratch.state == Fiber::State::Error) {
@@ -715,9 +797,14 @@ private:
       for (size_t i = args.size(); i > closure->arity; --i) {
         rest_list = heap.cons(f.stack[top - args.size() + i - 1], rest_list);
       }
-      pop_temp_root();
+      // The root is dropped AFTER the value is installed, not before.
+      // Dropping it here and pushing afterwards leaves the list reachable
+      // from nothing across the resize -- which is the same mistake this
+      // whole function was fixed for once already, made again three lines
+      // lower down. Install, then release.
       f.stack.resize(top - args.size() + closure->arity);
       f.push(rest_list);
+      pop_temp_root();
     } else {
       for (Value a : args) f.push(a);
     }

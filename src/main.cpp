@@ -28,7 +28,11 @@ static Value eval_string(VM &vm, const std::string &code, bool &ok, std::string 
       Compiler compiler(vm);
       ObjClosure *closure = compiler.compile_top_level(form);
 
-      Fiber fiber;
+      Fiber fiber(__FILE__, __LINE__);
+      // Pinned for as long as this scope holds it: the loop below drives
+      // the scheduler while `fiber` is Suspended, and nothing else roots
+      // it then.
+      VM::FiberPin pin(vm, fiber);
       fiber.push(Value::from_ptr(closure));
       size_t frame_slots = std::max<size_t>(1, closure->max_locals);
       fiber.stack.resize(frame_slots, Value::unspecified());

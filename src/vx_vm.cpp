@@ -269,6 +269,13 @@ std::string VM::format_value(Value v) const {
       }
     }
   }
+  // A quarantined object under --gc-poison: say what it WAS. "#<unknown>"
+  // on its own is what made the same use-after-free look like a different
+  // bug on every run.
+  if (v.is_ptr()) {
+    std::string p = heap.poison_of(v.as_ptr<Obj>());
+    if (!p.empty()) return "#<freed: " + p + ">";
+  }
   return "#<unknown>";
 }
 
@@ -406,6 +413,31 @@ void Heap::blacken_obj(Obj *obj) {
   }
 }
 
+void VM::check_running_fibers_rooted() {
+  for (Fiber *f : Fiber::live()) {
+    // Ready and Suspended hold frames just as Running does, and the
+    // original version of this check looked only at Running -- which is
+    // exactly why it stayed silent on the bug it was written to find.
+    if (f->state == Fiber::State::Completed ||
+        f->state == Fiber::State::Error) continue;
+    if (f->owner) continue;   // reachable through the object that owns it
+    bool rooted = false;
+    for (Fiber *a : active_fibers) if (a == f) { rooted = true; break; }
+    if (!rooted)
+      for (Fiber *p : pinned_fibers) if (p == f) { rooted = true; break; }
+    if (!rooted)
+      for (Fiber *c = current_fiber; c; c = c->parent_fiber)
+        if (c == f) { rooted = true; break; }
+    if (!rooted) {
+      std::fprintf(stderr,
+          "[gc-poison] a live fiber born at %s is in no root set "
+          "(active=%zu, chain from current=%s)\n",
+          f->origin().c_str(), active_fibers.size(),
+          current_fiber ? "set" : "NULL");
+    }
+  }
+}
+
 void VM::mark_roots(Heap &h) {
   h.mark_value(stdin_port);
   h.mark_value(stdout_port);
@@ -421,6 +453,12 @@ void VM::mark_roots(Heap &h) {
     h.mark_value(kv.second);
   }
   for (Fiber *f : active_fibers) {
+    h.mark_fiber(f);
+  }
+  // An embedder's own fiber, live across scheduler turns. See
+  // pinned_fibers: without this a suspended top-level form is reachable
+  // from nothing while the scheduler it is waiting on allocates.
+  for (Fiber *f : pinned_fibers) {
     h.mark_fiber(f);
   }
   for (Fiber *f = current_fiber; f != nullptr; f = f->parent_fiber) {
@@ -446,6 +484,7 @@ void VM::mark_roots(Heap &h) {
 void Heap::collect_garbage() {
   if (gc_paused_depth > 0 || !vm) return;
   if (gc_poison) {
+    vm->check_running_fibers_rooted();
     poison_context = [this] {
       std::string s = "current=" +
           std::string(vm->current_fiber ? "set" : "NULL") +
@@ -1140,7 +1179,7 @@ restart:
         assert(Heap::is_closure(closure_val));
         ObjClosure *closure = closure_val.as_ptr<ObjClosure>();
 
-        Fiber *child = new Fiber();
+        Fiber *child = new Fiber(__FILE__, __LINE__);
         // Dynamic binding: the child starts where the parent stands.
         child->out_port = effective_out_port();
         child->in_port = effective_in_port();
@@ -5502,7 +5541,8 @@ void VM::init_primitives() {
     Value gen_val = vm.heap.make_generator(nullptr);
     ObjGenerator *g = gen_val.as_ptr<ObjGenerator>();
 
-    Fiber *child = new Fiber();
+    Fiber *child = new Fiber(__FILE__, __LINE__);
+    child->owner = reinterpret_cast<Obj *>(g);   // blacken_obj marks it via g
     // Same dynamic binding as `future`: a generator created inside a
     // redirection writes there, and one that redirects itself does not
     // leak that to whoever resumes it.
