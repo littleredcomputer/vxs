@@ -1653,6 +1653,88 @@ never be checked against `assess`, and that check is the point.
 
 ---
 
+## 5d. Rejuvenation: Metropolis-Hastings over a staged log-joint
+
+`lib/mh.scm` moves a particle's latents and keeps or discards the move on
+a log-joint ratio. It is the rejuvenation half of the SMC pipeline and the
+route to it that **asks nothing of the model but its log-joint** —
+[§5e](#5e-conjugate-structure-read-from-the-ir) refuses a model whose
+conditional has no closed form, and this one does not care. Every model
+that stages can be rejuvenated.
+
+```scheme
+(load "lib/mh.scm")
+
+(staged-logjoint-fn! st 'logjoint)          ; => (a b c), the parameters
+(staged-mh-body st 'logjoint 'mhstep 'taken) ; => an expression ending in point
+(mh-sweep st choices step rng)               ; => (choices . accepted?)
+(mh-run   st choices step rng n)             ; => (choices . acceptance-rate)
+```
+
+### The log-joint becomes a function
+
+An accept ratio needs the log-joint at **two** parameter values. Inlining
+the staged expression twice would emit its likelihood fold twice — two
+reductions, and twice the work for an answer differing in three
+arguments. `wgsl-define-fn!` takes the staged expression as a body and the
+scalar choices as parameters, so the fold is emitted once inside
+`fn logjoint(...)` and the sweep calls it twice.
+
+That costs nothing to arrange, because **the staged kernel's free names
+already *are* the scalar choices** — the expression is a function of them
+in everything but name.
+
+### Sweeps are substeps
+
+`gpu-wrangle!`'s substep count runs the kernel N times in one submit and
+hands each run its own value of `step`, which the preamble gives to
+`rng_init` as the stream index. ⚠️ Sweeping any other way replays the
+identical proposals — the hazard [§4](#substeps) warns about, and the one
+that makes a chain look busy while going nowhere.
+
+### The `let` wraps the terminal, and that is not style
+
+The terminal form compiles each of its attribute arguments **separately**,
+so a proposal computed inside them is computed once per attribute. Since a
+draw is stateful, each coordinate would then get a *different* proposal
+and the particle would fly apart while looking entirely plausible. One
+`let` outside the `point`, one proposal, one decision, N writes of it.
+
+### What the error measurement licensed
+
+The device's log-joint carries a small systematic bias against an f64
+evaluation ([§6](#-the-staged-kernel-answered-by-a-real-device)). An
+accept ratio is a **difference** of log-joints at nearby parameters, so a
+bias common to both largely cancels. That is the benign half of the
+measurement, and the half this rests on.
+
+### How an MH kernel is tested at all
+
+A chain cannot be compared against an expected value sample by sample —
+its correctness is a claim about what it converges to. So the subject is a
+model with one latent, whose conditional is therefore its posterior, and
+whose posterior `lib/gibbs.scm` gives in closed form. Twenty thousand
+sweeps against a Normal(0, 2) prior and twelve observations land the mean
+within **4e-5 of a posterior standard deviation** and the spread within
+0.4%, at a 38% acceptance rate.
+
+The step size reaches the kernel as a live wrangle parameter rather than a
+baked constant, so it can be tuned against the acceptance rate without
+recompiling — which is the one diagnostic no inspection of the samples
+reveals. Both failure modes are checked: a step far too large is almost
+never accepted, and one far too small is almost always accepted and goes
+nowhere.
+
+### A joint proposal, for now
+
+Every scalar choice moves at once under one accept decision.
+Componentwise would mix better on a correlated posterior — curve
+coefficients are strongly correlated — and costs one call per address per
+sweep rather than two, which making the log-joint a function already makes
+affordable. Not done because a joint chain is the smaller correct thing.
+
+---
+
 ## 6. Known gaps and open work
 
 What is wrong, what is missing, and what was decided about each. Kept here
