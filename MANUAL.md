@@ -1868,53 +1868,49 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
-#### 🐛 A scan model's state bindings are collected while live
+#### ✅ `map` dropped a subr's result into the cons that stored it — **fixed**
 
-`testcases/repro/scan_gc.scm` reproduces it in about ten iterations, from
-four different seeds. The symptom:
+Found from the other end entirely. Pointing `lib/mh.scm` at the pendulum —
+the first model on that branch whose latents are not polynomial — raised
 
 ```
 [stage "unbound index" th]
 ```
 
-raised by `staged-value`, which means `(assq 'th idx)` returned `#f` for an
-`idx` that the `scan-over` branch had just built and was still using. **A
-live association list became unreachable.**
+from `staged-value`, several layers from the cause. `subr_map` called its
+function and consed the result onto the chain it was building:
 
-It is the collector and not the reader:
-
-- The same staged object, the same choices and the same seed reach
-  different iterations on different runs — 5, 10, 23, 30, 40 and 108 have
-  all been seen.
-- *Which* variants fail changes when unrelated code earlier in the file
-  changes, because that shifts the allocation history. Any control that
-  passes here passes on timing, which is how a first attempt at isolating
-  this produced a confident and wrong answer.
-- `staged-logpdf` called repeatedly on **one** map is stable for thousands
-  of iterations, and so is `assess`. What is not stable is a loop that
-  keeps allocating between calls — `mh-sweep` chained, for instance, which
-  copies a map and scores twice per step.
-
-**Why the suite does not catch it.** Layer 25 stages this very pendulum and
-compares it against `assess` bit-for-bit — four times, at four fixed
-values of `w`. Four calls never allocate enough to collect.
-
-**Where to look.** The `scan-over` branch of `staged-term` builds
-
-```scheme
-(cons (cons name j) (map cons names s))
+```cpp
+out = vm.call_subr(...);        // a bare Value; nothing else refers to it
+res = vm.heap.cons(out, res);   // allocates, so this can collect `out`
 ```
 
-and holds it across `staged-term`, which calls a dual's Scheme half
-through `staged-procedure`. An RK4 body allocates heavily — a
-seven-binding `let*` with four `sin` calls, twice per step, twenty-four
-steps — so a collection is very likely to land inside one, with that alist
-reachable only from the interpreter's frame. The mapped (`sum-over`) path
-does not do this, which is consistent with the curve models never having
-tripped it.
+A **closure's** result survives, because the callee leaves it in a fiber
+stack slot that `mark_fiber` reaches. A **subr's** does not. `cons` is a
+subr, so `(map cons names s)` — which `staged-term`'s `scan-over` branch
+uses to build its state bindings — produced a list of the **right length
+whose elements were not pairs**. Nothing crashed; a caller checking only
+the length saw nothing wrong. `out` is now rooted across the cons on both
+the two-argument and n-ary paths.
 
-Until it is fixed, MH on a scan model is not usable for a long chain,
-which is the one thing standing between here and the particle-filter demo.
+**Two things hid it for a long time.** The input lists must be *freshly
+allocated*: a quoted literal lives in the constant pool and stays
+reachable regardless, which is what every existing test used. And the
+mapped function must be a *subr*: map a closure and the bug is invisible.
+
+**What made it look like a race, and was not.** The failure iteration
+moved between runs and between unrelated edits, so a first pass called it
+allocation-timing noise and gave a confident wrong diagnosis twice —
+once blaming the alist's reachability, once "chained `map-copy` plus
+native RNG calls", with seven controls that were passing on luck. Asking
+*what* was wrong with the result rather than *whether* it was wrong ended
+it in one step: the failures were **exactly 1621 iterations apart**, because
+a fixed allocation per pass lands the collection at the same point in the
+cycle every time. Perfectly periodic, and the period was the clue.
+
+Guarded in layer 05 over ten thousand iterations, many times the old
+threshold. `testcases/repro/scan_gc.scm` is kept as the discovery route
+and now passes.
 
 #### ✅ Two `fold-i`s in one kernel no longer collide — **done**
 

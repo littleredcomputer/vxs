@@ -2359,9 +2359,17 @@ void VM::init_primitives() {
       Value cur = args[1];
       Value res = Value::nil();
       vm.push_temp_root(&res);
+      // `out` IS ROOTED, and the cons below is why. A subr returns a bare
+      // Value: unlike a closure's result, which the callee leaves in a
+      // fiber stack slot that mark_fiber reaches, nothing refers to it but
+      // this local -- and heap.cons allocates, so the collection it may
+      // trigger takes the very value it was called to store. The result
+      // then has the right LENGTH and elements that are not pairs.
+      Value out = Value::nil();
+      vm.push_temp_root(&out);
       while (Heap::is_cons(cur)) {
         Value elem = Heap::car(cur);
-        Value out = Value::nil();
+        out = Value::nil();
         if (Heap::is_subr(fn)) {
           out = vm.call_subr(fn.as_ptr<ObjSubr>(), 1, &elem);
         } else if (Heap::is_closure(fn)) {
@@ -2370,6 +2378,7 @@ void VM::init_primitives() {
         res = vm.heap.cons(out, res);
         cur = Heap::cdr(cur);
       }
+      vm.pop_temp_root();   // out
       // `res` STAYS ROOTED across the reversal. Dropping it here and
       // rooting only `forward` was a use-after-free: the reversal itself
       // allocates, that cons can collect, and the reversed-so-far chain in
@@ -2400,13 +2409,16 @@ void VM::init_primitives() {
         step_args.push_back(Heap::car(lists[i]));
         lists[i] = Heap::cdr(lists[i]);
       }
+      // Rooted for the same reason as the two-argument path above.
       Value out = Value::nil();
+      vm.push_temp_root(&out);
       if (Heap::is_subr(fn)) {
         out = vm.call_subr(fn.as_ptr<ObjSubr>(), static_cast<uint32_t>(step_args.size()), step_args.data());
       } else if (Heap::is_closure(fn)) {
         out = vm.call_closure(fn.as_ptr<ObjClosure>(), step_args);
       }
       res = vm.heap.cons(out, res);
+      vm.pop_temp_root();   // out
     }
   done_map:
     // Same rooting fix as the 2-argument path above: `res` must survive
