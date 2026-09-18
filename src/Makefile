@@ -107,6 +107,20 @@ test-r4rs: vx-scheme
 	@echo "=== RUNNING CLASSIC vx-test.scm HARNESS (R4RS + benchmarks vs. golden files) ==="
 	$(Q)cd ../testcases && ../src/vx-scheme vx-test.scm
 
+# The collector under torture: a collection before EVERY allocation, so a
+# value live across one and invisible to mark_roots dies at its first
+# opportunity instead of its thousandth. Six rooting bugs were found this
+# way; none was reachable at the default threshold.
+#
+# NOT in `test`, and the reason is cost: it is O(heap) per allocation,
+# about seven minutes for the suite against under two seconds normally.
+# Run it before merging anything that touches the VM, the scheduler or a
+# root set. See MANUAL section 6 for the rest of the toolkit
+# (--gc-every, --gc-poison, and guard malloc).
+test-gc-stress: vx-scheme
+	@echo "=== RUNNING THE SUITE UNDER --gc-stress (collect per allocation) ==="
+	$(Q)cd .. && ./src/vx-scheme --gc-stress testcases/run_suite.scm
+
 test-gc:
 	@echo "=== RUNNING MARK-AND-SWEEP GC UNIT & STRESS TESTS ==="
 	$(Q)$(CXX) $(CXXFLAGS) vx_vm.cpp ../testcases/test_vx_gc.cpp -o test_gc && ./test_gc && rm test_gc

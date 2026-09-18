@@ -1918,7 +1918,109 @@ already had this right and says so; the guard path did not.
 `28_mh` exceeds a two-minute budget rather than failing — twenty thousand
 MH sweeps with a mark-sweep per allocation. And one real bug is open:
 
-#### `--gc-poison`, and what it says about the nested-future crash
+#### The collector toolkit
+
+```bash
+--gc-threshold N   # lower the collection floor (weak: the floor stops
+                   # mattering once the heap grows, see collect_garbage)
+--gc-every N       # collect every Nth allocation
+--gc-stress        # collect before EVERY allocation (i.e. --gc-every 1)
+--gc-poison        # quarantine freed objects and report what they were
+```
+
+```bash
+make -C src test-gc-stress     # the whole suite, one collection per allocation
+```
+
+Deliberately **not** part of `make test`: it costs about seven minutes
+against under two seconds. Run it before merging anything that touches the
+VM, the scheduler, or a root set — six rooting bugs were found this way and
+none of them was reachable at the default threshold.
+
+`--gc-every` exists because `--gc-stress` is O(heap) per allocation: fine
+for a five-line repro, about seven minutes for the suite, and far too slow
+to run *underneath* another instrument. At N = 100 the suite takes seconds.
+That said, every bug found so far needed N = 1 or close — N = 5 was already
+clean — so the knob's real use is running a sanitizer over a **reduced**
+repro rather than over the suite.
+
+`--gc-poison` keeps a freed object's header allocated with its type set to
+`Poisoned`, and logs what it was, which collection took it, and the shape
+of the root set at that moment. `format_value` then prints
+`#<freed: a Cons freed by collection 9344>` instead of `#<unknown>`.
+`Heap::warn_if_dead` is the write-side companion: a *read* of a
+quarantined object is caught by its type, a *write* just scribbles on a
+corpse — and with real freeing it scribbles on malloc's freelist, which
+surfaces as an unattributable trap inside `libsystem_malloc`.
+
+⚠️ **Poison MASKS a use-after-free**, because nothing is recycled. If a
+failure disappears under `--gc-poison` but not `--gc-stress`, that is
+itself the diagnosis: something is being used after free, and what broke
+was the reuse.
+
+**Guard malloc is the cheap instrument, not ASan.** ASan on this VM is
+roughly a thousand times slower — unusable even on a tight loop. Reduce
+the repro first, then:
+
+```bash
+DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib ./src/vx-scheme --gc-stress <repro>
+```
+
+which faults on the protected page at the moment of the bad access. That
+is what finally named `generator_fault`, in one run, after three wrong
+guesses.
+
+#### ⚠️ Dead code can make this class of bug disappear
+
+Worth its own entry, because it cost a day and it will happen again.
+
+Two guard branches were added to `~ObjGenerator` and `retire_fiber` on a
+double-free hypothesis. The suite went green under `--gc-stress`, three
+runs in a row — **and neither branch ever executed.** Dead code cannot fix
+a use-after-free; the guards had merely moved allocation timing enough
+that the collection landed elsewhere. Removing them brought the crash
+straight back, at the same line.
+
+The same thing defeats instrumentation *of the Scheme*: `load` compiles a
+whole file before running it, so appending a marker to the end of a suite
+shifts the heap before execution and the failure vanishes. And it defeats
+bisection by subsetting: adding or removing a suite moves the fault.
+
+So the rule, which is now written down rather than learned twice:
+**change nothing while hunting one of these.** Reduce the repro until it
+fails in hundredths of a second, then put an instrument *underneath* it —
+guard malloc, or the poison log — rather than editing the program. Any
+"fix" that was not preceded by an explanation of the mechanism should be
+suspected of being a relocation.
+
+#### ✅ Two more release-before-install bugs — **fixed**
+
+Both the same shape as `subr_map`'s, which makes five instances of one
+mistake, three of them specifically *releasing a root before installing
+the value it protects*.
+
+**The generator's rest list.** `generator`'s primitive builds a variadic
+procedure's surplus arguments into a list, and the comment above it always
+said the list was "rooted across" the generator allocation. The code
+released the root one line *before* `make_generator`. Under `--gc-stress`
+the list was collected every time, and the second `resume` of a variadic
+generator read a freed cons. The root now drops after the list is on the
+child fiber's stack.
+
+**`generator_fault`'s error object**, written as
+
+```cpp
+vm.heap.make_error_object(vm.heap.make_string(msg), {});
+```
+
+The string is a bare C++ temporary, reachable from nothing while the
+vector that is about to hold it is allocated. `format_raised_value` then
+read it through `display_value`. It was the **only** nested
+`make_X(make_Y(...))` in the codebase — and it is exactly the shape a
+rooted-`Handle` parameter would refuse outright, since a temporary cannot
+be a `Handle`. The best single argument for that refactor found so far.
+
+#### The poison log, and the nested-future crash
 
 ```bash
 ./src/vx-scheme --gc-stress --gc-poison <script>

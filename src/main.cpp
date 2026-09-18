@@ -458,6 +458,7 @@ int main(int argc, char **argv) {
   unsigned long long gc_threshold = 0;  // 0 = leave the default alone
   bool gc_stress = false;
   bool gc_poison = false;
+  unsigned long long gc_every = 0;
   for (int i = 1; i < argc; ++i) {
     std::string flag = argv[i];
     if (flag == "--gc-threshold" && i + 1 < argc) {
@@ -465,6 +466,9 @@ int main(int argc, char **argv) {
       ++i;
     } else if (flag == "--gc-stress") {
       gc_stress = true;
+    } else if (flag == "--gc-every" && i + 1 < argc) {
+      gc_every = std::strtoull(argv[i + 1], nullptr, 10);
+      ++i;
     } else if (flag == "--gc-poison") {
       gc_poison = true;
     } else if (flag == "--no-prelude") {
@@ -483,6 +487,7 @@ int main(int argc, char **argv) {
   // After construction, so the prelude is not run under it.
   if (gc_stress) vm.heap.set_gc_stress(true);
   if (gc_poison) vm.heap.set_gc_poison(true);
+  if (gc_every) vm.heap.set_gc_every(static_cast<size_t>(gc_every));
 
   if (argc > 1) {
     std::string arg1 = argv[1];

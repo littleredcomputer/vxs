@@ -920,6 +920,10 @@ public:
   inline void settle_backing_future(Fiber *f) {
     if (!f || !Heap::is_future(f->backing_future)) return;
     ObjFuture *fut = f->backing_future.as_ptr<ObjFuture>();
+    // Everything below WRITES into fut. If the future was collected while
+    // this fiber still pointed at it, those writes land on freed memory.
+    if (heap.warn_if_dead(reinterpret_cast<const Obj *>(fut),
+                          "settle_backing_future")) return;
     if (!fut->is_completed) {
       fut->is_completed = true;
       if (f->state == Fiber::State::Error) {

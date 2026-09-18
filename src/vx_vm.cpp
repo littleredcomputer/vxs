@@ -1634,10 +1634,28 @@ static std::string format_raised_value(const VM &vm, Value v) {
 // Raise from inside a generator primitive, by the same route `error`
 // takes, so the text and the guard-ability match every other error.
 [[noreturn]] static void generator_fault(VM &vm, const std::string &msg) {
-  Value err = vm.heap.make_error_object(vm.heap.make_string(msg),
-                                        std::vector<Value>());
+  // The message is rooted across make_error_object, which ALLOCATES.
+  //
+  // Written as make_error_object(make_string(msg), ...) the string is a
+  // bare C++ temporary -- reachable from nothing while the vector that is
+  // about to hold it is allocated. Under --gc-stress it was collected
+  // there every time, and format_raised_value below then read it through
+  // display_value. Guard malloc caught that as a read of a protected
+  // page, which is what finally named it; without a sanitizer it was a
+  // SIGSEGV or a malloc freelist trap depending on what had reused the
+  // memory, at a line that moved whenever anything else changed.
+  //
+  // It was the only nested make_X(make_Y(...)) in the codebase, and it is
+  // the shape a rooted-Handle parameter type would refuse outright: a
+  // temporary cannot be a Handle.
+  Value m = vm.heap.make_string(msg);
+  vm.push_temp_root(&m);
+  Value err = vm.heap.make_error_object(m, std::vector<Value>());
+  vm.push_temp_root(&err);
   std::string text = format_raised_value(vm, err);
-  vm.in_flight_raises.push_back(err);
+  vm.in_flight_raises.push_back(err);   // rooted by mark_roots from here
+  vm.pop_temp_root();   // err
+  vm.pop_temp_root();   // m
   throw RaiseEscape(text);
 }
 
@@ -5535,7 +5553,12 @@ void VM::init_primitives() {
       for (uint32_t i = nargs; i > fixed; --i) {
         rest_list = vm.heap.cons(args[i], rest_list);
       }
-      vm.pop_temp_root();
+      // The root is released AFTER the list is installed on the child's
+      // stack, below -- not here. The comment above always said "rooted
+      // across it", and releasing one line before make_generator left the
+      // list reachable from nothing across that allocation. Under
+      // --gc-stress it was collected every time, and the second `resume`
+      // of a variadic generator read a freed cons.
     }
 
     Value gen_val = vm.heap.make_generator(nullptr);
@@ -5556,6 +5579,7 @@ void VM::init_primitives() {
     } else {
       for (uint32_t i = 1; i < argc; ++i) child->push(args[i]);
     }
+    if (closure->is_variadic) vm.pop_temp_root();   // rest_list, now installed
     child->stack.resize(std::max<size_t>(child->stack.size(), closure->max_locals),
                         Value::unspecified());
     child->frames.push_back({closure, closure->chunk->code.data(), 0});

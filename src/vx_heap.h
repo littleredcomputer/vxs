@@ -537,7 +537,8 @@ public:
   Heap()
       : head_obj(nullptr), bytes_allocated(0),
         gc_threshold(512 * 1024), min_gc_threshold(512 * 1024),
-        gc_stress(false), gc_poison(false), gc_paused_depth(0), vm(nullptr),
+        gc_stress(false), gc_every(0), alloc_tick(0), gc_poison(false),
+        gc_paused_depth(0), vm(nullptr),
         total_bytes_allocated(0), total_objects_allocated(0),
         total_objects_freed(0), gc_count(0), last_gc_freed(0) {}
 
@@ -568,6 +569,15 @@ public:
   // O(heap) per allocation, so this is a test mode and nothing else.
   inline void set_gc_stress(bool on) { gc_stress = on; }
   inline bool is_gc_stress() const { return gc_stress; }
+
+  // Collect every Nth allocation. --gc-stress is this with N = 1, and the
+  // reason to want N > 1 is cost: stress is O(heap) per allocation, which
+  // is fine for a five-line repro and about seven minutes for the suite --
+  // far too slow to run UNDER another instrument. At N = 100 the suite
+  // takes seconds while still collecting orders of magnitude more often
+  // than the threshold ever will, which is what makes a sanitizer run
+  // possible at all.
+  inline void set_gc_every(size_t n) { gc_every = n; }
   inline void set_gc_poison(bool on) { gc_poison = on; }
   inline bool is_gc_poison() const { return gc_poison; }
 
@@ -576,6 +586,20 @@ public:
   // Set by the VM before collecting, so a poison record can say what the
   // root set looked like at the moment of the free.
   std::function<std::string()> poison_context = [] { return std::string(); };
+
+  // WRITE-AFTER-FREE DETECTOR. A read of a quarantined object is caught by
+  // its Poisoned type; a WRITE is not -- it just scribbles on a corpse,
+  // and with real freeing it scribbles on malloc's freelist instead,
+  // which surfaces as an unattributable trap inside libsystem_malloc.
+  // Call this immediately before writing through a pointer whose owner
+  // might already be gone.
+  bool warn_if_dead(const Obj *obj, const char *where) const {
+    if (!gc_poison || !obj) return false;
+    std::string p = poison_of(obj);
+    if (p.empty()) return false;
+    std::fprintf(stderr, "[gc] WRITE-AFTER-FREE at %s: %s\n", where, p.c_str());
+    return true;
+  }
 
   std::string poison_of(const Obj *obj) const {
     auto it = poison_log.find(obj);
@@ -947,7 +971,9 @@ public:
   // Direct allocator
   template <typename T, typename... Args>
   inline T *allocate(Args &&...args) {
-    if ((gc_stress || bytes_allocated > gc_threshold) && vm && gc_paused_depth == 0) {
+    bool due = gc_stress || bytes_allocated > gc_threshold;
+    if (!due && gc_every) due = (++alloc_tick % gc_every == 0);
+    if (due && vm && gc_paused_depth == 0) {
       collect_garbage();
     }
     void *mem = std::malloc(sizeof(T));
@@ -1033,6 +1059,8 @@ private:
   size_t gc_threshold;
   size_t min_gc_threshold;
   bool gc_stress;
+  size_t gc_every;
+  size_t alloc_tick;
   bool gc_poison;
   std::unordered_map<const Obj *, std::pair<ObjType, size_t>> poison_log;
   std::unordered_map<const Obj *, std::string> poison_ctx;
