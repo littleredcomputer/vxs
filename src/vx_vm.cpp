@@ -267,6 +267,9 @@ std::string VM::format_value(Value v) const {
         if (clipped) out += (shown ? " …" : "…");
         return out + "]>";
       }
+      // Deliberately falls out of the switch: the poison lookup below
+      // says what it WAS, which is more than any case here could.
+      case ObjType::Poisoned: break;
     }
   }
   // A quarantined object under --gc-poison: say what it WAS. "#<unknown>"
@@ -409,6 +412,15 @@ void Heap::blacken_obj(Obj *obj) {
     case ObjType::Handle:
     case ObjType::Bytes:
       // Leaf objects - no child references
+      break;
+    // Reaching a corpse from the MARK phase is itself the diagnosis:
+    // something still live refers to an object an earlier collection
+    // freed. There is nothing left to trace, so name the victim and go
+    // on -- under --gc-poison this line is the report, and without it
+    // the read-after-free is silent.
+    case ObjType::Poisoned:
+      std::fprintf(stderr, "[gc] READ-AFTER-FREE while marking: %s\n",
+                   poison_of(obj).c_str());
       break;
   }
 }

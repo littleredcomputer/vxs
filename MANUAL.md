@@ -1924,6 +1924,36 @@ lets an allocator still `return Rooted(…)` with no move. The destructor
 **truncates to its own depth** rather than popping, so it composes with
 the raise path.
 
+**Transfer into a rooted home is the one move that type-checks.** The
+open question this design left was how to hand a temporarily-rooted
+object to its permanent place. In general that cannot be typed: whether
+a destination is safe is a property of *reachability*, not of the
+destination's type. But there is one destination where it is a property
+of the type — another live `Rooted` — so that case, and only that case,
+is allowed:
+
+```cpp
+Rooted res(heap);
+res = heap.cons(out, res);   // takes the value; res's slot is already a root
+Rooted other(heap);
+res = other;                 // ✗ selects the deleted copy-assign
+```
+
+Move-assignment takes the value and nils the source, which never touches
+the root table: both slots were registered at construction and stay
+registered until their own destructors. It stays non-move-*constructible*
+(declaring a move-assign suppresses the implicit move constructor), so
+`std::vector<Rooted>` is still rightly a compile error. The effect is
+that a `Rooted` can be *emptied into* a root but never *aliased* by one.
+
+⚠️ This was found by a **compiler upgrade**, not by a test. Older clang
+accepted `res = heap.cons(out, res)` by routing it through `operator
+Value()`; the current one applies overload resolution correctly — binding
+a `Rooted` prvalue to `const Rooted &` is an identity conversion and so
+beats a user-defined one, which selects the deleted copy-assign. The
+line should never have compiled. Worth keeping in mind when a
+`=delete`-based design appears to work.
+
 `temp_roots` moved from the VM to the **Heap** to make this possible —
 `VM` is an incomplete type in `vx_heap.h`, so a guard whose constructor
 could not be inlined would have put a function call on every `cons`. The

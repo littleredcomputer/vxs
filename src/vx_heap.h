@@ -357,6 +357,21 @@ public:
   Rooted(const Rooted &) = delete;
   Rooted &operator=(const Rooted &) = delete;
 
+  // TRANSFER into a rooted home. `res = heap.cons(out, res)` takes the
+  // value out of the returned temporary and leaves it in a slot that is
+  // already registered, so there is no instant at which it is unrooted.
+  // This is the only transfer the type permits, and that is the point:
+  // whether a destination is safe is not generally a property of its
+  // type, but "another live Rooted" is the one destination where it is.
+  // An LVALUE Rooted still fails to compile here -- it selects the
+  // deleted copy-assign -- so this cannot be used to alias one root from
+  // another, only to accept a fresh allocation.
+  Rooted &operator=(Rooted &&other) {
+    v_ = other.v_;
+    other.v_ = Value::nil();
+    return *this;
+  }
+
   Rooted &operator=(Value v) { v_ = v; return *this; }
   operator Value() const { return v_; }
   Value get() const { return v_; }
@@ -1063,6 +1078,9 @@ public:
       // it is the sweep that credits it back.
       case ObjType::Generator: return sizeof(ObjGenerator) + ObjGenerator::FIBER_BASELINE_BYTES;
       case ObjType::Record:  return sizeof(ObjRecord) + static_cast<ObjRecord*>(obj)->fields.capacity() * sizeof(Value);
+      // Quarantined by --gc-poison: the payload is gone and only the
+      // header is kept, so the header is all there is left to charge.
+      case ObjType::Poisoned: return sizeof(Obj);
     }
     return sizeof(Obj);
   }

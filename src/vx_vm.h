@@ -351,8 +351,8 @@ struct Fiber {
   }
 
   inline Fiber(const char *file = "?", int line = 0)
-      : birth_file(file), birth_line(line),
-        state(State::Ready), result(Value::unspecified()), parent_fiber(nullptr) {
+      : state(State::Ready), result(Value::unspecified()),
+        parent_fiber(nullptr), birth_file(file), birth_line(line) {
     live().push_back(this);
   }
 
