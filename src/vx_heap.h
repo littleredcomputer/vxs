@@ -298,50 +298,76 @@ struct ObjGenerator : Obj {
 };
 
 //-----------------------------------------------------------------------------
-// Fresh — an allocator's result, rooted for the rest of the expression
+// Rooted — a Value the collector can see
 //-----------------------------------------------------------------------------
 // Six rooting bugs in this collector had one shape: take a value out of a
-// rooted place into a bare C++ local, then allocate. The worst of them was
-// invisible at the call site --
+// rooted place into a bare C++ local, then allocate. Two sat under
+// comments warning about that exact hazard, and one was written three
+// lines below a fix for the same thing in the same function. So the rule
+// became a type.
 //
-//     make_error_object(make_string(msg), {})
+// A Rooted registers a temp root at its OWN address on construction and
+// drops it on destruction, which means its protection lasts exactly as
+// long as the object does. That one sentence covers both uses, and they
+// are not two mechanisms:
 //
-// -- where the string is a temporary, reachable from nothing while the
-// object about to hold it is allocated.
+//   Rooted err(heap, ...);        // a NAMED slot: rooted for the scope
+//   heap.make_error_object(heap.make_string(msg), {})
+//                                 // a TEMPORARY: rooted for the
+//                                 // full-expression, which is why the
+//                                 // inner allocation survives the outer
 //
-// A guard cannot be a PARAMETER type, and that is worth stating because it
-// was the first design tried: C++ evaluates arguments before the callee
-// runs, and nothing can root them during their own evaluation. A guard on
-// the RESULT works, because a temporary lives until the end of the
-// full-expression -- so the inner allocation above stays rooted across the
-// outer one, and `cons(a, cons(b, nil))` is safe with no call site
-// changed. Immediates (nil, integers) stay plain Values; there is nothing
-// to root.
+// Every allocator returns one, so nesting is safe with nothing written at
+// the call site. That was the bug in generator_fault, and it needed four
+// lines of push/pop to avoid before this existed.
 //
-// Non-copyable, hence non-movable: the root holds &v_, so the address must
-// not move. C++17's guaranteed elision for prvalue returns means an
-// allocator can still `return Fresh(...)` with no move. And temporaries
-// are destroyed in reverse order of construction, so nested guards pop
-// LIFO and the temp_roots stack discipline holds.
+// ⚠️ A GUARD CANNOT BE A PARAMETER TYPE, which was the first design tried.
+// C++ evaluates arguments before the callee runs and nothing can root them
+// during their own evaluation, so `f(make_string(a), make_string(b))` is
+// unsafe however `f` declares its parameters. Guarding the RESULT is what
+// works.
+//
+// ⚠️ WHAT IT DOES NOT COVER. Converting to a bare Value discards the
+// guard:
+//
+//   Value v = heap.cons(a, b);   // the temporary dies at the semicolon
+//   heap.cons(x, v);             // v is unrooted across this allocation
+//
+// That is the subr_map bug's shape. Name it `Rooted` instead and the
+// protection lasts the scope.
+//
+// Non-copyable and therefore non-movable: the root holds &v_, so a copy
+// would register two roots and a move would leave one pointing at a
+// moved-from shell. It also makes std::vector<Rooted> a compile error,
+// which matters because reallocating the buffer would invalidate every
+// registered pointer. C++17's guaranteed elision for prvalue returns is
+// what lets an allocator still `return Rooted(...)` with no move.
+//
+// The destructor TRUNCATES to its own depth rather than popping, so it
+// composes with the raise path: an unwind truncates temp_roots to a depth
+// from before this frame existed, and a blind pop afterwards would take
+// somebody else's root.
 class Heap;
 
-class [[nodiscard]] Fresh {
+class Rooted {
 public:
-  Fresh(Heap &h, Value v);
-  ~Fresh();
-  Fresh(const Fresh &) = delete;
-  Fresh &operator=(const Fresh &) = delete;
+  explicit Rooted(Heap &h, Value v = Value::nil());
+  ~Rooted();
 
-  // Implicit on purpose: every existing call site keeps working, and the
-  // temporary outlives the conversion.
+  Rooted(const Rooted &) = delete;
+  Rooted &operator=(const Rooted &) = delete;
+
+  Rooted &operator=(Value v) { v_ = v; return *this; }
   operator Value() const { return v_; }
   Value get() const { return v_; }
+  Value *slot() { return &v_; }
 
 private:
   Heap &h_;
   Value v_;
   size_t depth_;
 };
+
 
 //-----------------------------------------------------------------------------
 // 7c. Record — a nominal type
@@ -614,7 +640,7 @@ public:
   //
   // O(heap) per allocation, so this is a test mode and nothing else.
   //--- ephemeral GC roots -------------------------------------------------
-  // These live on the HEAP rather than the VM, so that Rooted and Fresh
+  // These live on the HEAP rather than the VM, so that Rooted
   // below can push and pop them INLINE. They used to sit on the VM, which
   // is an incomplete type here -- and an allocator returning a guard whose
   // constructor cannot be inlined would put a function call on every cons.
@@ -714,20 +740,20 @@ public:
   size_t sweep();
 
   // Allocation helpers
-  // Returns Fresh, not Value: see Fresh above. The guard is what makes a
-  // nested cons safe, and it measured as free -- 10M conses, 0.76s either
-  // way, because a malloc per cell dominates a vector push by ~20x.
-  inline Fresh cons(Value car, Value cdr);
+  // Returns Rooted, not Value: see Rooted above. The guard is what makes
+  // a nested cons safe, and it measured as free -- 10M conses, 0.76s
+  // either way, because a malloc per cell dominates a vector push by ~20x.
+  [[nodiscard]] inline Rooted cons(Value car, Value cdr);
 
-  inline Fresh make_vector(uint32_t size, Value fill = Value::unspecified()) {
+  [[nodiscard]] inline Rooted make_vector(uint32_t size, Value fill = Value::unspecified()) {
     ObjVector *v = allocate<ObjVector>(size, fill);
-    return Fresh(*this, Value::from_ptr(v));
+    return Rooted(*this, Value::from_ptr(v));
   }
 
-  inline Fresh make_vector_from(const std::vector<Value> &elems) {
+  [[nodiscard]] inline Rooted make_vector_from(const std::vector<Value> &elems) {
     ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(elems.size()));
     for (size_t i = 0; i < elems.size(); ++i) v->set(static_cast<uint32_t>(i), elems[i]);
-    return Fresh(*this, Value::from_ptr(v));
+    return Rooted(*this, Value::from_ptr(v));
   }
 
   // A "multiple values" bundle from (values a b ...) — an ObjVector like
@@ -738,11 +764,11 @@ public:
   // been returned" — so this constructor only ever fires for 0 or 2+
   // values, keeping the common single-value case a plain, unwrapped Value.
   static constexpr uint16_t FLAG_MULTIVALUE = 1;
-  inline Fresh make_multivalue(const std::vector<Value> &elems) {
+  [[nodiscard]] inline Rooted make_multivalue(const std::vector<Value> &elems) {
     ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(elems.size()));
     for (size_t i = 0; i < elems.size(); ++i) v->set(static_cast<uint32_t>(i), elems[i]);
     v->flags = FLAG_MULTIVALUE;
-    return Fresh(*this, Value::from_ptr(v));
+    return Rooted(*this, Value::from_ptr(v));
   }
 
   // An R7RS error-object from (error message irritant...) / raise's own
@@ -753,95 +779,95 @@ public:
   // error-object-message doesn't enforce R7RS's stricter string-only
   // reading), the rest are irritants.
   static constexpr uint16_t FLAG_ERROR_OBJECT = 2;
-  inline Fresh make_error_object(Value message, const std::vector<Value> &irritants) {
+  [[nodiscard]] inline Rooted make_error_object(Value message, const std::vector<Value> &irritants) {
     ObjVector *v = allocate<ObjVector>(static_cast<uint32_t>(irritants.size()) + 1);
     v->set(0, message);
     for (size_t i = 0; i < irritants.size(); ++i) v->set(static_cast<uint32_t>(i) + 1, irritants[i]);
     v->flags = FLAG_ERROR_OBJECT;
-    return Fresh(*this, Value::from_ptr(v));
+    return Rooted(*this, Value::from_ptr(v));
   }
 
-  inline Fresh make_map(std::vector<std::pair<Value, Value>> entries = {}) {
+  [[nodiscard]] inline Rooted make_map(std::vector<std::pair<Value, Value>> entries = {}) {
     ObjMap *m = allocate<ObjMap>(std::move(entries));
-    return Fresh(*this, Value::from_ptr(m));
+    return Rooted(*this, Value::from_ptr(m));
   }
 
-  inline Fresh make_string(std::string_view sv) {
+  [[nodiscard]] inline Rooted make_string(std::string_view sv) {
     ObjString *s = allocate<ObjString>(sv);
-    return Fresh(*this, Value::from_ptr(s));
+    return Rooted(*this, Value::from_ptr(s));
   }
 
   // Wraps std::cin/std::cout — not owned, closing this port is a no-op
   // on the underlying stream (see ObjPort::owns_stream).
-  inline Fresh make_std_port(bool is_input, std::istream *std_in, std::ostream *std_out) {
+  [[nodiscard]] inline Rooted make_std_port(bool is_input, std::istream *std_in, std::ostream *std_out) {
     ObjPort *p = allocate<ObjPort>(is_input);
     p->in = std_in;
     p->out = std_out;
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
-  inline Fresh make_input_file_port(std::unique_ptr<std::ifstream> f) {
+  [[nodiscard]] inline Rooted make_input_file_port(std::unique_ptr<std::ifstream> f) {
     ObjPort *p = allocate<ObjPort>(true);
     p->owns_stream = true;
     p->in = f.get();
     p->ifs = std::move(f);
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
-  inline Fresh make_output_file_port(std::unique_ptr<std::ofstream> f) {
+  [[nodiscard]] inline Rooted make_output_file_port(std::unique_ptr<std::ofstream> f) {
     ObjPort *p = allocate<ObjPort>(false);
     p->owns_stream = true;
     p->out = f.get();
     p->ofs = std::move(f);
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
   // String ports. Unlike file ports these own no OS resource, so closing
   // is a no-op and forgetting to close leaks nothing — get-output-string
   // stays readable afterwards, which is what callers expect.
-  inline Fresh make_output_string_port() {
+  [[nodiscard]] inline Rooted make_output_string_port() {
     ObjPort *p = allocate<ObjPort>(false);
     p->oss = std::make_unique<std::ostringstream>();
     p->out = p->oss.get();
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
   // An output port over a caller-supplied streambuf. The host provides the
   // buffer (the wasm build's line-buffered JS sink); the port owns it from
   // here on, and behaves like any other output port to every caller.
-  inline Fresh make_custom_output_port(std::unique_ptr<std::streambuf> buf) {
+  [[nodiscard]] inline Rooted make_custom_output_port(std::unique_ptr<std::streambuf> buf) {
     ObjPort *p = allocate<ObjPort>(false);
     p->owned_buf = std::move(buf);
     p->owned_out = std::make_unique<std::ostream>(p->owned_buf.get());
     p->out = p->owned_out.get();
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
-  inline Fresh make_input_string_port(const std::string &s) {
+  [[nodiscard]] inline Rooted make_input_string_port(const std::string &s) {
     ObjPort *p = allocate<ObjPort>(true);
     p->iss = std::make_unique<std::istringstream>(s);
     p->in = p->iss.get();
-    return Fresh(*this, Value::from_ptr(p));
+    return Rooted(*this, Value::from_ptr(p));
   }
 
-  inline Fresh make_subr(const char *name, NativeSubrFn fn, uint32_t min_a, uint32_t max_a, uint64_t udata = 0) {
+  [[nodiscard]] inline Rooted make_subr(const char *name, NativeSubrFn fn, uint32_t min_a, uint32_t max_a, uint64_t udata = 0) {
     ObjSubr *subr = allocate<ObjSubr>(name, fn, min_a, max_a, udata);
-    return Fresh(*this, Value::from_ptr(subr));
+    return Rooted(*this, Value::from_ptr(subr));
   }
 
-  inline Fresh make_closure(std::shared_ptr<BytecodeChunk> chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
+  [[nodiscard]] inline Rooted make_closure(std::shared_ptr<BytecodeChunk> chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
     ObjClosure *cl = allocate<ObjClosure>(std::move(chunk), arity, is_variadic, env_size, max_locals);
-    return Fresh(*this, Value::from_ptr(cl));
+    return Rooted(*this, Value::from_ptr(cl));
   }
 
-  inline Fresh make_closure(BytecodeChunk *chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
+  [[nodiscard]] inline Rooted make_closure(BytecodeChunk *chunk, uint32_t arity, bool is_variadic, uint32_t env_size = 0, uint32_t max_locals = 1) {
     ObjClosure *cl = allocate<ObjClosure>(chunk, arity, is_variadic, env_size, max_locals);
-    return Fresh(*this, Value::from_ptr(cl));
+    return Rooted(*this, Value::from_ptr(cl));
   }
 
-  inline Fresh make_future(Fiber *fiber) {
+  [[nodiscard]] inline Rooted make_future(Fiber *fiber) {
     ObjFuture *fut = allocate<ObjFuture>(fiber);
-    return Fresh(*this, Value::from_ptr(fut));
+    return Rooted(*this, Value::from_ptr(fut));
   }
 
   // Deliberately takes nullptr and is filled in afterwards: this call can
@@ -849,18 +875,18 @@ public:
   // at the moment the collector ran. Building the object first, then the
   // fiber (which allocates nothing the collector manages), leaves no
   // window.
-  inline Fresh make_record(Value tag, Value name) {
-    return Fresh(*this, Value::from_ptr(allocate<ObjRecord>(tag, name)));
+  [[nodiscard]] inline Rooted make_record(Value tag, Value name) {
+    return Rooted(*this, Value::from_ptr(allocate<ObjRecord>(tag, name)));
   }
 
-  inline Fresh make_generator(Fiber *fiber) {
+  [[nodiscard]] inline Rooted make_generator(Fiber *fiber) {
     ObjGenerator *g = allocate<ObjGenerator>(fiber);
     // The fiber this will own is invisible to the collector otherwise:
     // it is plain new'd C++ memory, not a heap object. Charge for it, or
     // the threshold counts a 40-byte object and lets 32KB pile up behind
     // it. Same reasoning as make_bytes, same mechanism.
     note_extra_bytes(ObjGenerator::FIBER_BASELINE_BYTES);
-    return Fresh(*this, Value::from_ptr(g));
+    return Rooted(*this, Value::from_ptr(g));
   }
 
   // A sealed buffer of n zeroed bytes — fixed size, ready to be viewed.
@@ -872,28 +898,28 @@ public:
     // registers as 1,248 bytes and the allocation-rate instrument reports
     // a number with no relation to what was allocated.
     note_extra_bytes(b->data.capacity());
-    return Fresh(*this, Value::from_ptr(b));
+    return Rooted(*this, Value::from_ptr(b));
   }
 
   // A growable sink — the emitter's end of things. Seal it to view it.
-  inline Fresh make_byte_sink() {
-    return Fresh(*this, Value::from_ptr(allocate<ObjBytes>(ObjBytes::Residency::Building)));
+  [[nodiscard]] inline Rooted make_byte_sink() {
+    return Rooted(*this, Value::from_ptr(allocate<ObjBytes>(ObjBytes::Residency::Building)));
   }
 
   inline Value make_view(Value bytes, uint32_t offset, uint32_t stride,
                          uint32_t count, ElemType elem) {
-    return Fresh(*this, Value::from_ptr(allocate<ObjView>(bytes, offset, stride, count, elem)));
+    return Rooted(*this, Value::from_ptr(allocate<ObjView>(bytes, offset, stride, count, elem)));
   }
 
   inline Value make_handle(uint32_t id, uint32_t kind_sym) {
-    return Fresh(*this, Value::from_ptr(allocate<ObjHandle>(id, kind_sym)));
+    return Rooted(*this, Value::from_ptr(allocate<ObjHandle>(id, kind_sym)));
   }
 
   // A future no fiber computes: something outside the VM will settle it.
   inline Value make_external_future() {
     ObjFuture *fut = allocate<ObjFuture>(nullptr);
     fut->external = true;
-    return Fresh(*this, Value::from_ptr(fut));
+    return Rooted(*this, Value::from_ptr(fut));
   }
 
   // Fast object accessors
@@ -1150,60 +1176,20 @@ private:
 };
 
 //-----------------------------------------------------------------------------
-// Fresh and Rooted — the definitions, now that Heap is complete
+// Rooted's definitions, now that Heap is complete
 //-----------------------------------------------------------------------------
 
-inline Fresh::Fresh(Heap &h, Value v)
+inline Rooted::Rooted(Heap &h, Value v)
     : h_(h), v_(v), depth_(h.temp_roots.size()) {
   h_.push_temp_root(&v_);
 }
 
-// TRUNCATE rather than pop, so this composes with the raise path. An
-// unwind truncates temp_roots to a depth recorded before this frame
-// existed; a blind pop afterwards would take somebody else's root. If the
-// truncation already happened, this is a no-op.
-inline Fresh::~Fresh() { h_.truncate_temp_roots(depth_); }
+inline Rooted::~Rooted() { h_.truncate_temp_roots(depth_); }
 
-inline Fresh Heap::cons(Value car, Value cdr) {
+[[nodiscard]] inline Rooted Heap::cons(Value car, Value cdr) {
   ObjCons *c = allocate<ObjCons>(car, cdr);
-  return Fresh(*this, Value::from_ptr(c)));
+  return Rooted(*this, Value::from_ptr(c));
 }
-
-// A NAMED, scope-rooted Value slot — for a value that must survive past
-// the end of an expression.
-//
-// This replaces push_temp_root/pop_temp_root pairs, and the reason is not
-// tidiness. Three of the six rooting bugs in this collector were
-// "released the root BEFORE installing the value it protects" -- twice in
-// code whose own comment stated the correct invariant, and once three
-// lines below a fix for the same thing. With Rooted the release IS the
-// closing brace, so it cannot be misplaced.
-//
-// Non-copyable and therefore non-movable, which makes "this address must
-// not move" a property the compiler enforces rather than a comment -- and
-// makes std::vector<Rooted> a compile error, since reallocating the buffer
-// would invalidate every registered pointer.
-class Rooted {
-public:
-  explicit Rooted(Heap &h, Value v = Value::nil())
-      : h_(h), v_(v), depth_(h.temp_roots.size()) {
-    h_.push_temp_root(&v_);
-  }
-  ~Rooted() { h_.truncate_temp_roots(depth_); }
-
-  Rooted(const Rooted &) = delete;
-  Rooted &operator=(const Rooted &) = delete;
-
-  Rooted &operator=(Value v) { v_ = v; return *this; }
-  operator Value() const { return v_; }
-  Value get() const { return v_; }
-  Value *slot() { return &v_; }
-
-private:
-  Heap &h_;
-  Value v_;
-  size_t depth_;
-};
 
 // RAII Scope Guard for pausing GC
 struct GCGuard {

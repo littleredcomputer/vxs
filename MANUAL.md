@@ -1868,7 +1868,7 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
-#### ✅ `Rooted` and `Fresh` — the bug class as a type
+#### ✅ `Rooted` — the bug class as a type
 
 Six rooting bugs, one shape: *take a value out of a rooted place into a
 bare C++ local, then allocate.* Two of them sat under comments warning
@@ -1876,59 +1876,68 @@ about that exact hazard, and one was written three lines below a fix for
 the same thing in the same function. That is the argument for a type
 rather than a rule.
 
-**`Fresh` — an allocator's result, rooted for the rest of the expression.**
-Every `Heap::make_*` and `cons` returns one. It pushes a temp root in its
-constructor and truncates in its destructor, and because a C++ temporary
-lives until the **end of the full-expression**, a nested allocation stays
-rooted across the outer one:
+A `Rooted` registers a temp root **at its own address** on construction
+and drops it on destruction, so its protection lasts exactly as long as
+the object does. That one sentence covers both uses — they are not two
+mechanisms:
 
 ```cpp
-// safe, and written the obvious way
-Rooted err(vm.heap, vm.heap.make_error_object(vm.heap.make_string(msg), {}));
+Rooted err(heap, …);                                  // named: rooted for the scope
+heap.make_error_object(heap.make_string(msg), {})     // temporary: rooted for the
+                                                      // full-expression
 ```
 
-That line was a use-after-free until `Fresh` existed — `make_string`'s
-result was a temporary, reachable from nothing while `make_error_object`
-allocated the vector about to hold it. It now needs no bookkeeping at all,
-where it previously took four `push_temp_root`/`pop_temp_root` lines to
-get right.
+Every allocator returns one, which is why the second line is safe with
+nothing written at the call site: `make_string`'s temporary lives until the
+`;`, so it is still rooted while `make_error_object` allocates. That line
+was a use-after-free, and avoiding it previously took four
+`push_temp_root`/`pop_temp_root` lines.
 
 ⚠️ **A guard cannot be a parameter type**, and that was the first design
 tried. C++ evaluates arguments before the callee runs, and nothing can
-root them *during their own evaluation* — so `list(make_string(a),
-make_string(b))` would still be unsafe however `list` declared its
-parameters. Guarding the **result** is what works. Immediates (`nil`,
-integers) stay plain `Value`s; there is nothing to root.
+root them *during their own evaluation* — so `f(make_string(a),
+make_string(b))` is unsafe however `f` declares its parameters. Guarding
+the **result** is what works. Immediates (`nil`, integers) stay plain
+`Value`s; there is nothing to root.
 
-**`Rooted` — a named, scope-rooted slot**, for a value that must outlive
-its expression. It replaces `push_temp_root`/`pop_temp_root` pairs, and
-the reason is not tidiness: three of the six bugs were *released the root
-before installing the value it protects*. With `Rooted` the release **is
-the closing brace**, so it cannot be misplaced.
+⚠️ **What it does not cover.** Converting to a bare `Value` discards the
+guard:
 
-Both are non-copyable and therefore non-movable, which makes "this address
-must not move" a property the compiler enforces — and makes
-`std::vector<Rooted>` a compile error, since reallocating would invalidate
-every registered pointer. Both destructors **truncate to their own depth**
-rather than popping, so they compose with the raise path: an unwind
-truncates to a depth from before the frame existed, and a blind pop
-afterwards would take somebody else's root.
+```cpp
+Value v = heap.cons(a, b);   // the temporary dies at the semicolon
+heap.cons(x, v);             // v is unrooted across this allocation
+```
+
+That is `subr_map`'s bug shape, and `Rooted` is silent on it — name the
+local `Rooted` instead and the protection lasts the scope. **31 sites**
+currently bind an allocator result to a bare `Value`; each is safe only
+while nothing allocates before the value is installed. Making the
+conversion explicit would catch them at compile time, at the cost of
+touching all 106 `cons` sites — undecided.
+
+Non-copyable and therefore non-movable: the root holds `&v_`, so a copy
+would register two roots and a move would leave one pointing at a
+moved-from shell. It also makes `std::vector<Rooted>` a compile error,
+which matters because reallocating the buffer would invalidate every
+registered pointer. C++17's guaranteed elision for prvalue returns is what
+lets an allocator still `return Rooted(…)` with no move. The destructor
+**truncates to its own depth** rather than popping, so it composes with
+the raise path.
 
 `temp_roots` moved from the VM to the **Heap** to make this possible —
-`VM` is an incomplete type in `vx_heap.h`, so an allocator returning a
-guard whose constructor could not be inlined would have put a function
-call on every `cons`. The VM keeps forwarding methods, so **no call site
-changed**; 106 `cons` sites and 19 allocators converted with zero edits
-outside the header.
+`VM` is an incomplete type in `vx_heap.h`, so a guard whose constructor
+could not be inlined would have put a function call on every `cons`. The
+VM keeps forwarding methods, so **no call site changed**: 106 `cons` sites
+and 19 allocators converted with zero edits outside the two headers.
 
-**Measured free.** Ten million conses, five runs: 0.76s median before,
-0.74s after. A `malloc` per cell dominates a vector push by roughly 20×.
-⚠️ That margin depends on `malloc`-per-cell — move `ObjCons` to a bump
-allocator or a slab and this should be re-measured, not assumed.
+**Measured free.** Ten million conses: 0.76s median before, 0.72–0.74s
+after. A `malloc` per cell dominates a vector push by roughly 20×. ⚠️ That
+margin depends on `malloc`-per-cell — move `ObjCons` to a bump allocator
+or a slab and this wants re-measuring, not assuming.
 
-**What it does not cover**, honestly: an unrooted `std::vector<Value>`
-whose elements are passed *as* arguments, and a `Fiber` (not a `Value` at
-all). Those remain discipline plus `--gc-stress`.
+**Also not covered**, honestly: an unrooted `std::vector<Value>` whose
+elements are passed *as* arguments, and a `Fiber` (not a `Value` at all).
+Those remain discipline plus `--gc-stress`.
 
 #### `--gc-stress`, and the bug class it makes visible
 
