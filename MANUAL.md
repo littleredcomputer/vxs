@@ -2597,6 +2597,41 @@ Worth knowing before starting any device-numeric work: that comparison is
 the first thing in this project that cannot be machine-checked, so it
 wants an eye rather than a test.
 
+⚠️ It does not COMPILE WGSL either, and that is a wider gap than the
+numbers. `createShaderModule` keeps the text and returns whatever
+`compileMessages` says about it; the preset suite passes `() => []`, so
+every shader compiles clean by construction and any module the browser
+would reject passes in node. A leak across presets was found in the
+browser and the harness could not see it in either state — with the bug
+in or the bug fixed, all ten pairs reported clean. **A shader-text
+assertion in Scheme is the check that works**; a green preset run is not
+evidence that a shader compiles. The `compileMessages` hook is the place
+to put a cheap scan if one is ever wanted — it receives the code.
+
+#### ✅ A definition outlived the layout it called
+
+`define-gpu` registers into a table that outlives the program that wrote
+it, and every wrangle module splices all of it. `demos/measure.scm`
+bridges two naming conventions with two shims — `(define-gpu (xs (j
+:u32)) (shared-xs j))` — and a shared accessor lives only as long as the
+layout that declared it. So after viewing `measure`, the next preset to
+call `shared-layout!` retracted `shared_xs` and still emitted `fn xs`
+calling it: `unresolved call target 'shared_xs'`.
+
+`shared-layout!` already retracted the stale *declarations*, and the
+comment above it explains why. This was the same hole from the other
+side — a definition promising nothing rather than a declaration promised
+nothing — so the fix is the symmetric half: retract the definitions whose
+bodies call a retracted accessor. Precise rather than blanket, and that
+matters, because the table also holds library definitions registered at
+load time which no layout switch may touch (layer 18 asserts
+`logpdf-normal` survives). `wgsl-forget-definitions!` was already there,
+never called, and could not have been used: it cannot tell the two kinds
+apart.
+
+One level deep, which is every shim that exists. A `define-gpu` calling
+a shim rather than an accessor would survive and want a fixpoint.
+
 #### Migrate the classic testcases into the ground-up suite
 
 Not urgent. The 13 `vx-test.scm` cases move

@@ -948,6 +948,17 @@
 (define (wgsl-forget-definitions!)
   (set! wgsl-definitions '()))
 
+;; Take ONE definition back. The blanket version above cannot be used for
+;; this: the table holds library definitions registered at load time and
+;; program definitions registered at run time, and only the second kind
+;; ever goes stale — see shared-layout!.
+(define (wgsl-forget-definition! name)
+  (set! wgsl-definitions
+        (let loop ((xs wgsl-definitions) (acc '()))
+          (cond ((null? xs) (reverse acc))
+                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
+                (else (loop (cdr xs) (cons (car xs) acc)))))))
+
 ;; (wgsl-define-fn! name ((arg type) ...) body) — compile, derive the
 ;; result type, emit a WGSL fn, and register the signature.
 (define (wgsl-define-fn! name params body)
@@ -1077,6 +1088,48 @@
 (define (wgsl-body-params b) (car b))
 (define (wgsl-body-expr b) (cdr b))
 
+(define (wgsl-forget-body! name)
+  (set! wgsl-bodies
+        (let loop ((xs wgsl-bodies) (acc '()))
+          (cond ((null? xs) (reverse acc))
+                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
+                (else (loop (cdr xs) (cons (car xs) acc)))))))
+
+;; Does a retained body mention this name anywhere? Crude on purpose: a
+;; call is the case that matters and a shadowing binding of the same name
+;; would only cost a definition that is cheap to re-register.
+(define (wgsl-body-mentions? form name)
+  (cond ((symbol? form) (eq? form name))
+        ((pair? form) (or (wgsl-body-mentions? (car form) name)
+                          (wgsl-body-mentions? (cdr form) name)))
+        (else #f)))
+
+;; Retract every definition that CALLS one of NAMES, and the declaration
+;; that promises it.
+;;
+;; A definition is only valid while everything it calls is. `define-gpu`
+;; registers into a table that OUTLIVES the program that wrote it, so a
+;; body calling something with a shorter lifetime -- a shared accessor is
+;; the only such thing -- has to come back out when that lifetime ends,
+;; or it is emitted into the next program's module calling a function
+;; nothing defines.
+;;
+;; ONE level deep, which is every shim that exists: they all call an
+;; accessor directly. A define-gpu calling a shim rather than an accessor
+;; would survive this and want a fixpoint instead.
+(define (wgsl-forget-dependents! names)
+  (for-each
+   (lambda (entry)
+     (let ((name (car entry)) (body (cdr (cdr entry))))
+       (if (let check ((ns names))
+             (cond ((null? ns) #f)
+                   ((wgsl-body-mentions? body (car ns)) #t)
+                   (else (check (cdr ns)))))
+           (begin (wgsl-forget-definition! name)
+                  (wgsl-forget-body! name)
+                  (wgsl-forget-declaration! name)))))
+   wgsl-bodies))
+
 (defmacro (define-dual spec body)
   `(begin
      (define (,(car spec) ,@(map car (cdr spec))) ,body)
@@ -1121,10 +1174,17 @@
   ;; leaving them declared would promise functions nothing defines, which
   ;; is what layer 18 checks for and what a browser reports as an
   ;; unresolved call target.
-  (for-each (lambda (r)
-              (wgsl-forget-declaration!
-               (string->symbol (string-append "shared-" (symbol->string (car r))))))
-            shared-regions)
+  ;; And retract whatever CALLED them. A define-gpu shim exists precisely
+  ;; to bridge an accessor's name to a kernel's, so it dies with the
+  ;; layout too -- otherwise it survives in the definition table and is
+  ;; emitted into the next program's module, which is the same unresolved
+  ;; call target seen from the other side.
+  (let ((accessors
+         (map (lambda (r)
+                (string->symbol (string-append "shared-" (symbol->string (car r)))))
+              shared-regions)))
+    (for-each wgsl-forget-declaration! accessors)
+    (wgsl-forget-dependents! accessors))
   (let loop ((ss specs) (off 0) (acc '()))
     (if (null? ss)
         (begin

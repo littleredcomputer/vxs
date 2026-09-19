@@ -593,6 +593,30 @@
 (assert-equal "and an undeclared region is an error"
               'raised (guard (e (#t 'raised)) (shared-ref SHV 'nonesuch 0)))
 
+;; A shim bridging an accessor's name to a kernel's dies with the layout.
+;; It used to outlive it: the definition table is global and every wrangle
+;; module splices all of it, so after one demo declared `(xs j)` over
+;; `(shared-xs j)`, the NEXT demo's shader carried `fn xs` calling a
+;; shared_xs its own layout had retracted — the browser's "unresolved call
+;; target". Retracting the declaration alone left the same hole, seen from
+;; the other side.
+(shared-layout! '((xs 8)))
+(define-gpu (xs (j :u32)) (shared-xs j))
+(assert-true "a shim over an accessor is emitted while the layout stands"
+             (string-contains? (wgsl-definitions-source) "fn xs("))
+(shared-layout! '((walls 4)))
+(assert-false "and is retracted with the layout it bridged"
+              (string-contains? (wgsl-definitions-source) "fn xs("))
+(assert-false "so nothing still promises it either"
+              (wgsl-signature 'xs))
+;; The control that matters: the table also holds library definitions
+;; registered at load time, which a layout switch must not touch.
+(assert-true "an unrelated definition survives the same switch"
+             (wgsl-signature 'logpdf-normal))
+(assert-true "and is still in the emitted source"
+             (string-contains? (wgsl-definitions-source) "fn logpdf_normal("))
+(shared-layout! '((walls 48) (obs 41)))
+
 ;;--- gradient noise ------------------------------------------------------
 ;; Perlin needs a pseudo-random gradient at every integer lattice point,
 ;; and the classical route is a permutation table or a hand-rolled integer
