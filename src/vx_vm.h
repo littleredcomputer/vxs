@@ -492,13 +492,10 @@ struct VM {
     return res;
   }
 
-  // Ephemeral GC roots
-  std::vector<Value *> temp_roots;
-  std::vector<Obj **> temp_obj_roots;
-
-  inline void push_temp_root(Value *v) { temp_roots.push_back(v); }
-  inline void pop_temp_root() { if (!temp_roots.empty()) temp_roots.pop_back(); }
-
+  // Ephemeral GC roots -- STORED ON THE HEAP (see Heap::temp_roots), so
+  // that an allocator's guard can push and pop them without a call. These
+  // forwarders exist so that no caller had to change.
+  //
   // Temp roots are RAW POINTERS INTO C++ STACK FRAMES, so anything that
   // unwinds the C++ stack without running the matching pop_temp_root
   // leaves the collector holding addresses of dead locals. C++ exception
@@ -506,18 +503,14 @@ struct VM {
   // every pop between the throw and the catch.
   //
   // So every site that catches an escape and puts the fiber back together
-  // must put these back too. It is the same obligation as restoring the
-  // operand stack and the frame list, and it was the one that got missed —
-  // silently, because a dangling temp root only matters if a collection
-  // happens to land while it is still in the vector.
-  inline void truncate_temp_roots(size_t n) {
-    if (temp_roots.size() > n) temp_roots.resize(n);
-  }
-  inline void truncate_temp_obj_roots(size_t n) {
-    if (temp_obj_roots.size() > n) temp_obj_roots.resize(n);
-  }
-  inline void push_temp_obj_root(Obj **o) { temp_obj_roots.push_back(o); }
-  inline void pop_temp_obj_root() { if (!temp_obj_roots.empty()) temp_obj_roots.pop_back(); }
+  // must put these back too -- and must TRUNCATE BEFORE ROOTING anything
+  // of its own, or the truncation discards the root it just took.
+  inline void push_temp_root(Value *v) { heap.push_temp_root(v); }
+  inline void pop_temp_root() { heap.pop_temp_root(); }
+  inline void truncate_temp_roots(size_t n) { heap.truncate_temp_roots(n); }
+  inline void push_temp_obj_root(Obj **o) { heap.push_temp_obj_root(o); }
+  inline void pop_temp_obj_root() { heap.pop_temp_obj_root(); }
+  inline void truncate_temp_obj_roots(size_t n) { heap.truncate_temp_obj_roots(n); }
 
   // The value(s) currently mid-raise — see RaiseEscape's comment.
   // `raise` pushes before throwing; whichever %guard catch (or the

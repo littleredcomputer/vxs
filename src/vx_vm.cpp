@@ -464,10 +464,10 @@ void VM::mark_roots(Heap &h) {
   for (Fiber *f = current_fiber; f != nullptr; f = f->parent_fiber) {
     h.mark_fiber(f);
   }
-  for (Value *vp : temp_roots) {
+  for (Value *vp : heap.temp_roots) {
     if (vp) h.mark_value(*vp);
   }
-  for (Obj **op : temp_obj_roots) {
+  for (Obj **op : heap.temp_obj_roots) {
     if (op && *op) h.mark_obj(*op);
   }
   for (Value v : in_flight_raises) {
@@ -565,8 +565,8 @@ VM::StepResult VM::step_fiber(Fiber &f, size_t max_instructions,
   f.parent_fiber = current_fiber;
   current_fiber = &f;
   f.state = Fiber::State::Running;
-  const size_t entry_temp_roots = temp_roots.size();
-  const size_t entry_temp_obj_roots = temp_obj_roots.size();
+  const size_t entry_temp_roots = heap.temp_roots.size();
+  const size_t entry_temp_obj_roots = heap.temp_obj_roots.size();
 
   struct FiberGuard {
     VM &vm;
@@ -1147,7 +1147,7 @@ restart:
         // to what the guard form itself found, not one deeper.
         f.handlers.push_back(Handler{h, ip + offset, f.frames.size(),
                                      f.stack.size(), f.winders.size(),
-                                     temp_roots.size(), temp_obj_roots.size()});
+                                     heap.temp_roots.size(), heap.temp_obj_roots.size()});
         break;
       }
 
@@ -1634,28 +1634,25 @@ static std::string format_raised_value(const VM &vm, Value v) {
 // Raise from inside a generator primitive, by the same route `error`
 // takes, so the text and the guard-ability match every other error.
 [[noreturn]] static void generator_fault(VM &vm, const std::string &msg) {
-  // The message is rooted across make_error_object, which ALLOCATES.
+  // THE NAIVE FORM, AND IT IS SAFE NOW -- which is the whole point of
+  // Fresh, so this is left written the obvious way on purpose.
   //
-  // Written as make_error_object(make_string(msg), ...) the string is a
-  // bare C++ temporary -- reachable from nothing while the vector that is
-  // about to hold it is allocated. Under --gc-stress it was collected
-  // there every time, and format_raised_value below then read it through
-  // display_value. Guard malloc caught that as a read of a protected
-  // page, which is what finally named it; without a sanitizer it was a
-  // SIGSEGV or a malloc freelist trap depending on what had reused the
-  // memory, at a line that moved whenever anything else changed.
+  // This was a use-after-free. make_string's result is a bare C++
+  // temporary, reachable from nothing while make_error_object allocates
+  // the vector about to hold it; under --gc-stress it was collected there
+  // every time, and format_raised_value then read it through
+  // display_value. Guard malloc is what finally named it -- without a
+  // sanitizer it was a SIGSEGV or a malloc freelist trap depending on what
+  // had reused the memory, at a line that moved whenever anything else in
+  // the program changed.
   //
-  // It was the only nested make_X(make_Y(...)) in the codebase, and it is
-  // the shape a rooted-Handle parameter type would refuse outright: a
-  // temporary cannot be a Handle.
-  Value m = vm.heap.make_string(msg);
-  vm.push_temp_root(&m);
-  Value err = vm.heap.make_error_object(m, std::vector<Value>());
-  vm.push_temp_root(&err);
+  // Both allocators return Fresh now, so make_string's guard lives to the
+  // end of THIS full-expression, which is past make_error_object's
+  // allocation. Four lines of push/pop bookkeeping became none, and the
+  // safety belongs to the compiler rather than to whoever reads this next.
+  Rooted err(vm.heap, vm.heap.make_error_object(vm.heap.make_string(msg), {}));
   std::string text = format_raised_value(vm, err);
   vm.in_flight_raises.push_back(err);   // rooted by mark_roots from here
-  vm.pop_temp_root();   // err
-  vm.pop_temp_root();   // m
   throw RaiseEscape(text);
 }
 
@@ -2462,16 +2459,14 @@ void VM::init_primitives() {
     // wherever the chain-in-progress currently is.
     if (argc == 2) {
       Value cur = args[1];
-      Value res = Value::nil();
-      vm.push_temp_root(&res);
+      Rooted res(vm.heap);
       // `out` IS ROOTED, and the cons below is why. A subr returns a bare
       // Value: unlike a closure's result, which the callee leaves in a
       // fiber stack slot that mark_fiber reaches, nothing refers to it but
       // this local -- and heap.cons allocates, so the collection it may
       // trigger takes the very value it was called to store. The result
       // then has the right LENGTH and elements that are not pairs.
-      Value out = Value::nil();
-      vm.push_temp_root(&out);
+      Rooted out(vm.heap);
       while (Heap::is_cons(cur)) {
         Value elem = Heap::car(cur);
         out = Value::nil();
@@ -2483,21 +2478,18 @@ void VM::init_primitives() {
         res = vm.heap.cons(out, res);
         cur = Heap::cdr(cur);
       }
-      vm.pop_temp_root();   // out
+
       // `res` STAYS ROOTED across the reversal. Dropping it here and
       // rooting only `forward` was a use-after-free: the reversal itself
       // allocates, that cons can collect, and the reversed-so-far chain in
       // `res` is reachable from nothing else — so the walk read freed
       // memory. Found by ASan on vx-test.scm, which allocates hard enough
       // to land a collection inside this loop.
-      Value forward = Value::nil();
-      vm.push_temp_root(&forward);
+      Rooted forward(vm.heap);
       while (Heap::is_cons(res)) {
         forward = vm.heap.cons(Heap::car(res), forward);
         res = Heap::cdr(res);
       }
-      vm.pop_temp_root();   // forward
-      vm.pop_temp_root();   // res
       return forward;
     }
     // N-ary map: (map proc list1 list2 ...)
@@ -5822,8 +5814,8 @@ void VM::init_primitives() {
     // See truncate_temp_roots: unwinding skips every pop_temp_root between
     // the throw and here, and each skipped one leaves the collector a
     // pointer to a dead stack local.
-    size_t saved_temp_roots = vm.temp_roots.size();
-    size_t saved_temp_obj_roots = vm.temp_obj_roots.size();
+    size_t saved_temp_roots = vm.heap.temp_roots.size();
+    size_t saved_temp_obj_roots = vm.heap.temp_obj_roots.size();
 
     try {
       if (Heap::is_closure(proc)) {
@@ -5885,8 +5877,8 @@ void VM::init_primitives() {
     // See truncate_temp_roots: unwinding skips every pop_temp_root between
     // the throw and here, and each skipped one leaves the collector a
     // pointer to a dead stack local.
-    size_t saved_temp_roots = vm.temp_roots.size();
-    size_t saved_temp_obj_roots = vm.temp_obj_roots.size();
+    size_t saved_temp_roots = vm.heap.temp_roots.size();
+    size_t saved_temp_obj_roots = vm.heap.temp_obj_roots.size();
 
     try {
       if (Heap::is_closure(thunk)) {

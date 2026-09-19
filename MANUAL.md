@@ -1868,6 +1868,68 @@ division family also refuses a zero divisor (`(remainder 5 0)` was `0`);
 `(/ x 0) → inf` is kept as IEEE semantics. See §3 for the behaviour as
 documented.
 
+#### ✅ `Rooted` and `Fresh` — the bug class as a type
+
+Six rooting bugs, one shape: *take a value out of a rooted place into a
+bare C++ local, then allocate.* Two of them sat under comments warning
+about that exact hazard, and one was written three lines below a fix for
+the same thing in the same function. That is the argument for a type
+rather than a rule.
+
+**`Fresh` — an allocator's result, rooted for the rest of the expression.**
+Every `Heap::make_*` and `cons` returns one. It pushes a temp root in its
+constructor and truncates in its destructor, and because a C++ temporary
+lives until the **end of the full-expression**, a nested allocation stays
+rooted across the outer one:
+
+```cpp
+// safe, and written the obvious way
+Rooted err(vm.heap, vm.heap.make_error_object(vm.heap.make_string(msg), {}));
+```
+
+That line was a use-after-free until `Fresh` existed — `make_string`'s
+result was a temporary, reachable from nothing while `make_error_object`
+allocated the vector about to hold it. It now needs no bookkeeping at all,
+where it previously took four `push_temp_root`/`pop_temp_root` lines to
+get right.
+
+⚠️ **A guard cannot be a parameter type**, and that was the first design
+tried. C++ evaluates arguments before the callee runs, and nothing can
+root them *during their own evaluation* — so `list(make_string(a),
+make_string(b))` would still be unsafe however `list` declared its
+parameters. Guarding the **result** is what works. Immediates (`nil`,
+integers) stay plain `Value`s; there is nothing to root.
+
+**`Rooted` — a named, scope-rooted slot**, for a value that must outlive
+its expression. It replaces `push_temp_root`/`pop_temp_root` pairs, and
+the reason is not tidiness: three of the six bugs were *released the root
+before installing the value it protects*. With `Rooted` the release **is
+the closing brace**, so it cannot be misplaced.
+
+Both are non-copyable and therefore non-movable, which makes "this address
+must not move" a property the compiler enforces — and makes
+`std::vector<Rooted>` a compile error, since reallocating would invalidate
+every registered pointer. Both destructors **truncate to their own depth**
+rather than popping, so they compose with the raise path: an unwind
+truncates to a depth from before the frame existed, and a blind pop
+afterwards would take somebody else's root.
+
+`temp_roots` moved from the VM to the **Heap** to make this possible —
+`VM` is an incomplete type in `vx_heap.h`, so an allocator returning a
+guard whose constructor could not be inlined would have put a function
+call on every `cons`. The VM keeps forwarding methods, so **no call site
+changed**; 106 `cons` sites and 19 allocators converted with zero edits
+outside the header.
+
+**Measured free.** Ten million conses, five runs: 0.76s median before,
+0.74s after. A `malloc` per cell dominates a vector push by roughly 20×.
+⚠️ That margin depends on `malloc`-per-cell — move `ObjCons` to a bump
+allocator or a slab and this should be re-measured, not assumed.
+
+**What it does not cover**, honestly: an unrooted `std::vector<Value>`
+whose elements are passed *as* arguments, and a `Fiber` (not a `Value` at
+all). Those remain discipline plus `--gc-stress`.
+
 #### `--gc-stress`, and the bug class it makes visible
 
 ```bash
