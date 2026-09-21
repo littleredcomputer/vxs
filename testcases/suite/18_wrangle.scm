@@ -673,7 +673,7 @@
    (assert-true (string-append "declared " (symbol->string (car sig))
                                " has a definition in the assembled shader")
                 (string-contains? asm (string-append "fn " (cadr sig) "("))))
- wgsl-signatures)
+ (map-values wgsl-signatures))
 
 ;;--- a declared name may not shadow a built-in ---------------------------
 ;; The rebuilt environment puts declarations first, so a parameter called

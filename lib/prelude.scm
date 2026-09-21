@@ -211,6 +211,34 @@
                   clauses)
            (else (error "case-lambda: no clause accepts this many arguments" ,n)))))))
 
+;;--- define-once ---------------------------------------------------------
+;; Common Lisp's defvar, under a name that says what it does: bind only
+;; if unbound, so re-running the file preserves the value.
+;;
+;; The problem it names: `load` is textual inclusion with re-execution,
+;; and the load graph is a diamond — a shared file runs once per PATH
+;; through it. A top-level binding therefore has two possible lifetimes,
+;; "this run of the file" and "the accumulated session", and a bare
+;; define expresses only the first. For ordinary definitions the re-run
+;; is harmlessly idempotent; for an ACCUMULATOR it is destructive: the
+;; second visit's (define table {}) discards what other files registered
+;; after the first. lib/wgsl.scm's registries are the resident examples.
+;;
+;; WHEN TO REACH FOR IT: when the value's contents come from OUTSIDE the
+;; defining file — a registry other files write into. If the file itself
+;; computes everything in the value, use define, because a re-load should
+;; refresh it. The function spelling is refused to keep that guidance
+;; structural: a function is file-owned by definition, so there is
+;; nothing a once-only function could protect.
+;;
+;; The cost, inherited from defvar: editing the INITIALIZER of a
+;; define-once does not take on a re-load. Restart the session to see it.
+(defmacro (define-once name init)
+  (if (not (symbol? name))
+      (error "define-once: takes a plain name — a function is file-owned, and a re-load should refresh it"
+             name))
+  `(if (not (defined? ',name)) (begin (define ,name ,init))))
+
 ;;--- file and string port wrappers --------------------------------------
 ;; These are Scheme rather than C++ subrs because unwind-protect provides
 ;; exactly the restore-on-every-exit guarantee they need, so the C++-RAII

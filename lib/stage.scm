@@ -56,40 +56,37 @@
 ;; staged object serve assess-comparison, importance and rejuvenation.
 
 ;;--- which distributions may stage --------------------------------------
-;; This list IS the answer to "can this model go on a device", and what
-;; puts a family on it is having a score that is a DUAL — one body, valid
-;; as Scheme and as kernel code. There is no hand-written logpdf_* left in
-;; lib/stat.wgsl for this list to agree with, so membership is a property
-;; of how the density was written rather than of a second file.
+;; DERIVED, not listed. A family may stage exactly when its score is a
+;; DUAL — one body, valid as Scheme and as kernel code — and the score of
+;; family F is logpdf-F, the naming regularity lib/dist.scm already
+;; declares load-bearing. So the question is asked of the dual registry
+;; at the moment it matters, and becoming a dual IS joining: when
+;; exponential's score was rewritten as a dual, the hand-kept list this
+;; replaces did not notice, which is the failure mode of keeping one
+;; fact in two files.
 ;;
-;; The absences are structural, not pending work. logpdf-gamma and
-;; logpdf-beta need lgamma, which WGSL does not have and cannot cheaply
-;; get; logpdf-categorical needs an indexed buffer read, which is the
-;; gather this file refuses; logpdf-dirichlet needs both. lib/dist.scm
-;; says so at each definition.
+;; The entry is (family logpdf-name parameter-count), the shape the old
+;; list held, with the count read off the dual's own parameter list —
+;; the score takes the value first, so the family's parameters are the
+;; rest, and an arity that cannot drift from the definition it checks.
 ;;
-;; Exponential used to be listed here as a near miss — the host had a
-;; score and the device had random_exponential with nothing to weight it
-;; with. Writing the host version once, as a dual, put it on the device.
-;; Laplace and cauchy arrived the same way and were never in the WGSL at
-;; all, which is the arrangement working in the other direction.
-;;
-;; Keeping the map here rather than in a comment is the point: a model
-;; using beta is refused by name at staging, instead of emitting a call to
-;; a function the device does not define.
-(define staged-families
-  ;; (family logpdf-name parameter-count)
-  '((normal      logpdf-normal      2)
-    (uniform     logpdf-uniform     2)
-    (flip        logpdf-flip        1)
-    (exponential logpdf-exponential 1)
-    ;; Not ports of lib/stat.wgsl — written as duals here, which IS how a
-    ;; score reaches the device now that there is no hand-written
-    ;; logpdf_* left to keep in step with.
-    (laplace     logpdf-laplace     2)
-    (cauchy      logpdf-cauchy      2)))
-
-(define (staged-family f) (assq f staged-families))
+;; The absences now FALL OUT rather than being maintained: logpdf-gamma
+;; and logpdf-beta need lgamma, which WGSL has not got; logpdf-categorical
+;; needs an indexed buffer read, the gather this file refuses;
+;; logpdf-dirichlet needs both. None of them can be duals, lib/dist.scm
+;; says so at each definition, and a model naming one is refused with
+;; the family in hand — same refusal, no list to fall behind.
+(define (staged-family f)
+  (let* ((score (string->symbol
+                 (string-append "logpdf-" (symbol->string f))))
+         (b     (wgsl-fn-body score)))
+    ;; Both halves, which is define-dual exactly: a body the kernel
+    ;; compiler can emit AND a procedure the host can evaluate.
+    ;; define-gpu alone has no host half; a bare Scheme logpdf has no
+    ;; kernel one; neither may stage.
+    (and b
+         (wgsl-dual score)
+         (list f score (- (length (wgsl-body-params b)) 1)))))
 
 ;;--- staging context ----------------------------------------------------
 ;; Accumulators, held in a map because they are genuinely mutable and a
@@ -197,18 +194,26 @@
                (cadr r))
         r)))
 
+;; `let` stages its inits against the OUTER environment and `let*`
+;; against the accumulating one — parallel and sequential, exactly as the
+;; model's own Scheme runs them. They used to be one sequential form
+;; here, on the theory that a pure body cannot tell the difference; it
+;; can, in exactly one case: a binding whose init mentions a name bound
+;; earlier in the same list that ALSO exists outside it. Real `let` reads
+;; the outer one and the sequential reading took the inner — both run,
+;; the log-joints disagree, and the two backends then agree with each
+;; other and not with assess, which is the one failure shape a two-path
+;; design cannot see on its own.
 (define (stage-let e env ctx)
-  (let loop ((bs (cadr e)) (env env))
-    (if (null? bs)
-        ;; let* and let are the same form here because a staged body has
-        ;; no side effects: nothing can observe the difference between
-        ;; binding in sequence and binding in parallel except a name that
-        ;; shadows, and that reads the same either way.
-        (stage-body (cddr e) env ctx)
-        (let ((name (car (car bs)))
-              (init (cadr (car bs))))
-          (loop (cdr bs)
-                (env-bind env name :expr (stage-expr init env ctx)))))))
+  (let ((sequential? (eq? (car e) 'let*)))
+    (let loop ((bs (cadr e)) (bound env))
+      (if (null? bs)
+          (stage-body (cddr e) bound ctx)
+          (let ((name (car (car bs)))
+                (init (cadr (car bs))))
+            (loop (cdr bs)
+                  (env-bind bound name :expr
+                            (stage-expr init (if sequential? bound env) ctx))))))))
 
 ;; A multi-form body is a sequence whose value is the last form. The
 ;; earlier ones are staged too — they may contain `at`, which is the only
@@ -471,11 +476,12 @@
                        (sf32 (+ acc (staged-term body st choices env)))))))))
       (else (error 'stage "unknown term" t)))))
 
-;; Dispatched through staged-families rather than a parallel `cond` over
-;; the same names. The table already says which logpdf each family scores
-;; with, and define-dual already registered that logpdf's Scheme half, so
-;; a second listing here would only be a copy that could fall behind — as
-;; it did, the day exponential joined the table and this did not notice.
+;; Dispatched through staged-family rather than a parallel `cond` over
+;; the same names. The derivation already says which logpdf each family
+;; scores with, and define-dual already registered that logpdf's Scheme
+;; half, so a listing here would only be a copy that could fall behind —
+;; as the old hand-kept table did, the day exponential became a dual and
+;; it did not notice.
 (define (staged-score dist value st choices idx)
   (let ((entry (staged-family (car dist)))
         (ps    (map (lambda (a) (staged-value a st choices idx)) (cdr dist)))
@@ -529,7 +535,7 @@
                               " so the host cannot evaluate it. Use define-dual"
                               " if the model is to be staged")
                name))
-    (cdr b)))
+    b))
 
 (define (staged-operator op)
   (cond ((eq? op '+) +) ((eq? op '-) -)

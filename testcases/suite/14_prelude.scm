@@ -192,12 +192,12 @@
 ;; library). Verified by hand:
 ;;
 ;;   (define-record-type <g> (make-g f . rest) g? (f g-f))
-;;   [Macro Error in define-record-type] constructor takes a proper list
-;;   of field names, not a rest argument
+;;   [Macro Error in define-record-type] [Scheme Error] define-record-type:
+;;   constructor takes a proper list of field names, not a rest argument
 ;;
 ;;   (define-record-type <h> (make-h a b) h? (a h-a))
-;;   [Macro Error in define-record-type] constructor names a field that
-;;   was not declared: b
+;;   [Macro Error in define-record-type] [Scheme Error] define-record-type:
+;;   constructor names a field that was not declared b
 ;;
 ;; Both used to be accepted and then quietly do the wrong thing — a rest
 ;; argument produced a constructor whose extra arguments went nowhere, and
@@ -231,5 +231,26 @@
 ;; names <point>; the brackets are stripped so this does not read #<<point>.
 (assert-equal "a record prints legibly"
               "#<point 3 99>" (with-output-to-string (lambda () (display pt))))
+
+;;--- define-once ---------------------------------------------------------
+;; The defvar move: bind only if unbound, so a re-loaded file cannot wipe
+;; what other files contributed to the value since.
+(define-once do-probe (list 1))
+(assert-equal "define-once binds when the name is unbound" '(1) do-probe)
+(set! do-probe (cons 2 do-probe))
+(define-once do-probe (list 1))
+(assert-equal "and re-evaluation preserves the accumulated value"
+              '(2 1) do-probe)
+
+;; (define-once (f x) 1) is refused at expansion — "takes a plain name" —
+;; because a function is file-owned and a re-load should refresh it. Not
+;; asserted here for the same reason as the record-constructor refusals
+;; above: provoking a compile-time error from inside a test needs `eval`,
+;; which vxs does not have. Verified by hand:
+;;
+;;   (define-once (f x) 1)
+;;   [Macro Error in define-once] [Scheme Error] define-once: takes a
+;;   plain name — a function is file-owned, and a re-load should
+;;   refresh it (f x)
 
 (suite-summary)

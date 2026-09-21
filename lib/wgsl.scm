@@ -247,8 +247,7 @@
 
 ;; Which stage is being compiled, or #f for "not saying". A harness sets
 ;; it around its own compile; nothing else should need to.
-(if (not (defined? 'wgsl-stage))
-    (begin (define wgsl-stage #f)))
+(define-once wgsl-stage #f)
 
 ;; Refuse a stage-restricted operation when the stage does not match —
 ;; INCLUDING when nothing said what the stage is. "Not saying" must not
@@ -312,8 +311,10 @@
 ;; valid in BOTH languages, and Scheme spells this one `expt` — `pow` is
 ;; not a Scheme procedure, so a dual written with it would type-check for
 ;; the device and then fail as an unbound variable on its first host call.
+;; min and max are NOT here: Scheme's are n-ary, so they get a folding
+;; branch of their own in wgsl-form.
 (define wgsl-binary-same
-  '((min . "min") (max . "max") (pow . "pow") (expt . "pow")
+  '((pow . "pow") (expt . "pow")
     (atan2 . "atan2") (step . "step")))
 
 ;; Vector in, scalar out.
@@ -402,6 +403,28 @@
                 (not (null? (cddr b))))
             (error 'wgsl "each let binding must be (name expr), got:" b)))
       bs))))
+
+;;--- arity --------------------------------------------------------------
+;; The table-driven forms each read a fixed number of arguments and used
+;; to read them BLINDLY: (sin time time) dropped the second operand,
+;; (and a b c) dropped its third conjunct, and (< 0.0 t 1.0) — the
+;; idiomatic bounds check — compiled to (0.0 < t) and lost its upper
+;; bound while looking exactly right. A count is either given Scheme's
+;; own n-ary meaning below, or refused here with the form named.
+(define (wgsl-arity op args n)
+  (if (not (= (length args) n))
+      (error 'wgsl
+             (string-append "(" (symbol->string op) ") takes "
+                            (number->string n)
+                            (if (= n 1) " argument, got" " arguments, got"))
+             (length args))))
+
+(define (wgsl-arity-at-least op args n)
+  (if (< (length args) n)
+      (error 'wgsl
+             (string-append "(" (symbol->string op) ") needs at least "
+                            (number->string n) " arguments, got")
+             (length args))))
 
 ;;--- the compiler -------------------------------------------------------
 
@@ -525,6 +548,7 @@
     ;; (f32 k) — the one conversion. WGSL has no implicit coercion, so a
     ;; fold index used as a quantity rather than an address has to say so.
     ((eq? op 'f32)
+     (wgsl-arity op args 1)
      (let ((r (wgsl (car args) env)))
        (if (not (memq (wgsl-type-of r) '(:u32 :f32)))
            (error 'wgsl (string-append "(f32) expects u32 or f32, got "
@@ -541,6 +565,7 @@
     ;; Explicit rather than inferred, on the same principle as (f32 k) —
     ;; a conversion is worth seeing.
     ((eq? op 'u32)
+     (wgsl-arity op args 1)
      (let ((x (car args)))
        (if (and (number? x) (integer? x) (>= x 0))
            (wgsl-result :u32 '() (string-append (number->string x) "u"))
@@ -610,6 +635,7 @@
 
     ;; (swizzle v xyz)
     ((eq? op 'swizzle)
+     (wgsl-arity op args 2)
      (let* ((r (wgsl (car args) env))
             (sw (cadr args))
             (chars (string->list (symbol->string sw)))
@@ -623,6 +649,7 @@
 
     ;; (dot a b) — matching vectors in, scalar out.
     ((eq? op 'dot)
+     (wgsl-arity op args 2)
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
        (wgsl-check-same 'dot (wgsl-type-of a) (wgsl-type-of b))
        (wgsl-result :f32 (wgsl-append-stmts (list a b))
@@ -630,37 +657,64 @@
 
     ;; (mix a b t) / (clamp x lo hi) / (smoothstep e0 e1 x)
     ((memq op '(mix clamp smoothstep))
+     (wgsl-arity op args 3)
      (let* ((rs (map (lambda (a) (wgsl a env)) args))
             (t0 (wgsl-type-of (car rs))))
-       (if (not (= (length rs) 3))
-           (error 'wgsl (string-append (symbol->string op) " takes 3 arguments, got")
-                  (length rs)))
-       ;; mix's third argument may be a scalar blend factor; the others
-       ;; must match the first.
        (wgsl-check-same op t0 (wgsl-type-of (cadr rs)))
+       ;; ONLY mix has a scalar-blend overload — mix(vecN, vecN, f32) is
+       ;; in the spec, while clamp and smoothstep want all three operands
+       ;; one type. Extending mix's leniency to all three accepted
+       ;; (clamp v lo 0.5) here and handed the browser a shader it
+       ;; rejects — the exact failure this file exists to move to Scheme.
        (let ((t2 (wgsl-type-of (caddr rs))))
-         (if (and (not (eq? t2 t0)) (not (eq? t2 :f32)))
+         (if (not (or (eq? t2 t0)
+                      (and (eq? op 'mix) (eq? t2 :f32))))
              (error 'wgsl (string-append "(" (symbol->string op)
                                          ") third argument must be "
-                                         (wgsl-type-name t0) " or f32, got:")
+                                         (if (eq? op 'mix)
+                                             (string-append (wgsl-type-name t0)
+                                                            " or f32")
+                                             (wgsl-type-name t0))
+                                         ", got:")
                     (wgsl-type-name t2))))
        (wgsl-result t0 (wgsl-append-stmts rs)
                     (string-append (symbol->string op) "("
                                    (wgsl-join (map wgsl-code-of rs) ", ") ")"))))
 
     ((assq op wgsl-vector-to-scalar)
+     (wgsl-arity op args 1)
      (let ((r (wgsl (car args) env)))
        (wgsl-result :f32 (wgsl-stmts-of r)
                     (string-append (cdr (assq op wgsl-vector-to-scalar))
                                    "(" (wgsl-code-of r) ")"))))
 
     ((assq op wgsl-unary-same)
+     (wgsl-arity op args 1)
      (let ((r (wgsl (car args) env)))
        (wgsl-result (wgsl-type-of r) (wgsl-stmts-of r)
                     (string-append (cdr (assq op wgsl-unary-same))
                                    "(" (wgsl-code-of r) ")"))))
 
+    ;; min and max are N-ARY, as Scheme's are, folded left onto WGSL's
+    ;; binary builtins: (min a b c) is min(min(a, b), c). The fold is not
+    ;; a guess — it is Scheme's own definition — and it matters because a
+    ;; define-dual body must mean the same thing in both languages.
+    ((memq op '(min max))
+     (wgsl-arity-at-least op args 2)
+     (let ((rs (map (lambda (a) (wgsl a env)) args)))
+       (let check ((t (wgsl-type-of (car rs))) (rest (cdr rs)))
+         (if (not (null? rest))
+             (check (wgsl-check-same op t (wgsl-type-of (car rest)))
+                    (cdr rest))))
+       (let loop ((acc (wgsl-code-of (car rs))) (rest (cdr rs)))
+         (if (null? rest)
+             (wgsl-result (wgsl-type-of (car rs)) (wgsl-append-stmts rs) acc)
+             (loop (string-append (symbol->string op) "(" acc ", "
+                                  (wgsl-code-of (car rest)) ")")
+                   (cdr rest))))))
+
     ((assq op wgsl-binary-same)
+     (wgsl-arity op args 2)
      (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
        (wgsl-result (wgsl-check-same op (wgsl-type-of a) (wgsl-type-of b))
                     (wgsl-append-stmts (list a b))
@@ -685,6 +739,7 @@
     ;; divisor. Wrapping a coordinate that has gone negative back into
     ;; [0, b) is the case, and it is the ordinary one.
     ((memq op '(remainder % modulo))
+     (wgsl-arity op args 2)
      (let* ((a (wgsl (car args) env))
             (b (wgsl (cadr args) env))
             (t (wgsl-arith-type op (wgsl-type-of a) (wgsl-type-of b))))
@@ -706,34 +761,82 @@
     ;; Comparisons produce bool, which exists only to feed `if` and the
     ;; boolean connectives — there is no other way to make one and nothing
     ;; else consumes one.
+    ;;
+    ;; N-ARY AS A CHAIN, which is Scheme's own meaning: (< lo x hi) is
+    ;; lo < x AND x < hi, each operand evaluated once. It used to read
+    ;; exactly two arguments and silently drop the rest, so that
+    ;; idiomatic bounds check compiled to (lo < x) — accepted, plausible,
+    ;; and missing its upper bound.
     ((memq op '(< > <= >= =))
-     (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
-       ;; Scalars of the SAME type: two f32s or two u32s. WGSL will not
+     (wgsl-arity-at-least op args 2)
+     (let* ((rs0 (map (lambda (a) (wgsl a env)) args))
+            (t   (wgsl-type-of (car rs0))))
+       ;; Scalars of the SAME type: all f32s or all u32s. WGSL will not
        ;; compare across them and neither will this, since the conversion
        ;; that would make it work is exactly the one worth writing down.
-       (if (not (and (memq (wgsl-type-of a) '(:f32 :u32))
-                     (eq? (wgsl-type-of a) (wgsl-type-of b))))
+       (if (not (memq t '(:f32 :u32)))
            (error 'wgsl
                   (string-append "(" (symbol->string op)
                                  ") compares scalars, got: "
-                                 (wgsl-type-name (wgsl-type-of a)) " and "
-                                 (wgsl-type-name (wgsl-type-of b)))))
-       (wgsl-result :bool (wgsl-append-stmts (list a b))
-                    (string-append "(" (wgsl-code-of a) " "
-                                   (if (eq? op '=) "==" (symbol->string op))
-                                   " " (wgsl-code-of b) ")"))))
+                                 (wgsl-type-name t))))
+       (for-each
+        (lambda (r)
+          (if (not (eq? (wgsl-type-of r) t))
+              (error 'wgsl
+                     (string-append "(" (symbol->string op)
+                                    ") compares scalars of one type, got: "
+                                    (wgsl-type-name t) " and "
+                                    (wgsl-type-name (wgsl-type-of r))))))
+        (cdr rs0))
+       ;; A MIDDLE operand appears in two comparisons, so it is bound
+       ;; first — splicing its text twice would evaluate it twice, and a
+       ;; draw must not run twice (the same property modulo protects).
+       ;; The ends are mentioned once and stay as they are, so a
+       ;; two-argument comparison emits exactly what it always did.
+       (let* ((rs (let loop ((xs rs0) (first #t) (acc '()))
+                    (cond ((null? xs) (reverse acc))
+                          ((or first (null? (cdr xs)))
+                           (loop (cdr xs) #f (cons (car xs) acc)))
+                          (else
+                           (loop (cdr xs) #f
+                                 (cons (wgsl-bind "cmp" (car xs)) acc))))))
+              (sym (if (eq? op '=) "==" (symbol->string op)))
+              (pairs (let loop ((xs rs) (acc '()))
+                       (if (null? (cdr xs))
+                           (reverse acc)
+                           (loop (cdr xs)
+                                 (cons (string-append
+                                        "(" (wgsl-code-of (car xs)) " " sym " "
+                                        (wgsl-code-of (cadr xs)) ")")
+                                       acc))))))
+         (wgsl-result :bool (wgsl-append-stmts rs)
+                      (if (null? (cdr pairs))
+                          (car pairs)
+                          (string-append "(" (wgsl-join pairs " && ") ")"))))))
 
+    ;; N-ary, folded left like arithmetic: (and a b c) is ((a && b) && c).
+    ;; It used to read exactly two operands and silently drop the rest —
+    ;; a three-way guard that quietly lost its third conjunct.
     ((memq op '(and or))
-     (let ((a (wgsl (car args) env)) (b (wgsl (cadr args) env)))
-       (if (not (and (eq? (wgsl-type-of a) :bool) (eq? (wgsl-type-of b) :bool)))
-           (error 'wgsl (string-append "(" (symbol->string op)
-                                       ") needs bool operands")))
-       (wgsl-result :bool (wgsl-append-stmts (list a b))
-                    (string-append "(" (wgsl-code-of a)
-                                   (if (eq? op 'and) " && " " || ")
-                                   (wgsl-code-of b) ")"))))
+     (wgsl-arity-at-least op args 2)
+     (let ((rs (map (lambda (a) (wgsl a env)) args)))
+       (for-each
+        (lambda (r)
+          (if (not (eq? (wgsl-type-of r) :bool))
+              (error 'wgsl (string-append "(" (symbol->string op)
+                                          ") needs bool operands, got: "
+                                          (wgsl-type-name (wgsl-type-of r))))))
+        rs)
+       (let loop ((acc (wgsl-code-of (car rs))) (rest (cdr rs)))
+         (if (null? rest)
+             (wgsl-result :bool (wgsl-append-stmts rs) acc)
+             (loop (string-append "(" acc
+                                  (if (eq? op 'and) " && " " || ")
+                                  (wgsl-code-of (car rest)) ")")
+                   (cdr rest))))))
 
     ((eq? op 'not)
+     (wgsl-arity op args 1)
      (let ((a (wgsl (car args) env)))
        (if (not (eq? (wgsl-type-of a) :bool))
            (error 'wgsl "(not) needs a bool operand"))
@@ -762,13 +865,21 @@
 
     ;; Arithmetic, folded left so (+ a b c) is ((a + b) + c).
     ((wgsl-arith? op)
+     (wgsl-arity-at-least op args 1)
      (if (null? (cdr args))
-         ;; Unary minus.
-         (if (eq? op '-)
-             (let ((r (wgsl (car args) env)))
-               (wgsl-result (wgsl-type-of r) (wgsl-stmts-of r)
-                            (string-append "-(" (wgsl-code-of r) ")")))
-             (wgsl (car args) env))
+         ;; Scheme's unary meanings, kept exactly: (- a) negates, (/ a)
+         ;; is the RECIPROCAL, (+ a) and (* a) are a. The reciprocal used
+         ;; to come back as the operand itself — accepted, plausible, and
+         ;; wrong by a power of minus one.
+         (let ((r (wgsl (car args) env)))
+           (cond ((eq? op '-)
+                  (wgsl-result (wgsl-type-of r) (wgsl-stmts-of r)
+                               (string-append "-(" (wgsl-code-of r) ")")))
+                 ((eq? op '/)
+                  (wgsl-result (wgsl-arith-type op :f32 (wgsl-type-of r))
+                               (wgsl-stmts-of r)
+                               (string-append "(1.0 / " (wgsl-code-of r) ")")))
+                 (else r)))
          (let loop ((acc (wgsl (car args) env)) (rest (cdr args)))
            (if (null? rest)
                acc
@@ -798,22 +909,23 @@
     ;; business knowing what a point is. lib/wrangle.scm owns that concept
     ;; and installs the handler; this file only knows that some forms end a
     ;; body instead of producing a value.
-    ((assq op wgsl-terminals)
-     => (lambda (entry) ((cdr entry) args env)))
+    ((map-ref wgsl-terminals op)
+     => (lambda (handler) (handler args env)))
 
     (else (error 'wgsl "unknown operator in kernel:" op))))
 
-;; ((name . handler) ...) — handler takes (args env) and returns a
+;; name -> handler, where a handler takes (args env) and returns a
 ;; wgsl-result whose type is :point.
-(define wgsl-terminals '())
+;;
+;; GUARDED like the tables below — and it was the one that was not. A
+;; re-load of this file wiped it, so the ordering "load wrangle, then
+;; something that transitively re-loads wgsl, then compile a kernel"
+;; lost the `point` terminal: the shim-outlives-the-layout bug seen from
+;; the other side. The suite's load order happened to dodge it.
+(define-once wgsl-terminals {})
 
 (define (wgsl-define-terminal! name handler)
-  (set! wgsl-terminals
-        (cons (cons name handler)
-              (let loop ((xs wgsl-terminals) (acc '()))
-                (cond ((null? xs) (reverse acc))
-                      ((eq? (caar xs) name) (loop (cdr xs) acc))
-                      (else (loop (cdr xs) (cons (car xs) acc))))))))
+  (map-set! wgsl-terminals name handler))
 
 (define (wgsl-append-stmts rs)
   (if (null? rs) '() (append (wgsl-stmts-of (car rs)) (wgsl-append-stmts (cdr rs)))))
@@ -863,30 +975,29 @@
 ;; Because they share a table, a function can start as hand-written WGSL
 ;; and later be rewritten in Scheme without any caller changing.
 
-;; (scheme-name wgsl-name (arg-type ...) result-type)
+;; name -> (scheme-name wgsl-name (arg-type ...) result-type). The entry
+;; keeps its name in front, so a positional reader of one sees exactly
+;; the alist entry these tables used to hold.
+;;
+;; THE REGISTRIES ARE MAPS, and the choice is semantic rather than
+;; fashionable: an ObjMap is an insertion-ordered association vector
+;; whose map-set! on an existing key replaces IN PLACE — precisely the
+;; replace-rather-than-shadow every one of these tables hand-rolled,
+;; needed because watch mode re-runs a file on every save and a table
+;; that only ever grew would accumulate a stale entry per save. Keys
+;; compare by identity, which for interned symbols is assq's question.
+;;
 ;; GUARDED, because a second (load "lib/wgsl.scm") would otherwise reset
 ;; this to empty and silently discard every signature registered since the
 ;; first — and transitive double-loading is the normal case once more than
 ;; one library wants the kernel compiler. The definitions and duals tables
 ;; below are guarded for the same reason.
-(if (not (defined? 'wgsl-signatures))
-    (begin (define wgsl-signatures '())))
+(define-once wgsl-signatures {})
 
 (define (wgsl-declare! name wgsl-name arg-types result-type)
-  (let loop ((xs wgsl-signatures) (acc '()) (found #f))
-    (cond ((null? xs)
-           (set! wgsl-signatures
-                 (reverse (if found acc
-                              (cons (list name wgsl-name arg-types result-type)
-                                    acc)))))
-          ((eq? (car (car xs)) name)
-           ;; Replace rather than shadow: watch mode re-runs a file on every
-           ;; save, and a table that only ever grows would accumulate a
-           ;; stale entry per save.
-           (loop (cdr xs) (cons (list name wgsl-name arg-types result-type) acc) #t))
-          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+  (map-set! wgsl-signatures name (list name wgsl-name arg-types result-type)))
 
-(define (wgsl-signature name) (assq name wgsl-signatures))
+(define (wgsl-signature name) (map-ref wgsl-signatures name))
 
 ;; Take a declaration back. A DECLARATION is a promise that hand-written
 ;; WGSL of that name exists, and layer 18 checks every promise against the
@@ -896,11 +1007,7 @@
 ;; Before the load guard above, re-loading this file wiped the table, and
 ;; that accident was doing the withdrawing. Relying on it was never a plan.
 (define (wgsl-forget-declaration! name)
-  (set! wgsl-signatures
-        (let loop ((xs wgsl-signatures) (acc '()))
-          (cond ((null? xs) (reverse acc))
-                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
-                (else (loop (cdr xs) (cons (car xs) acc)))))))
+  (map-delete! wgsl-signatures name))
 
 ;; Scheme spells names with hyphens, WGSL with underscores.
 (define (wgsl-fn-name name) (wgsl-underscore (symbol->string name)))
@@ -929,35 +1036,28 @@
 ;; than appending — both because watch mode re-runs a file on every save,
 ;; and because a function must appear before the code that calls it.
 
-;; ((name . source) ...) in emission order. Guarded — see wgsl-signatures.
-(if (not (defined? 'wgsl-definitions))
-    (begin (define wgsl-definitions '())))
+;; name -> source, in emission order. The map KEEPS that order —
+;; map-values walks insertion order, and a replacement holds its
+;; original position — and both halves are load-bearing: a function
+;; must appear before the code that calls it, and a redefinition must
+;; not migrate to the end. Guarded — see wgsl-signatures.
+(define-once wgsl-definitions {})
 
 (define (wgsl-put-definition! name source)
-  (let loop ((xs wgsl-definitions) (acc '()) (found #f))
-    (cond ((null? xs)
-           (set! wgsl-definitions
-                 (reverse (if found acc (cons (cons name source) acc)))))
-          ((eq? (car (car xs)) name)
-           (loop (cdr xs) (cons (cons name source) acc) #t))
-          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+  (map-set! wgsl-definitions name source))
 
 (define (wgsl-definitions-source)
-  (wgsl-join (map cdr wgsl-definitions) "\n"))
+  (wgsl-join (map-values wgsl-definitions) "\n"))
 
 (define (wgsl-forget-definitions!)
-  (set! wgsl-definitions '()))
+  (set! wgsl-definitions {}))
 
 ;; Take ONE definition back. The blanket version above cannot be used for
 ;; this: the table holds library definitions registered at load time and
 ;; program definitions registered at run time, and only the second kind
 ;; ever goes stale — see shared-layout!.
 (define (wgsl-forget-definition! name)
-  (set! wgsl-definitions
-        (let loop ((xs wgsl-definitions) (acc '()))
-          (cond ((null? xs) (reverse acc))
-                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
-                (else (loop (cdr xs) (cons (car xs) acc)))))))
+  (map-delete! wgsl-definitions name))
 
 ;; (wgsl-define-fn! name ((arg type) ...) body) — compile, derive the
 ;; result type, emit a WGSL fn, and register the signature.
@@ -1031,21 +1131,14 @@
 ;; run hand-written WGSL on the VM — so this table is exactly the set of
 ;; names that mean something in both worlds, which is the question anything
 ;; evaluating kernel code on the host needs answered.
-(if (not (defined? 'wgsl-duals))
-    (begin (define wgsl-duals '())))
+(define-once wgsl-duals {})
 
 (define (wgsl-put-dual! name proc)
-  (let loop ((xs wgsl-duals) (acc '()) (found #f))
-    (cond ((null? xs)
-           (set! wgsl-duals
-                 (reverse (if found acc (cons (cons name proc) acc)))))
-          ((eq? (car (car xs)) name)
-           ;; Replace rather than shadow, for the same reason wgsl-declare!
-           ;; does: watch mode re-runs a file on every save.
-           (loop (cdr xs) (cons (cons name proc) acc) #t))
-          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+  (map-set! wgsl-duals name proc))
 
-(define (wgsl-dual name) (assq name wgsl-duals))
+;; The procedure itself, or #f. It used to be the (name . proc) alist
+;; entry, and every caller immediately took the cdr.
+(define (wgsl-dual name) (map-ref wgsl-duals name))
 
 ;; The BODIES, by name — kept for the same reason define-gen keeps a
 ;; model's source, and it is the same argument one level down. A helper
@@ -1067,33 +1160,20 @@
 ;; The cost is nothing. This table holds one s-expression per function
 ;; that paid the entry tax, and the tax is what bounds the table: the set
 ;; of bodies kept is exactly the set of names a kernel may call.
-(if (not (defined? 'wgsl-bodies))
-    (begin (define wgsl-bodies '())))
+(define-once wgsl-bodies {})
 
 (define (wgsl-put-body! name params body)
-  (let loop ((xs wgsl-bodies) (acc '()) (found #f))
-    (cond ((null? xs)
-           (set! wgsl-bodies
-                 (reverse (if found acc (cons (cons name (cons params body)) acc)))))
-          ((eq? (car (car xs)) name)
-           (loop (cdr xs) (cons (cons name (cons params body)) acc) #t))
-          (else (loop (cdr xs) (cons (car xs) acc) found)))))
+  (map-set! wgsl-bodies name (cons params body)))
 
-;; (name params . body), or #f for a DECLARED function, which has no body
-;; in this language to read.
-(define (wgsl-fn-body name)
-  (let ((b (assq name wgsl-bodies)))
-    (if b (cdr b) #f)))
+;; (params . body), or #f for a DECLARED function, which has no body in
+;; this language to read.
+(define (wgsl-fn-body name) (map-ref wgsl-bodies name))
 
 (define (wgsl-body-params b) (car b))
 (define (wgsl-body-expr b) (cdr b))
 
 (define (wgsl-forget-body! name)
-  (set! wgsl-bodies
-        (let loop ((xs wgsl-bodies) (acc '()))
-          (cond ((null? xs) (reverse acc))
-                ((eq? (car (car xs)) name) (loop (cdr xs) acc))
-                (else (loop (cdr xs) (cons (car xs) acc)))))))
+  (map-delete! wgsl-bodies name))
 
 ;; Does a retained body mention this name anywhere? Crude on purpose: a
 ;; call is the case that matters and a shadowing binding of the same name
@@ -1118,9 +1198,10 @@
 ;; accessor directly. A define-gpu calling a shim rather than an accessor
 ;; would survive this and want a fixpoint instead.
 (define (wgsl-forget-dependents! names)
+  ;; map-keys is a snapshot, so forgetting mid-walk cannot trip the walk.
   (for-each
-   (lambda (entry)
-     (let ((name (car entry)) (body (cdr (cdr entry))))
+   (lambda (name)
+     (let ((body (cdr (wgsl-fn-body name))))
        (if (let check ((ns names))
              (cond ((null? ns) #f)
                    ((wgsl-body-mentions? body (car ns)) #t)
@@ -1128,7 +1209,7 @@
            (begin (wgsl-forget-definition! name)
                   (wgsl-forget-body! name)
                   (wgsl-forget-declaration! name)))))
-   wgsl-bodies))
+   (map-keys wgsl-bodies)))
 
 (defmacro (define-dual spec body)
   `(begin

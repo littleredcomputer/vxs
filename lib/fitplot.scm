@@ -32,15 +32,15 @@
 
 (define (plot-2dp x) (/ (round (* 100.0 x)) 100.0))
 
-;; The posterior mean under weights that are ALREADY NORMALISED — linear
-;; probabilities summing to one, not log-weights. lib/gen.scm's
+;; The posterior mean under linear probabilities — the :probs column
+;; importance-probs! installs, never :weights. lib/gen.scm's
 ;; weighted-mean does its own logsumexp and expects the log form, so
-;; calling it here would quietly exponentiate twice. Everything in this
-;; file runs after normalize-weights!, which is also what rng-categorical!
-;; needs, so there is one convention in play and this is it.
-(define (plot-mean col ws K)
+;; calling it here would quietly exponentiate twice. The two scales used
+;; to share one buffer, told apart by whether normalize-weights! had run
+;; yet; now each has a key, and this file reads only :probs.
+(define (plot-mean col ps K)
   (let loop ((i 0) (m 0.0))
-    (if (= i K) m (loop (+ i 1) (+ m (* (view-ref ws i) (view-ref col i)))))))
+    (if (= i K) m (loop (+ i 1) (+ m (* (view-ref ps i) (view-ref col i)))))))
 
 (define (plot-px x) (* (canvas-width)  (/ (- x plot-x0) (- plot-x1 plot-x0))))
 (define (plot-py y) (* (canvas-height) (- 1.0 (/ (- y plot-y0) (- plot-y1 plot-y0)))))
@@ -97,7 +97,9 @@
 ;;   truth  : (a b c), or #f to draw no reference curve
 ;;   ess    : effective sample size, for the caption
 ;;
-;; The weights in `soa` must already be NORMALISED (normalize-weights!).
+;; The :probs column must be present — importance-probs! installs it;
+;; a soa without one fails here on a #f rather than plotting a mean
+;; computed at the wrong scale.
 ;;
 ;; The grey prior fan is drawn from particles 0..len(picks), taken
 ;; UNWEIGHTED — no second sampler and no second seed, because those
@@ -121,16 +123,16 @@
                                    3.6 0.98 0.90 0.70 1.0)
                (loop (+ i 1)))))
 
-  (let ((as (:a soa)) (bs (:b soa)) (ws (:weights soa)) (cs (:c soa))
+  (let ((as (:a soa)) (bs (:b soa)) (ps (:probs soa)) (cs (:c soa))
         (K (:n soa)))
     (canvas-draw-text
      (format "~a points   K ~a   ESS ~a" n K (inexact->exact (round ess)))
      16.0 26.0 0.84 0.89 0.96 1.0)
     (canvas-draw-text
      (format "posterior mean   a ~a   b ~a   c ~a"
-             (plot-2dp (plot-mean as ws K))
-             (plot-2dp (plot-mean bs ws K))
-             (plot-2dp (plot-mean cs ws K)))
+             (plot-2dp (plot-mean as ps K))
+             (plot-2dp (plot-mean bs ps K))
+             (plot-2dp (plot-mean cs ps K)))
      16.0 46.0 0.16 0.86 0.76 1.0)
     (if truth
         (canvas-draw-text

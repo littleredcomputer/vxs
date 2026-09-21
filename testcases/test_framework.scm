@@ -2,13 +2,13 @@
 ;; vxs Ground-Up Test Framework
 ;;----------------------------------------------------------------------
 
-(if (not (defined? '*test-framework-loaded*))
-    (begin
-      (define *test-framework-loaded* #t)
-      (define *total-suites-run* 0)
-      (define *total-tests-run* 0)
-      (define *total-tests-passed* 0)
-      (define *total-tests-failed* 0)))
+;; Session totals, accumulated across suite loads — so define-once, each
+;; guarding itself. The *test-framework-loaded* flag existed only to guard
+;; the block, which is exactly the overhead define-once removes.
+(define-once *total-suites-run* 0)
+(define-once *total-tests-run* 0)
+(define-once *total-tests-passed* 0)
+(define-once *total-tests-failed* 0)
 
 (define *current-suite-name* "")
 (define *current-suite-passed* 0)

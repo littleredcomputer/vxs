@@ -225,7 +225,7 @@
                               " evaluate here as well as on the device."
                               " Define it with define-dual")
                fn))
-    (apply (cdr d)
+    (apply d
            (cons x (map (lambda (p)
                           (view-ref v (+ (shared-offset (curveplot-region p)) i)))
                         params)))))

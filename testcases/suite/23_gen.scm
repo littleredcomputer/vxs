@@ -215,12 +215,15 @@
               (view-ref (:p (importance (coin 10) {:qs obs} 50 1)) 37)
               (view-ref (:p (importance (coin 10) {:qs obs} 900 1)) 37))
 
-(assert-equal "normalised weights sum to one"
-              #t (let ((ws (:weights (importance (coin 10) {:qs obs} 500 2))))
-                   (normalize-weights! ws 500)
-                   (let loop ((i 0) (s 0.0))
-                     (if (= i 500) (< (abs (- s 1.0)) 1e-9)
-                         (loop (+ i 1) (+ s (view-ref ws i)))))))
+(assert-equal "the :probs column sums to one, and the log form survives"
+              #t (let* ((soa (importance (coin 10) {:qs obs} 500 2))
+                        (ps  (importance-probs! soa)))
+                   (and (eq? ps (:probs soa))
+                        ;; the log column is untouched: still log-scale
+                        (< (view-ref (:weights soa) 0) 0.0)
+                        (let loop ((i 0) (s 0.0))
+                          (if (= i 500) (< (abs (- s 1.0)) 1e-9)
+                              (loop (+ i 1) (+ s (view-ref ps i))))))))
 
 ;; Two shapes refused rather than fudged, each naming its own reason.
 (assert-equal "a nested generative function is refused for now"

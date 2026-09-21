@@ -336,4 +336,66 @@
 (assert-true "and one using dirichlet likewise"
              (refused? (lambda () (stage (simplex cwts)))))
 
+;;--- `let` is parallel, as the model's own Scheme is --------------------
+;; The one case where parallel and sequential binding diverge in a pure
+;; body: a binding whose init mentions a name bound earlier in the same
+;; list that also exists outside it. Real `let` reads the outer one —
+;; here the parameter x — and staging must read the same, or both
+;; backends agree with each other and not with assess, which is the one
+;; failure shape the two-path design cannot see on its own. Measured
+;; before the fix: staged -5.008 against assess's -2.008, the exact
+;; signature of scoring against the wrong mean.
+(define-gen (shadowed x)
+  (let ((v (at :v (normal 0.0 1.0))))
+    (let ((x 5.0)
+          (y x))                      ; parallel: y is the OUTER x
+      (at :obs (normal y 1.0))
+      v)))
+
+(define sh-ch {:v 0.3 :obs 2.5})
+(assert-true "a shadowing parallel let stages to what assess computes"
+             (= (staged-logpdf (stage (shadowed 2.0)) sh-ch)
+                (car (assess (shadowed 2.0) sh-ch))))
+
+;; And let* stays sequential, exactly as Scheme's: the same binding list
+;; under let* reads the INNER x, and the two paths agree on that reading
+;; too — so this pair of assertions pins both semantics, not just one.
+(define-gen (chained x)
+  (let ((v (at :v (normal 0.0 1.0))))
+    (let* ((x 5.0)
+           (y x))                     ; sequential: y is 5.0
+      (at :obs (normal y 1.0))
+      v)))
+
+(assert-true "and a chained let* stages to what assess computes"
+             (= (staged-logpdf (stage (chained 2.0)) sh-ch)
+                (car (assess (chained 2.0) sh-ch))))
+
+;;--- membership is derived, not listed ----------------------------------
+;; staged-family asks the dual registry under the logpdf-F naming
+;; regularity, so a brand-new family whose score is a dual stages with NO
+;; list to update — and stops staging when its kernel half is withdrawn,
+;; because membership never was anything but both halves being present.
+;; (The dual's Scheme half stays registered afterwards — wgsl-duals has
+;; no forget — which is harmless: it is lookup-only, and staged-family
+;; requires the body too.)
+(define-dual (logpdf-tri (v :f32) (w :f32))
+  (- (abs (- v w)) w))                  ; the shape is the point here
+
+(define tri
+  (distribution 'tri (lambda (r w) w) logpdf-tri
+                (unsupported 'fill '(tri)) (unsupported 'sum '(tri))))
+
+(define-gen (tri-model) (at :z (tri 0.5)))
+
+(assert-true "a fresh dual's family stages, with no list to update"
+             (= (staged-logpdf (stage (tri-model)) {:z 0.25})
+                (car (assess (tri-model) {:z 0.25}))))
+
+(assert-true "and stops staging when the kernel half is withdrawn"
+             (begin (wgsl-forget-definition! 'logpdf-tri)
+                    (wgsl-forget-body! 'logpdf-tri)
+                    (wgsl-forget-declaration! 'logpdf-tri)
+                    (refused? (lambda () (stage (tri-model))))))
+
 (suite-summary)

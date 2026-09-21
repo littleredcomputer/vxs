@@ -388,6 +388,9 @@
 ;;
 ;;   {address -> :f64 view of K, ..., :weights view of K, :n K}
 ;;
+;; :weights is the LOG form, always. importance-probs! below derives the
+;; linear column and installs it at :probs, so each scale has a key.
+;;
 ;; NOT vectorised. This is a loop over K, one generator per sample; only
 ;; the OUTPUT is columnar. Vectorising properly needs distribution
 ;; parameters that may be views, so that one pass covers all K — at which
@@ -457,15 +460,29 @@
     (map-set! cols :n K)
     cols))
 
-;; The normalised weights, in place. Subtracting logsumexp first is what
-;; keeps this finite: raw log-weights routinely sit below -700, where exp
-;; underflows to zero and every particle looks equally impossible.
-(define (normalize-weights! ws K)
-  (let ((lse (logsumexp ws 0 K)))
+;; The probabilities, as their OWN column rather than the log-weights
+;; overwritten. normalize-weights! used to rewrite :weights in place, so
+;; one buffer meant two things separated by a call — the log form
+;; before, probabilities after — and every reader carried the convention
+;; in a comment ("must already be NORMALISED"). A key is cheaper than a
+;; convention: :weights is always the log form, :probs always sums to
+;; one, and a reader that wants the one that is missing fails on a #f
+;; instead of computing quietly at the wrong scale.
+;;
+;; Subtracting logsumexp before exp is what keeps this finite: raw
+;; log-weights routinely sit below -700, where exp underflows to zero
+;; and every particle looks equally impossible.
+(define (importance-probs! cols)
+  (let* ((K   (:n cols))
+         (ws  (:weights cols))
+         (ps  (bytes-view (make-bytes (* K 8)) :f64))
+         (lse (logsumexp ws 0 K)))
     (let loop ((i 0))
       (if (< i K)
-          (begin (view-set! ws i (exp (- (view-ref ws i) lse)))
-                 (loop (+ i 1)))))))
+          (begin (view-set! ps i (exp (- (view-ref ws i) lse)))
+                 (loop (+ i 1)))))
+    (map-set! cols :probs ps)
+    ps))
 
 ;; The weighted mean of one column, without materialising anything.
 (define (weighted-mean col ws K)

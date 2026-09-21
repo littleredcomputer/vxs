@@ -77,17 +77,16 @@
                (unwind-protect (importance (curve xs SIGMA NPTS) {:ys ys} K SEED)
                                (eval-budget-ms! was))))
 
-(define ws (:weights cols))
-(normalize-weights! ws K)
+(define ps (importance-probs! cols))   ; :probs — :weights stays the log form
 
 (define ess
   (let loop ((i 0) (s 0.0))
-    (if (= i K) (/ 1.0 s) (loop (+ i 1) (+ s (* (view-ref ws i) (view-ref ws i)))))))
+    (if (= i K) (/ 1.0 s) (loop (+ i 1) (+ s (* (view-ref ps i) (view-ref ps i)))))))
 
 ;; Resampled by weight, duplicates included: a duplicate is what makes a
 ;; concentrated posterior LOOK concentrated.
 (define picks (bytes-view (make-bytes (* NDRAW 4)) :i32))
-(rng-fill-categorical! (rng-make 0 SEED 0) picks 0 NDRAW ws)
+(rng-fill-categorical! (rng-make 0 SEED 0) picks 0 NDRAW ps)
 
 (display (format "ESS ~a of ~a\n" (inexact->exact (round ess)) K))
 

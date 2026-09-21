@@ -219,17 +219,30 @@
               (error "wrangle-params!: parameter names must be symbols" spec))
           (wrangle-check-name name "wrangle-params!")
           (cond
+           ;; The messages quote the constants they enforce, because two
+           ;; of them used to quote numbers from an earlier layout — "at
+           ;; most 8" over a limit of sixteen — which is a comment doing
+           ;; a constant's job, wrong side out.
            ((eq? type :f32)
             (if (>= nf wrangle-param-slots)
-                (error "wrangle-params!: at most 8 :f32 parameters" name))
+                (error (string-append "wrangle-params!: at most "
+                                      (number->string wrangle-param-slots)
+                                      " :f32 parameters")
+                       name))
             (loop (cdr ss) (+ nf 1) ni nb (cons (list name type nf) acc)))
            ((eq? type :u32)
             (if (>= ni wrangle-int-slots)
-                (error "wrangle-params!: at most 3 :u32 parameters" name))
+                (error (string-append "wrangle-params!: at most "
+                                      (number->string wrangle-int-slots)
+                                      " :u32 parameters")
+                       name))
             (loop (cdr ss) nf (+ ni 1) nb (cons (list name type ni) acc)))
            ((eq? type :flag)
             (if (>= nb wrangle-flag-bits)
-                (error "wrangle-params!: at most 32 :flag parameters" name))
+                (error (string-append "wrangle-params!: at most "
+                                      (number->string wrangle-flag-bits)
+                                      " :flag parameters")
+                       name))
             (loop (cdr ss) nf ni (+ nb 1) (cons (list name type nb) acc)))
            (else (error "wrangle-params!: type must be :f32, :u32 or :flag" spec)))))))
 

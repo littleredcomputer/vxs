@@ -1092,14 +1092,14 @@
 ;; Off-support is -inf, as it is for every other density here: an index
 ;; outside the table is impossible, not merely unlikely.
 (assert-true "an index outside the table is impossible, not unlikely"
-             (and (= (logpdf-categorical 4 cw) (- (/ 1.0 0.0)))
-                  (= (logpdf-categorical -1 cw) (- (/ 1.0 0.0)))))
+             (and (= (logpdf-categorical 4 cw) -inf)
+                  (= (logpdf-categorical -1 cw) -inf)))
 ;; A zero weight is a category that cannot occur, which is different from
 ;; one that occurs rarely, and log 0 says so.
 (assert-true "so is a category with no weight"
              (let ((z (bytes-view (make-bytes (* 2 8)) :f64)))
                (view-set! z 0 0.0) (view-set! z 1 1.0)
-               (= (logpdf-categorical 0 z) (- (/ 1.0 0.0)))))
+               (= (logpdf-categorical 0 z) -inf)))
 ;; Every draw must be a usable index. The sampler clamps to the last
 ;; positive weight rather than walking off the end.
 (assert-true "every draw is an index into the table"

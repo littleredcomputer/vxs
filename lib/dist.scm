@@ -167,7 +167,7 @@
 ;; about the density.
 (define (logpdf-beta v alpha beta)
   (if (or (<= v 0.0) (>= v 1.0))
-      (log 0.0)
+      -inf
       (+ (* (- alpha 1.0) (log v))
          (* (- beta 1.0) (log (- 1.0 v)))
          (- (lbeta alpha beta)))))
@@ -246,7 +246,7 @@
 ;; the reverse: the host is the oracle everywhere else here.
 (define (logpdf-gamma v alpha lambda)
   (if (<= v 0.0)
-      (log 0.0)
+      -inf
       (+ (* alpha (log lambda))
          (- (lgamma alpha))
          (* (- alpha 1.0) (log v))
@@ -433,10 +433,10 @@
     ;; table, or one whose weight is zero, is impossible rather than
     ;; merely unlikely.
     (if (or (< i 0) (>= i k))
-        (- (/ 1.0 0.0))
+        -inf
         (let ((w (view-ref ws i)))
           (if (<= w 0.0)
-              (- (/ 1.0 0.0))
+              -inf
               (- (log w) (log (view-sum ws))))))))
 
 (define fill-categorical! (generic-fill random-categorical))
@@ -451,10 +451,10 @@
           acc
           (let ((j (inexact->exact (round (view-ref view (+ start i))))))
             (if (or (< j 0) (>= j k))
-                (- (/ 1.0 0.0))
+                -inf
                 (let ((w (view-ref ws j)))
                   (if (<= w 0.0)
-                      (- (/ 1.0 0.0))
+                      -inf
                       (loop (+ i 1) (+ acc (- (log w) tot)))))))))))
 
 (define (sum-categorical! view start count ws)
@@ -503,7 +503,7 @@
           (let ((a (view-ref alpha i))
                 (x (view-ref v i)))
             (if (<= x 0.0)
-                (- (/ 1.0 0.0))
+                -inf
                 (loop (+ i 1)
                       (+ asum a)
                       (+ lg (lgamma a))

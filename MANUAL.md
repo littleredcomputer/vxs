@@ -733,6 +733,29 @@ because compiled results are spliced as **text**: naming an operand twice
 would evaluate it twice, and `(modulo (random-uniform 0 1) k)` would
 otherwise draw two different numbers and combine them.
 
+### n-ary forms follow Scheme
+
+Where Scheme defines an n-ary meaning, the kernel language compiles it
+faithfully — because a `define-dual` body must mean the same thing in
+both languages:
+
+| form | compiles to |
+|---|---|
+| `(and a b c)`, `(or …)` | `((a && b) && c)`, folded left |
+| `(min a b c)`, `(max …)` | `min(min(a, b), c)`, folded left |
+| `(< lo x hi)` (all comparisons) | `(lo < x) && (x < hi)` — the chain |
+| `(/ a)` | `(1.0 / a)` — the reciprocal |
+
+A chained comparison's **middle** operand appears in two comparisons, so
+it is bound to a local first — splicing its text twice would evaluate it
+twice, and a draw must not run twice (the property `modulo` already
+protects).
+
+Everything else refuses a wrong argument count with the form named.
+These used to be read **blindly**: `(sin time time)` dropped its second
+operand and `(< 0.0 t 1.0)` compiled to `(0.0 < t)` — accepted,
+plausible, and missing its upper bound.
+
 ### `if` is a selection, not a branch
 
 In the kernel language `(if c a b)` compiles to WGSL `select(b, a, c)`.
@@ -1056,6 +1079,35 @@ rest argument accepts every larger count and shadows anything after it.
 
 Still missing from R7RS-small: `raise-continuable` and
 `with-exception-handler`.
+
+---
+
+### `define-once`
+
+Common Lisp's `defvar`, under a name that says what it does: bind only if
+unbound, so re-running the file preserves the value.
+
+```scheme
+(define-once wgsl-signatures {})   ; a registry other files write into
+```
+
+The problem it names: `load` is textual inclusion with re-execution, and
+the load graph is a diamond — a shared file runs once per **path**
+through it. A top-level binding therefore has two possible lifetimes,
+"this run of the file" and "the accumulated session", and a bare `define`
+expresses only the first. For ordinary definitions the re-run is
+harmlessly idempotent; for an **accumulator** it is destructive: the
+second visit's `(define table {})` discards what other files registered
+after the first.
+
+**Reach for it when the value's contents come from outside the defining
+file.** If the file computes everything in the value, use `define` — a
+re-load should refresh it. The function spelling `(define-once (f x) …)`
+is refused to keep that guidance structural: a function is file-owned by
+definition, so there is nothing a once-only function could protect.
+
+⚠️ The cost, inherited from `defvar`: editing the *initializer* of a
+`define-once` does not take on a re-load. Restart the session to see it.
 
 ---
 
@@ -1818,6 +1870,24 @@ futures, where `touch/or-error` already handles them.
 Not urgent. The inconsistent *message format* is the part that costs
 something today.
 
+#### A dual body's `let` means two things
+
+The kernel language's `let` binds sequentially (`let*` is the same form
+there), documented in [§4](#bounded-folds). For a pure kernel that is a
+language choice; for a `define-dual` body it is a latent divergence,
+because the same datum also runs as real Scheme on the host, where `let`
+binds in parallel. The silent case needs a binding list that both
+shadows a parameter and references it: in
+`(let ((sigma 2.0) (z (/ x sigma))) …)` with `sigma` a parameter, the
+device's `z` divides by 2.0 and the host's by the parameter. Both run.
+
+lib/stage.scm had the same divergence against the fiber path and now
+stages `let` in parallel (layer 24 pins both semantics). The kernel
+compiler cannot simply follow, because sequential `let` is documented
+behaviour that hand-written kernels may rely on. The candidate fix is
+narrower: at `define-dual` only, refuse a `let` whose init mentions a
+name bound earlier in the same list, and say `let*`.
+
 #### Faults carry a string, not a structure
 
 `(touch child)` on a fiber that died from `(car '())` hands the supervisor
@@ -2289,9 +2359,14 @@ Building the index array on the host is practical rather than a fallback:
 a single O(N) pass over 60k elements is ~120k simple VM operations, a few
 milliseconds, and nothing needs it every frame.
 
-#### `define-once`
+#### ✅ `define-once` — **done**
 
-Nearly free; `defined?` exists.
+A prelude macro — Common Lisp's `defvar` under an honest name. The six
+`(if (not (defined? …)) …)` guards in lib/wgsl.scm became `define-once`
+forms, the test framework's guard flag (which existed only to guard a
+block of counters) dissolved into four self-guarding ones, and
+[§5](#define-once) documents the rule for when to reach for it: when the
+value's contents come from outside the defining file.
 
 #### The curve-fit demo as a programmable surface — **decided, unstarted**
 

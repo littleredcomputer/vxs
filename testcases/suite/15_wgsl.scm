@@ -595,6 +595,48 @@
 ;;
 ;; They used to be cleared by accident, because loading lib/wgsl.scm a
 ;; second time reset the table. It no longer does.
+;;--- n-ary forms, and the arity wall ------------------------------------
+;; Every table-driven form used to read its fixed argument count BLINDLY:
+;; (sin time time) dropped the second operand, (and a b c) dropped its
+;; third conjunct, and (< 0.0 time 1.0) — the idiomatic bounds check —
+;; compiled to (0.0 < time) and lost its upper bound while looking exactly
+;; right. Where Scheme DEFINES an n-ary meaning it is now compiled
+;; faithfully — and, or, min, max, chained comparisons, the unary
+;; reciprocal — because a define-dual body must mean the same thing in
+;; both languages. Everywhere else the count is refused with the form
+;; named, rather than truncated to fit.
+(assert-equal "a two-argument comparison emits exactly what it did"
+              "(time < 1.0)" (wgsl-code '(< time 1) E))
+(assert-equal "a chained comparison keeps both bounds and binds its middle"
+              (string-append "let cmp_1 : f32 = time;\n"
+                             "return ((0.0 < cmp_1) && (cmp_1 < 1.0));")
+              (wgsl-body '(< 0 time 1) E ""))
+(assert-equal "and folds left over three operands"
+              "(((time < 1.0) && (2.0 < time)) && (time < 3.0))"
+              (wgsl-code '(and (< time 1) (< 2 time) (< time 3)) E))
+(assert-equal "min is n-ary, folded onto the binary builtin"
+              "min(min(time, 1.0), 2.0)" (wgsl-code '(min time 1 2) E))
+(assert-equal "the unary reciprocal is a reciprocal, not the operand"
+              "(1.0 / time)" (wgsl-code '(/ time) E))
+(assert-equal "(sin) with two arguments is refused, not truncated"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(sin time time) E)))
+(assert-equal "(pow) with one argument is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(pow time) E)))
+(assert-equal "(dot) with three is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(dot uv uv uv) E)))
+
+;; Only mix has WGSL's scalar-blend overload — mix(vecN, vecN, f32) is in
+;; the spec, while clamp and smoothstep want all three operands one type.
+;; The checker used to extend mix's leniency to all three, so
+;; (clamp v lo 0.5) type-checked here and handed the browser a shader it
+;; rejects — the exact failure this file exists to move to Scheme.
+(assert-equal "mix keeps its scalar blend factor"
+              :vec2f (wgsl-type '(mix uv uv 0.5) E))
+(assert-equal "clamp with a scalar bound on vectors is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(clamp uv uv 0.5) E)))
+(assert-equal "smoothstep with a scalar x against vector edges is refused"
+              'raised (guard (e (#t 'raised)) (wgsl-type '(smoothstep uv uv 0.5) E)))
+
 (wgsl-forget-declaration! 'draw)
 (wgsl-forget-declaration! 'wall-a)
 (wgsl-forget-declaration! 'obs)

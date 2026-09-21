@@ -122,14 +122,13 @@
 (define soa (cdr fit))
 (define ms  (* 1000.0 (car fit)))
 
-(define ws (:weights soa))
-(normalize-weights! ws K)              ; log-weights -> probabilities
+(define ps (importance-probs! soa))    ; :probs — :weights stays the log form
 
 (define ess
   (let loop ((i 0) (s 0.0))
     (if (= i K)
         (/ 1.0 s)
-        (loop (+ i 1) (+ s (* (view-ref ws i) (view-ref ws i)))))))
+        (loop (+ i 1) (+ s (* (view-ref ps i) (view-ref ps i)))))))
 
 ;; NDRAW particles chosen with probability proportional to weight. A
 ;; duplicate is information, not waste: it means that particle carried
@@ -138,7 +137,7 @@
 ;; the best NDRAW distinct particles instead would show the same spread
 ;; whether the weights were even or degenerate.
 (define picks (bytes-view (make-bytes (* NDRAW 4)) :i32))
-(rng-fill-categorical! (rng-make 0 SEED 0) picks 0 NDRAW ws)
+(rng-fill-categorical! (rng-make 0 SEED 0) picks 0 NDRAW ps)
 
 ;;--- the picture --------------------------------------------------------
 
