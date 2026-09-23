@@ -357,7 +357,7 @@
                (distro  (cadr d)))
            (if (not (map-has? choices address))
                (raise `(missing-choice ,address)))
-           (let* ((choice (address choices))
+           (let* ((choice (map-ref choices address))
                   (w      (d:score distro choice)))
              (set! sum-w (+ sum-w w))
              choice)))
@@ -483,6 +483,19 @@
                  (loop (+ i 1)))))
     (map-set! cols :probs ps)
     ps))
+
+;; Kish's effective sample size, 1 / sum p_i^2, over the :probs column —
+;; K when the weights are even, 1 when one particle holds all of it. The
+;; standard trigger for resampling and the first number to read after
+;; `importance`; both demos carried this loop inline, identically.
+(define (probs-ess cols)
+  (let ((ps (:probs cols)) (K (:n cols)))
+    (if (not ps)
+        (error 'probs-ess "no :probs column — call importance-probs! first"))
+    (let loop ((i 0) (s 0.0))
+      (if (= i K)
+          (/ 1.0 s)
+          (loop (+ i 1) (+ s (* (view-ref ps i) (view-ref ps i))))))))
 
 ;; The weighted mean of one column, without materialising anything.
 (define (weighted-mean col ws K)

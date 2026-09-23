@@ -124,11 +124,7 @@
 
 (define ps (importance-probs! soa))    ; :probs — :weights stays the log form
 
-(define ess
-  (let loop ((i 0) (s 0.0))
-    (if (= i K)
-        (/ 1.0 s)
-        (loop (+ i 1) (+ s (* (view-ref ps i) (view-ref ps i)))))))
+(define ess (probs-ess soa))
 
 ;; NDRAW particles chosen with probability proportional to weight. A
 ;; duplicate is information, not waste: it means that particle carried

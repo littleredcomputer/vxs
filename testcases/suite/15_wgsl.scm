@@ -417,18 +417,19 @@
 ;; WGSL identifier admits letters, digits and underscore, while `outside?`
 ;; and `set!` are how Scheme habitually spells a predicate and a mutator.
 (set! wgsl-counter 0)
-(assert-true "a question mark is underscored too"
+(assert-true "a question mark is escaped"
              (string-contains?
               (wgsl-body '(let ((outside? (< time 1.0))) (if outside? 1.0 2.0)) E "")
-              "outside__1"))
+              "outside_p_1"))
 (set! wgsl-counter 0)
-(assert-true "and a bang"
+(assert-true "and a bang, distinctly"
              (string-contains? (wgsl-body '(let ((fill! 1.0)) (* fill! 2.0)) '() "")
-                               "fill__1"))
-;; Substituted rather than dropped: `a?` and `a!` are different names, and
-;; deleting the offending character would collide them onto one.
-(assert-equal "an illegal character becomes an underscore, it is not deleted"
-              "a_" (wgsl-underscore "a?"))
+                               "fill_b_1"))
+;; Escaped rather than dropped or flattened: `a?` and `a!` are different
+;; names, and both deleting the character and mapping it to a bare `_`
+;; collide them onto one. The injectivity test below covers the rest.
+(assert-equal "an illegal character is escaped, not deleted"
+              "a_p" (wgsl-underscore "a?"))
 
 ;;--- expt, because a dual body must be valid in both languages -----------
 ;; The kernel side has always spelled this `pow`, which is not a Scheme
@@ -636,6 +637,20 @@
               'raised (guard (e (#t 'raised)) (wgsl-type '(clamp uv uv 0.5) E)))
 (assert-equal "smoothstep with a scalar x against vector edges is refused"
               'raised (guard (e (#t 'raised)) (wgsl-type '(smoothstep uv uv 0.5) E)))
+
+;;--- identifiers are escaped injectively ---------------------------------
+;; Mapping every illegal character to `_` collided `a?`, `a!` and `a-` onto
+;; one WGSL name. Locals hid it behind their numeric suffix; two functions
+;; `ok?` and `ok!` emitted two `fn ok_` and a shader that would not compile.
+(assert-equal "the common characters keep distinct spellings"
+              '("a_" "a_p" "a_b" "a__" "a_x64_")
+              (map wgsl-underscore '("a-" "a?" "a!" "a_" "a@")))
+(assert-true "and no two of them collide"
+             (let ((xs (map wgsl-underscore '("a-" "a?" "a!" "a_" "a*" "a<" "a>" "a=" "a/" "a%"))))
+               (let loop ((ys xs))
+                 (cond ((null? ys) #t)
+                       ((member (car ys) (cdr ys)) #f)
+                       (else (loop (cdr ys)))))))
 
 (wgsl-forget-declaration! 'draw)
 (wgsl-forget-declaration! 'wall-a)

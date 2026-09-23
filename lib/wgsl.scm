@@ -124,19 +124,41 @@
 ;; shader compiler rejected, which is precisely the class of failure this
 ;; file exists to move to Scheme.
 ;;
-;; Everything illegal becomes an underscore rather than being dropped:
-;; `a?` and `a!` are different names and must stay different, where
-;; deletion would collide them onto `a`.
+;; The mapping is INJECTIVE, because `a?` and `a!` are different names
+;; and must stay different. It used to turn every illegal character into
+;; an underscore, which is what the comment here claimed was enough —
+;; and it was not: `a?` and `a!` both became `a_`, and so did `a-`.
+;; Locals survived only because wgsl-fresh numbers them; two functions
+;; named `ok?` and `ok!` emitted two `fn ok_` and a shader that would not
+;; compile. So the common Scheme characters get their own spellings, and
+;; anything else escapes by code point:
+;;
+;;   -  -> _      ? -> _p     ! -> _b     * -> _s     > -> _g
+;;   <  -> _l     = -> _e     / -> _d     % -> _c     _ -> __
+;;   anything else -> _x<code>_
+;;
+;; `_` itself doubles, so an escape can never be mistaken for one:
+;; `a_p` came from `a_p` (a__p) and `a?` gives a_p. The hyphen keeps its
+;; lone underscore, since it is by far the commonest character here and
+;; its WGSL spelling is the one a reader of emitted code expects.
 (define wgsl-counter 0)
 (define (wgsl-fresh base)
   (set! wgsl-counter (+ wgsl-counter 1))
   (string-append (wgsl-underscore base) "_" (number->string wgsl-counter)))
 
-(define (wgsl-ident-char c)
-  (if (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)) c #\_))
+(define wgsl-ident-escapes
+  '((#\- . "_") (#\? . "_p") (#\! . "_b") (#\* . "_s") (#\> . "_g")
+    (#\< . "_l") (#\= . "_e") (#\/ . "_d") (#\% . "_c") (#\_ . "__")))
+
+(define (wgsl-ident-piece c)
+  (cond ((or (char-alphabetic? c) (char-numeric? c)) (string c))
+        ((assv c wgsl-ident-escapes) => cdr)
+        (else (string-append "_x" (number->string (char->integer c)) "_"))))
 
 (define (wgsl-underscore s)
-  (list->string (map wgsl-ident-char (string->list s))))
+  (let ((p (open-output-string)))
+    (for-each (lambda (c) (display (wgsl-ident-piece c) p)) (string->list s))
+    (get-output-string p)))
 
 ;; Bind a result to a fresh local, so its code can be MENTIONED twice
 ;; without being EVALUATED twice. Compiled results are spliced as text, so

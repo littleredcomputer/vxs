@@ -79,9 +79,7 @@
 
 (define ps (importance-probs! cols))   ; :probs — :weights stays the log form
 
-(define ess
-  (let loop ((i 0) (s 0.0))
-    (if (= i K) (/ 1.0 s) (loop (+ i 1) (+ s (* (view-ref ps i) (view-ref ps i)))))))
+(define ess (probs-ess cols))
 
 ;; Resampled by weight, duplicates included: a duplicate is what makes a
 ;; concentrated posterior LOOK concentrated.

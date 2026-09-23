@@ -225,6 +225,18 @@
                           (if (= i 500) (< (abs (- s 1.0)) 1e-9)
                               (loop (+ i 1) (+ s (view-ref ps i))))))))
 
+;; ESS is K for even weights and 1 for a degenerate population; the
+;; importance run lands between.
+(define ess-even {:n 4 :probs (let ((v (bytes-view (make-bytes 32) :f64)))
+                                (let loop ((i 0)) (if (< i 4) (begin (view-set! v i 0.25) (loop (+ i 1)))))
+                                v)})
+(define ess-one {:n 4 :probs (let ((v (bytes-view (make-bytes 32) :f64)))
+                               (view-set! v 2 1.0) v)})
+(assert-equal "probs-ess of even weights is K" 4.0 (probs-ess ess-even))
+(assert-equal "and of a degenerate population, one" 1.0 (probs-ess ess-one))
+(assert-true "and refuses a soa with no :probs column"
+             (guard (e (#t #t)) (probs-ess {:n 4}) #f))
+
 ;; Two shapes refused rather than fudged, each naming its own reason.
 (assert-equal "a nested generative function is refused for now"
               'raised (guard (e (#t 'raised)) (importance (outer) {:v 1} 4 1)))

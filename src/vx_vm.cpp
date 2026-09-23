@@ -4559,20 +4559,27 @@ void VM::init_primitives() {
   // ---------------------------------------------------------------------------
   // Modern Collections: Associative Maps
   // ---------------------------------------------------------------------------
-  auto subr_hash_map = [](VM &vm, uint32_t argc, Value *args) -> Value {
+  // An ObjMap is an insertion-ordered association vector with linear lookup,
+  // NOT a hash table: the right structure for the few-dozen-key registries
+  // and records it holds, and the wrong one for ten thousand keys. The
+  // hash-map-* aliases that used to sit beside these promised otherwise and
+  // are gone; a real hash table, if one is ever wanted, gets its own type
+  // and its own name.
+  //
+  // The only constructor is the {k v ...} literal, which desugars to this
+  // reserved name — see the %bracket-vector comment above. The reader
+  // refuses an odd count; this check covers a direct call, which used to
+  // drop the unpaired key silently.
+  def_global("%brace-map", heap.make_subr("%brace-map", [](VM &vm, uint32_t argc, Value *args) -> Value {
+    if (argc % 2 != 0) {
+      vm.raise_contract("{...}: a map needs an even number of forms, key then value; the last key has no value");
+    }
     std::vector<std::pair<Value, Value>> kvs;
-    for (uint32_t i = 0; i + 1 < argc; i += 2) {
+    for (uint32_t i = 0; i < argc; i += 2) {
       kvs.push_back({args[i], args[i + 1]});
     }
     return vm.heap.make_map(std::move(kvs));
-  };
-  def_global("hash-map", heap.make_subr("hash-map", subr_hash_map, 0, UINT32_MAX));
-  // Reserved name the reader desugars {...} to — see the %bracket-vector
-  // comment above; same reasoning, for maps.
-  def_global("%brace-map", heap.make_subr("%brace-map", subr_hash_map, 0, UINT32_MAX));
-  def_global("make-hash-map", heap.make_subr("make-hash-map", [](VM &vm, uint32_t, Value *) -> Value {
-    return vm.heap.make_map({});
-  }, 0, 0));
+  }, 0, UINT32_MAX));
 
   auto subr_map_ref = [](VM &vm, uint32_t argc, Value *args) -> Value {
     if (!Heap::is_map(args[0])) {
@@ -4587,7 +4594,6 @@ void VM::init_primitives() {
     return m->get(args[1], def_val);
   };
   def_global("map-ref", heap.make_subr("map-ref", subr_map_ref, 2, 3));
-  def_global("hash-map-ref", heap.make_subr("hash-map-ref", subr_map_ref, 2, 3));
 
   auto subr_map_set = [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_map(args[0])) {
@@ -4597,12 +4603,10 @@ void VM::init_primitives() {
       }
       return Value::unspecified();
     }
-    ObjMap *m = args[0].as_ptr<ObjMap>();
-    m->set(args[1], args[2]);
+    args[0].as_ptr<ObjMap>()->set(args[1], args[2]);
     return args[0];
   };
   def_global("map-set!", heap.make_subr("map-set!", subr_map_set, 3, 3));
-  def_global("hash-map-set!", heap.make_subr("hash-map-set!", subr_map_set, 3, 3));
 
   // (map-copy m) — a SHALLOW copy, the same contract vector-copy and
   // string-copy have. The spine is fresh, so adding or removing a key does
@@ -4642,10 +4646,6 @@ void VM::init_primitives() {
     if (!Heap::is_map(args[0])) return Value::boolean_false();
     return Value::from_bool(args[0].as_ptr<ObjMap>()->has(args[1]));
   }, 2, 2));
-  def_global("hash-map-has?", heap.make_subr("hash-map-has?", [](VM &, uint32_t, Value *args) -> Value {
-    if (!Heap::is_map(args[0])) return Value::boolean_false();
-    return Value::from_bool(args[0].as_ptr<ObjMap>()->has(args[1]));
-  }, 2, 2));
 
   def_global("map-keys", heap.make_subr("map-keys", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_map(args[0])) return Value::nil();
@@ -4676,12 +4676,6 @@ void VM::init_primitives() {
     return Value::from_int(static_cast<int32_t>(args[0].as_ptr<ObjMap>()->entries.size()));
   }, 1, 1));
 
-  def_global("map?", heap.make_subr("map?", [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(Heap::is_map(args[0]));
-  }, 1, 1));
-  def_global("hash-map?", heap.make_subr("hash-map?", [](VM &, uint32_t, Value *args) -> Value {
-    return Value::from_bool(Heap::is_map(args[0]));
-  }, 1, 1));
 
   // ---------------------------------------------------------------------------
   // Polymorphic get

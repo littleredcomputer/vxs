@@ -333,6 +333,11 @@ private:
     }
     if (!closed)
       fault(open_at, "'{' is never closed");
+    // Refused here, where the literal is still in hand with its position:
+    // an odd count used to reach the constructor and lose the unpaired key,
+    // so {:a 1 :b} read as {:a 1} and nothing said so.
+    if (elements.size() % 2 != 0)
+      fault(open_at, "'{' needs key/value pairs, and the last key has no value");
     Value list = Value::nil();
     for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
       list = vm.heap.cons(*it, list);

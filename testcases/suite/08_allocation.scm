@@ -184,7 +184,7 @@
              (< alloc-after (+ alloc-baseline 50000)))
 
 ;; A map grows its entries vector long after the object exists — same shape.
-(define m (hash-map))
+(define m {})
 (let fill ((i 0))
   (if (< i 2000) (begin (map-set! m i i) (fill (+ i 1)))))
 (set! m #f)
@@ -221,6 +221,20 @@
 (assert-equal "a stored #f still looks missing" #f (map-ref mm :k))
 (assert-equal "and only map-has? can tell them apart"
               '(#t #f) (list (map-has? mm :k) (map-has? mm :y)))
+
+;;--- an unpaired key is refused, not dropped -----------------------------
+;; {:a 1 :b} used to read as {:a 1}. The reader now refuses the literal
+;; with its line and column — a read error, which guard cannot see (MANUAL
+;; section 3), so it is verified by hand:
+;;
+;;   {:a 1 :b}
+;;   read error at line 1, column 1: '{' needs key/value pairs, and the
+;;   last key has no value
+;;
+;; A direct call to the reserved constructor is a contract violation, and
+;; that one is catchable.
+(assert-equal "the map constructor refuses an odd count"
+              'refused (guard (e (#t 'refused)) (%brace-map :a 1 :b)))
 
 ;;--- map-copy and map-delete! -------------------------------------------
 ;; Scheme's convention is that aggregates are mutable and you copy

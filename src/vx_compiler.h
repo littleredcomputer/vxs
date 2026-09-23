@@ -28,7 +28,7 @@ struct UpvalueDesc {
 };
 
 // (quote expr) materializes its operand rather than embedding it verbatim:
-// [e1 e2 ...]/{k1 v1 ...} desugar to (vector ...)/(hash-map ...) call forms
+// [e1 e2 ...]/{k1 v1 ...} desugar to (%bracket-vector ...)/(%brace-map ...) call forms
 // at read time (so they evaluate their elements when used as an
 // expression — see the comment in vx_reader.h), which means a bare quote
 // would otherwise just return that inert call-form list instead of a real

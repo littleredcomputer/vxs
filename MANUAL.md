@@ -971,6 +971,24 @@ reading the diff** — that is what these are for.
 
 ---
 
+### Maps are ordered association vectors
+
+A `{…}` map keeps its keys in insertion order, and `map-set!` on a key
+that is already there replaces the value in place, without moving it.
+Keys are compared by identity (`eq?`), so symbols and keywords work as
+keys and freshly built strings do not. Lookup is a **linear scan**. That
+suits the few-dozen-key registries and records maps are used for here,
+and it does not suit ten thousand keys. There is no hash table. The
+`hash-map-*` aliases that used to exist promised one and were removed; a
+real hash table, if one is ever wanted, gets its own type and its own
+name.
+
+The ordering and replace-in-place are the same as JavaScript's `Map`, so
+a future bridge to JS objects inherits them rather than having to add them.
+
+`{:a 1 :b}` is a read error: the last key has no value. It used to read as
+`{:a 1}`.
+
 ### Maps: a missing key is `#f`
 
 ```scheme
