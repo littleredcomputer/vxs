@@ -971,23 +971,44 @@ reading the diff** — that is what these are for.
 
 ---
 
-### Maps are ordered association vectors
+### Maps are ordered hash maps
 
-A `{…}` map keeps its keys in insertion order, and `map-set!` on a key
-that is already there replaces the value in place, without moving it.
-Keys are compared by identity (`eq?`), so symbols and keywords work as
-keys and freshly built strings do not. Lookup is a **linear scan**. That
-suits the few-dozen-key registries and records maps are used for here,
-and it does not suit ten thousand keys. There is no hash table. The
-`hash-map-*` aliases that used to exist promised one and were removed; a
-real hash table, if one is ever wanted, gets its own type and its own
-name.
+A `{…}` map keeps its keys in **insertion order**, and `map-set!` on a
+key that is already there replaces the value in place, without moving
+it. Printing, `map-keys` and `map-values` all follow that order. Lookup
+is **O(1)**: an index beside the ordered entries finds a key's position.
+This is how JavaScript's `Map`, V8's ordered hash tables and CPython's
+`dict` are built.
 
-The ordering and replace-in-place are the same as JavaScript's `Map`, so
-a future bridge to JS objects inherits them rather than having to add them.
+The order is load-bearing, not a nicety. `lib/wgsl.scm` emits its
+definitions in insertion order because WGSL has no forward declarations.
+More broadly, an unordered map iterates in hash order, and here that means
+**address** order, which changes between runs and between the native and
+wasm builds. Printed maps and emitted shader text would stop being
+reproducible.
 
-`{:a 1 :b}` is a read error: the last key has no value. It used to read as
-`{:a 1}`.
+Keys are compared by **identity** (`eq?`), so symbols, keywords and
+numbers work as keys and a freshly built string does not find an equal
+one. Identity is also what makes every key hashable: its raw bits are the
+hash. That is sound because the collector never moves objects.
+
+A map under **64 keys carries no index** and scans instead. Measured, a
+scan at that size is lost in the interpreter's own per-call cost, and
+most maps are records of a handful of keys. At 64 keys a map builds its
+index and keeps it, even if it later shrinks:
+
+| keys | 16 | 256 | 4096 | 65536 |
+|---|---|---|---|---|
+| before the index, ns/lookup | 95 | 133 | 580 | — |
+| now | 97 | 95 | 98 | 106 |
+
+`map-delete!` is O(n): it preserves order by closing the gap, then
+rebuilds the index. That's fine while deletion is rare.
+
+`{:a 1 :b}` is a read error: the last key has no value. `{:a 1 :a 2}` is
+**one** entry, `{:a 2}`, which is JavaScript `Map`'s rule. Both used to
+be accepted wrongly: the first as `{:a 1}`, the second as two entries
+whose lookup found the first.
 
 ### Maps: a missing key is `#f`
 

@@ -222,6 +222,58 @@
 (assert-equal "and only map-has? can tell them apart"
               '(#t #f) (list (map-has? mm :k) (map-has? mm :y)))
 
+;;--- an ordered hash map, on both sides of the index threshold ---------
+;; A map indexes itself at 64 keys and scans below that. Everything a map
+;; promises must hold identically on both sides, so each property is
+;; checked at a size under the threshold and at one well past it.
+(define (build-map n)
+  (let ((m {}))
+    (let fill ((i 0)) (if (< i n) (begin (map-set! m i (* i 10)) (fill (+ i 1)))))
+    m))
+
+(define (ordered? m n)
+  (equal? (map-keys m) (let loop ((i (- n 1)) (acc '())) (if (< i 0) acc (loop (- i 1) (cons i acc))))))
+
+(for-each
+ (lambda (n)
+   (let ((m (build-map n))
+         (tag (string-append " (" (number->string n) " keys)")))
+     (assert-true (string-append "lookups find every key" tag)
+                  (let loop ((i 0)) (cond ((= i n) #t) ((= (map-ref m i) (* i 10)) (loop (+ i 1))) (else #f))))
+     (assert-equal (string-append "an absent key is #f" tag) #f (map-ref m n))
+     (assert-true (string-append "keys come back in insertion order" tag) (ordered? m n))
+     ;; Replacing a value keeps the key where it was.
+     (map-set! m 0 'first)
+     (assert-true (string-append "replacing a value does not move its key" tag)
+                  (and (eq? (map-ref m 0) 'first) (ordered? m n) (= (map-count m) n)))
+     ;; Deleting keeps the others' order and their lookups correct — the
+     ;; index is rebuilt, and a stale one would answer with a shifted value.
+     (map-delete! m 1)
+     (assert-true (string-append "after a delete, the rest still resolve" tag)
+                  (and (not (map-has? m 1))
+                       (= (map-ref m (- n 1)) (* (- n 1) 10))
+                       (= (map-count m) (- n 1))
+                       (equal? (list-tail (map-keys m) 1)
+                               (let loop ((i (- n 1)) (acc '())) (if (< i 2) acc (loop (- i 1) (cons i acc)))))))
+     ;; A copy is independent and fully looked-up, index and all.
+     (let ((c (map-copy m)))
+       (map-set! c (- n 1) 'changed)
+       (assert-true (string-append "a copy resolves its own keys and leaves the original" tag)
+                    (and (eq? (map-ref c (- n 1)) 'changed)
+                         (= (map-ref m (- n 1)) (* (- n 1) 10))
+                         (= (map-ref c 2) 20)))))
+   )
+ '(10 300))
+
+;; A repeated key in a literal is ONE entry, the last value winning at the
+;; first position — JS Map's rule. It used to store both, count two, and
+;; answer with the first; with an index, which answer came back would have
+;; depended on which side of the threshold the map sat.
+(define dup {:a 1 :b 2 :a 3})
+(assert-equal "a repeated literal key is one entry" 2 (map-count dup))
+(assert-equal "the last value wins" 3 (map-ref dup :a))
+(assert-equal "at the first key's position" '(:a :b) (map-keys dup))
+
 ;;--- an unpaired key is refused, not dropped -----------------------------
 ;; {:a 1 :b} used to read as {:a 1}. The reader now refuses the literal
 ;; with its line and column — a read error, which guard cannot see (MANUAL

@@ -4626,7 +4626,7 @@ void VM::init_primitives() {
     // rooted on the caller's stack across the allocation and nothing is
     // held across a possible collection.
     Value nv = vm.heap.make_map();
-    nv.as_ptr<ObjMap>()->entries = args[0].as_ptr<ObjMap>()->entries;
+    nv.as_ptr<ObjMap>()->assign(*args[0].as_ptr<ObjMap>());
     return nv;
   }, 1, 1));
 
@@ -4635,10 +4635,7 @@ void VM::init_primitives() {
   // nothing; ask map-has? first if you need to know.
   def_global("map-delete!", heap.make_subr("map-delete!", [](VM &vm, uint32_t, Value *args) -> Value {
     if (!Heap::is_map(args[0])) vm.raise_contract("map-delete!: expected a map");
-    auto &es = args[0].as_ptr<ObjMap>()->entries;
-    for (size_t i = 0; i < es.size(); ++i) {
-      if (es[i].first == args[1]) { es.erase(es.begin() + i); break; }
-    }
+    args[0].as_ptr<ObjMap>()->erase(args[1]);
     return Value::unspecified();
   }, 2, 2));
 

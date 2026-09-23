@@ -429,36 +429,136 @@ struct ObjRecord : Obj {
 // every other language's nil-returning lookup.
 inline Value map_missing() { return Value::boolean_false(); }
 
+// An ORDERED hash map: the entries vector holds insertion order, which is
+// the map's meaning — iteration, printing, map-keys and map-values all read
+// it — and an index beside it answers "where is this key" in O(1).
+//
+// ORDER IS LOAD-BEARING, not a nicety. lib/wgsl.scm emits its definitions
+// table in insertion order because WGSL has no forward declarations, and
+// more broadly an unordered map iterates in hash order — here, in ADDRESS
+// order — which differs between runs and between the native and wasm
+// builds, so printed maps and emitted shader text would stop being
+// reproducible. It is also JavaScript's Map semantics, which is what a
+// future bridge will want. This is the layout V8's ordered hash tables and
+// CPython's compact dict use.
+//
+// Keys compare by IDENTITY (raw bits), so every key is hashable as a
+// uint64_t. That is sound only because the collector NEVER MOVES an
+// object: a pointer key's bits are stable for as long as the map can reach
+// it. A moving or compacting collector would have to rebuild every index.
+//
+// SMALL MAPS CARRY NO INDEX. Measured: below about 64 keys a linear scan
+// is lost in the interpreter's own per-call overhead (~85ns), and most maps
+// here are records and trace entries of a handful of keys. A map builds its
+// index when it reaches INDEX_THRESHOLD and keeps it thereafter, even if it
+// later shrinks — flapping around the line would cost more than it saves.
+//
+// Deletion is O(n): order is preserved by erasing from the vector, and the
+// index is rebuilt. map-delete! is rare; tombstones are the remedy if it
+// ever becomes hot.
+//
+// WRITE ONLY THROUGH THE MEMBER FUNCTIONS. `entries` is public so the many
+// readers (printer, GC marker, AOT emitter, wasm bridge) can walk it, but a
+// write that bypasses set/erase/assign desynchronises the index.
 struct ObjMap : Obj {
   static constexpr ObjType TYPE_TAG = ObjType::Map;
+  static constexpr size_t INDEX_THRESHOLD = 64;
+
+  // splitmix64's finalizer. std::hash<uint64_t> is the identity in both
+  // libc++ and libstdc++, and our keys are pointers with zero low bits
+  // (alignment) and NaN-box tags in the high ones — identity hashing
+  // would put them in a handful of buckets.
+  struct KeyHash {
+    size_t operator()(uint64_t x) const {
+      x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+      x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+      x ^= x >> 31;
+      return static_cast<size_t>(x);
+    }
+  };
+
   std::vector<std::pair<Value, Value>> entries;
+  std::unordered_map<uint64_t, uint32_t, KeyHash> index;   // raw key -> position
+  bool indexed = false;
 
   inline ObjMap() : Obj(ObjType::Map) {}
+  // Built THROUGH set, so a repeated key replaces in place rather than
+  // being stored twice: {:a 1 :a 2} is {:a 2}, one entry, as JS's
+  // new Map([[a,1],[a,2]]) is. It used to keep both, count two, and answer
+  // lookups with the first — and with an index that answer would have
+  // depended on which side of the threshold the map sat.
   inline explicit ObjMap(std::vector<std::pair<Value, Value>> kvs)
-      : Obj(ObjType::Map), entries(std::move(kvs)) {}
+      : Obj(ObjType::Map) {
+    entries.reserve(kvs.size());
+    for (auto &p : kvs) set(p.first, p.second);
+  }
+
+  // Position of key, or -1.
+  inline int64_t find(Value key) const {
+    if (indexed) {
+      auto it = index.find(key.raw);
+      return it == index.end() ? -1 : static_cast<int64_t>(it->second);
+    }
+    for (size_t i = 0; i < entries.size(); ++i) {
+      if (entries[i].first == key) return static_cast<int64_t>(i);
+    }
+    return -1;
+  }
 
   inline Value get(Value key, Value default_val = map_missing()) const {
-    for (const auto &p : entries) {
-      if (p.first == key) return p.second;
-    }
-    return default_val;
+    int64_t i = find(key);
+    return i < 0 ? default_val : entries[static_cast<size_t>(i)].second;
   }
+
+  inline bool has(Value key) const { return find(key) >= 0; }
 
   inline void set(Value key, Value val) {
-    for (auto &p : entries) {
-      if (p.first == key) {
-        p.second = val;
-        return;
-      }
-    }
+    int64_t i = find(key);
+    if (i >= 0) { entries[static_cast<size_t>(i)].second = val; return; }
     entries.push_back({key, val});
+    if (indexed) {
+      index.emplace(key.raw, static_cast<uint32_t>(entries.size() - 1));
+    } else if (entries.size() >= INDEX_THRESHOLD) {
+      rebuild_index();
+    }
   }
 
-  inline bool has(Value key) const {
-    for (const auto &p : entries) {
-      if (p.first == key) return true;
+  inline void erase(Value key) {
+    int64_t i = find(key);
+    if (i < 0) return;
+    entries.erase(entries.begin() + i);
+    if (indexed) rebuild_index();
+  }
+
+  // Replace the whole contents — map-copy's operation. The source is
+  // already duplicate-free, so its entries copy straight across.
+  inline void assign(const ObjMap &src) {
+    entries = src.entries;
+    indexed = false;
+    index.clear();
+    if (entries.size() >= INDEX_THRESHOLD) rebuild_index();
+  }
+
+  // Storage beyond the header, for the collector's accounting. The index
+  // figure is an estimate — a bucket pointer each, plus a node per key —
+  // since unordered_map does not report its own footprint.
+  inline size_t storage_bytes() const {
+    size_t n = entries.capacity() * sizeof(std::pair<Value, Value>);
+    if (indexed) {
+      n += index.bucket_count() * sizeof(void *)
+         + index.size() * (sizeof(uint64_t) + sizeof(uint32_t) + 2 * sizeof(void *));
     }
-    return false;
+    return n;
+  }
+
+private:
+  inline void rebuild_index() {
+    index.clear();
+    index.reserve(entries.size() * 2);
+    for (size_t i = 0; i < entries.size(); ++i) {
+      index.emplace(entries[i].first.raw, static_cast<uint32_t>(i));
+    }
+    indexed = true;
   }
 };
 
@@ -1066,7 +1166,7 @@ public:
       case ObjType::Closure: return sizeof(ObjClosure) + static_cast<ObjClosure*>(obj)->env_size * sizeof(Value);
       case ObjType::Fiber:   return sizeof(Obj);
       case ObjType::Future:  return sizeof(ObjFuture);
-      case ObjType::Map:     return sizeof(ObjMap) + static_cast<ObjMap*>(obj)->entries.capacity() * sizeof(std::pair<Value, Value>);
+      case ObjType::Map:     return sizeof(ObjMap) + static_cast<ObjMap*>(obj)->storage_bytes();
       case ObjType::Upvalue: return sizeof(ObjUpvalue);
       case ObjType::Port:    return sizeof(ObjPort);
       case ObjType::Handle:  return sizeof(ObjHandle);
