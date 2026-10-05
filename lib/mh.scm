@@ -42,7 +42,7 @@
 (define (staged-scalar-addrs st)
   (let loop ((cs (:choices st)) (acc '()))
     (cond ((null? cs) (reverse acc))
-          ((eq? (cdr (car cs)) 'scalar) (loop (cdr cs) (cons (car (car cs)) acc)))
+          ((eq? (cadar cs) 'scalar) (loop (cdr cs) (cons (car (car cs)) acc)))
           (else (loop (cdr cs) acc)))))
 
 ;; The names those addresses carry in the kernel — the same mapping

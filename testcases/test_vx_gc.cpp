@@ -39,7 +39,7 @@ int main() {
 
     // Allocate 10,000 unrooted cons cells
     for (int i = 0; i < 10000; ++i) {
-      vm.heap.cons(Value::from_int(i), Value::from_int(i + 1));
+      std::ignore = vm.heap.cons(Value::from_int(i), Value::from_int(i + 1));
     }
     assert(vm.heap.get_object_count() >= initial_objs + 10000);
     assert(vm.heap.get_bytes_allocated() > initial_bytes);
@@ -62,8 +62,8 @@ int main() {
 
     // Generate lots of transient garbage
     for (int i = 0; i < 5000; ++i) {
-      vm.heap.make_string("temporary string junk");
-      vm.heap.cons(Value::from_int(i), Value::nil());
+      std::ignore = vm.heap.make_string("temporary string junk");
+      std::ignore = vm.heap.cons(Value::from_int(i), Value::nil());
     }
 
     vm.collect_garbage();

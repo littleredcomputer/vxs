@@ -32,7 +32,7 @@
   ;; curve's parameters were written in, since both come from the model.
   (let loop ((cs (:choices st)) (acc '()))
     (cond ((null? cs) (reverse acc))
-          ((eq? (cdr (car cs)) 'scalar) (loop (cdr cs) (cons (car (car cs)) acc)))
+          ((eq? (cadar cs) 'scalar) (loop (cdr cs) (cons (car (car cs)) acc)))
           (else (loop (cdr cs) acc)))))
 
 (define (curveplot-region addr) (string->symbol (keyword->string addr)))
@@ -44,7 +44,7 @@
   (let loop ((cs (:choices st)))
     (cond ((null? cs)
            (error 'plot-posterior! "the model has no batched choice to plot"))
-          ((and (pair? (cdr (car cs))) (eq? (car (cdr (car cs))) 'batched))
+          ((eq? (cadar cs) 'batched)
            (cons (car (car cs)) (cadr (cdr (car cs)))))
           (else (loop (cdr cs))))))
 

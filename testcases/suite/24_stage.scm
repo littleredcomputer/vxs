@@ -55,7 +55,7 @@
 ;;--- what was read ------------------------------------------------------
 
 (assert-equal "the choices are found, in source order, with their shapes"
-              '((:a . scalar) (:b . scalar) (:c . scalar) (:ys batched 10))
+              '((:a scalar) (:b scalar) (:c scalar) (:ys batched 10))
               (:choices st))
 (assert-equal "the buffers the model actually read are collected"
               '(xs) (map car (:buffers st)))
@@ -315,7 +315,7 @@
 (define rch {:m 0.5 :ys (bytes-view (make-bytes (* 4 8)) :f64)})
 
 (assert-equal "a model of cauchy and laplace stages"
-              '(:m . scalar) (car (:choices rst)))
+              '(:m scalar) (car (:choices rst)))
 (assert-true "and its log-joint agrees with assess bit-for-bit"
              (= 0.0 (abs (- (car (assess (robust 4) rch))
                             (staged-logpdf rst rch)))))

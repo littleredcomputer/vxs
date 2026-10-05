@@ -130,7 +130,7 @@
 (define st (stage (pendulum 0.4 NOBS 1.0 0.05)))
 
 (assert-equal "the scan's address is a batched choice like any other"
-              '((:w . scalar) (:ys batched 12)) (:choices st))
+              '((:w scalar) (:ys batched 12)) (:choices st))
 (assert-equal "and it lowered to a scan carrying two state components"
               '(th om)
               (map car (cadddr (cadr (:terms st)))))

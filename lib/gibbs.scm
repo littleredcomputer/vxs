@@ -257,7 +257,7 @@
   (let ((shape (assq addr (:choices st))))
     (if (not shape)
         (error 'gibbs "no such address in this model" addr))
-    (if (not (eq? (cdr shape) 'scalar))
+    (if (not (eq? (cadr shape) 'scalar))
         (error 'gibbs "a batched choice has no scalar conjugate update" addr))
     (let loop ((ts (:terms st)) (prior #f) (kids '()))
       (cond

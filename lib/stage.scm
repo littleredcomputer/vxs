@@ -257,7 +257,7 @@
     (if (and (pair? dist) (eq? (car dist) 'batch-i))
         (stage-batched addr dist env ctx)
         (begin
-          (ctx-choice! ctx addr 'scalar)
+          (ctx-choice! ctx addr '(scalar))
           (ctx-term! ctx (list 'score (stage-dist dist env ctx)
                                (list 'choice addr)))
           (list 'choice addr))))))
