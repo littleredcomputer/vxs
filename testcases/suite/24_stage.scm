@@ -62,6 +62,14 @@
 (assert-equal "there is one term per choice"
               4 (length (:terms st)))
 
+;; The IR names its helpers, so it has to carry them: a backend emitting
+;; MSL or CUDA has only this datum to work from. Name, typed signature and
+;; BODY, which is what define-dual registered.
+(assert-equal "the helper the model calls travels with it, body and all"
+              '((curve-elem ((x :f32) (a :f32) (b :f32) (c :f32))
+                            (+ (* a x x) (* b x) c)))
+              (:duals st))
+
 ;; The IR is a plain datum on purpose — a format, not an object — so this
 ;; asserts its literal shape. Something other than the reader above could
 ;; emit one and both backends would still consume it.
@@ -225,6 +233,22 @@
              (refused? (lambda ()
                          (staged-logpdf (stage (calls-a-declared-only 0.5))
                                         {:x 1.0}))))
+;; And it contributes no dual, for the same reason: there is no readable
+;; body to carry. Staging still accepts the model -- the refusal belongs
+;; where the body is wanted, which is the backend, not here.
+(assert-equal "a declared-only helper contributes no dual"
+              '() (:duals (stage (calls-a-declared-only 0.5))))
+
+;; A dual reached only through another dual's body still travels, because
+;; a body is unstaged source where a helper call is a plain application --
+;; walking the staged terms for `call` alone would stop at the first level.
+(define-dual (sq-probe (x :f32)) (* x x))
+(define-dual (quad-probe (x :f32)) (+ (sq-probe x) 1.0))
+(define-dual (unreached-probe (x :f32)) (- x 1.0))
+(define-gen (calls-quad v) (at :q (normal (quad-probe v) 1.0)))
+(assert-equal "a dual reached only through another dual's body travels too"
+              '(quad-probe sq-probe)
+              (map car (:duals (stage (calls-quad 0.5)))))
 
 ;;--- strict f32: narrowing the oracle on purpose -------------------------
 ;; The two backends differ in precision by design, so comparing them is a

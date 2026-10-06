@@ -34,6 +34,7 @@
 ;;
 ;;   staged  = {:choices ((addr scalar) | (addr batched n) ...)
 ;;              :buffers ((name . view) ...)
+;;              :duals   ((name ((arg type) ...) body) ...)
 ;;              :terms   (term ...)}
 ;;
 ;;   term    = (score dist expr)
@@ -365,6 +366,62 @@
         (error 'stage "wrong number of distribution parameters" d))
     (cons family (map (lambda (a) (stage-scalar a env ctx)) (cdr d)))))
 
+;;--- the duals a model reaches ------------------------------------------
+;; The IR NAMES its helpers -- (call curve-elem ...) -- and a name is not
+;; enough for a backend that has to emit one. So the staged datum carries
+;; the helpers this model can reach, each as (name ((arg type) ...) body),
+;; which is what define-dual registered in the first place.
+;;
+;; The body travels as the DATUM, not as compiled text. lib/wgsl.scm's WGSL
+;; is one dialect; a reader that has to emit MSL or CUDA needs the readable
+;; statement of what the function means rather than one language's answer
+;; to it -- the same argument wgsl-bodies already makes for keeping it.
+;;
+;; TWO WALKS, because the two trees speak different languages. A staged
+;; term TAGS its helper calls, (call f a b), while a dual's body is
+;; unstaged source where the same helper is a plain application, (f a b).
+;; Walking for `call` alone would find the first level and stop there.
+;;
+;; A DECLARED-ONLY helper has a signature and hand-written WGSL but no
+;; readable body, so it cannot appear here and is passed over. That is the
+;; omission staged-logpdf already lives with -- it refuses such a call for
+;; having no Scheme half -- and the refusal belongs where the body is
+;; wanted, not here, since staging accepts the model either way.
+
+;; Every NAME in (call NAME ...), anywhere in a staged form.
+(define (ir-call-names form)
+  (cond
+    ((not (pair? form)) '())
+    ((and (eq? (car form) 'call) (pair? (cdr form)) (symbol? (cadr form)))
+     (cons (cadr form) (ir-call-names (cddr form))))
+    (else (append (ir-call-names (car form)) (ir-call-names (cdr form))))))
+
+;; Every registered helper APPLIED in an unstaged body. Only the registry
+;; can tell a helper from an operator here, since both are applications.
+(define (body-call-names form)
+  (cond
+    ((not (pair? form)) '())
+    ((and (symbol? (car form)) (wgsl-fn-body (car form)))
+     (cons (car form) (body-call-names (cdr form))))
+    (else (append (body-call-names (car form)) (body-call-names (cdr form))))))
+
+;; Breadth-first from the terms, following bodies, in first-reached order,
+;; so the section is stable enough for a test to compare against.
+(define (staged-duals terms)
+  (let loop ((pending (ir-call-names terms)) (found '()))
+    (cond
+      ((null? pending) (reverse found))
+      ((assq (car pending) found) (loop (cdr pending) found))
+      (else
+       (let ((b (wgsl-fn-body (car pending))))
+         (if (not b)
+             (loop (cdr pending) found)      ; declared-only: see above
+             (loop (append (cdr pending) (body-call-names (wgsl-body-expr b)))
+                   (cons (list (car pending)
+                               (wgsl-body-params b)
+                               (wgsl-body-expr b))
+                         found))))))))
+
 ;;--- the entry point ----------------------------------------------------
 
 (define (stage gf)
@@ -388,9 +445,11 @@
       ;; Reversed on the way out: terms are summands of the log-joint and
       ;; float addition is not associative, so source order is the order
       ;; both backends must use if they are to agree.
-      {:choices (reverse (:choices ctx))
-       :buffers (reverse (:buffers ctx))
-       :terms   (reverse (:terms ctx))})))
+      (let ((terms (reverse (:terms ctx))))
+        {:choices (reverse (:choices ctx))
+         :buffers (reverse (:buffers ctx))
+         :duals   (staged-duals terms)
+         :terms   terms}))))
 
 ;;--- strict f32: rounding the VM where the device would ------------------
 ;; The backends differ in one respect deliberately — f64 here, f32 there —
