@@ -34,7 +34,7 @@
 ;;
 ;;   staged  = {:choices ((addr scalar) | (addr batched n) ...)
 ;;              :buffers ((name . view) ...)
-;;              :duals   ((name ((arg type) ...) body) ...)
+;;              :duals   ((name ((arg type) ...) ret body) ...)
 ;;              :terms   (term ...)}
 ;;
 ;;   term    = (score dist expr)
@@ -419,6 +419,7 @@
              (loop (append (cdr pending) (body-call-names (wgsl-body-expr b)))
                    (cons (list (car pending)
                                (wgsl-body-params b)
+                               (wgsl-body-type b)
                                (wgsl-body-expr b))
                          found))))))))
 
@@ -445,11 +446,55 @@
       ;; Reversed on the way out: terms are summands of the log-joint and
       ;; float addition is not associative, so source order is the order
       ;; both backends must use if they are to agree.
-      (let ((terms (reverse (:terms ctx))))
-        {:choices (reverse (:choices ctx))
-         :buffers (reverse (:buffers ctx))
-         :duals   (staged-duals terms)
-         :terms   terms}))))
+      {:choices (reverse (:choices ctx))
+       :buffers (reverse (:buffers ctx))
+       :terms   (reverse (:terms ctx))})))
+
+;;--- the exported IR ----------------------------------------------------
+;; What a reader OUTSIDE this VM gets, which is deliberately not the datum
+;; `stage` builds. Two forms, because two audiences:
+;;
+;;   INTERNAL (what stage returns) keeps the family symbol in a score, which
+;;   lib/gibbs.scm reads to recognise a conjugate pair -- (eq? (car dist)
+;;   'normal) -- and keeps a buffer as (name . view), the view being the live
+;;   storage this VM owns.
+;;
+;;   EXPORTED resolves both. A buffer becomes its name, because `write` prints
+;;   a view unreadably. And a score becomes the CALL it already was: both
+;;   backends here independently turn (score (normal 0 1.5) v) into
+;;   logpdf-normal(v, 0, 1.5) -- staged-score by applying the procedure,
+;;   kernel-score by consing the name -- from one naming convention each
+;;   re-derives. Doing it once, here, means a reader needs no notion of a
+;;   distribution and no copy of that rule.
+;;
+;; A term is then an expr or a reduction over terms, and `score` stops being
+;; a head. Nothing is lost: a :terms entry is a summand of the log-joint by
+;; position, which is what made the tag redundant.
+
+(define (export-term t)
+  (let ((head (car t)))
+    (cond
+      ((eq? head 'score)
+       (let* ((dist  (cadr t))
+              (entry (staged-family (car dist))))
+         (cons 'call (cons (cadr entry) (cons (caddr t) (cdr dist))))))
+      ((eq? head 'sum-over)
+       (list 'sum-over (cadr t) (caddr t) (export-term (cadddr t))))
+      ;; A scan's states hold exprs, not terms, so they travel untouched.
+      ((eq? head 'scan-over)
+       (list 'scan-over (cadr t) (caddr t) (cadddr t)
+             (export-term (list-ref t 4))))
+      (else (error 'stage "unknown term" t)))))
+
+;; Duals are collected from the LOWERED terms, so the logpdf a score resolves
+;; to is found by the same walk as any other call. That is the whole reason
+;; the lowering comes first.
+(define (staged-export st)
+  (let ((terms (map export-term (:terms st))))
+    {:choices (:choices st)
+     :buffers (map car (:buffers st))
+     :duals   (staged-duals terms)
+     :terms   terms}))
 
 ;;--- strict f32: rounding the VM where the device would ------------------
 ;; The backends differ in one respect deliberately — f64 here, f32 there —

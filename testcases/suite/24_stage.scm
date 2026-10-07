@@ -62,13 +62,39 @@
 (assert-equal "there is one term per choice"
               4 (length (:terms st)))
 
-;; The IR names its helpers, so it has to carry them: a backend emitting
-;; MSL or CUDA has only this datum to work from. Name, typed signature and
-;; BODY, which is what define-dual registered.
-(assert-equal "the helper the model calls travels with it, body and all"
-              '((curve-elem ((x :f32) (a :f32) (b :f32) (c :f32))
-                            (+ (* a x x) (* b x) c)))
-              (:duals st))
+;;--- the exported IR ----------------------------------------------------
+;; Two forms on purpose. The internal datum keeps the family symbol, which
+;; gibbs reads to find a conjugate pair; the export resolves it to the call
+;; it already was, so a reader outside needs no notion of a distribution.
+(assert-equal "internally a score keeps its family, which gibbs reads"
+              '(score (normal 0 1.5) (choice :a))
+              (car (:terms st)))
+(assert-equal "exported, it is the call both backends already made of it"
+              '(call logpdf-normal (choice :a) 0 1.5)
+              (car (:terms (staged-export st))))
+(assert-true "and no exported term carries a score head"
+             (let loop ((ts (:terms (staged-export st))))
+               (cond ((null? ts) #t)
+                     ((eq? (car (car ts)) 'score) #f)
+                     (else (loop (cdr ts))))))
+
+;; The IR names its helpers, so it has to carry them: a backend emitting MSL
+;; or CUDA has only this datum to work from. Name, typed signature and BODY,
+;; which is what define-dual registered. The logpdf arrives by the same walk
+;; as any other call, which is why the lowering happens first.
+(assert-equal "the helpers the model reaches travel with it, bodies and all"
+              '(logpdf-normal curve-elem)
+              (map car (:duals (staged-export st))))
+(assert-equal "a helper's signature, derived result type and body all travel"
+              '(curve-elem ((x :f32) (a :f32) (b :f32) (c :f32)) :f32
+                           (+ (* a x x) (* b x) c))
+              (cadr (:duals (staged-export st))))
+;; The result type is DERIVED, never declared -- that is what keeps the
+;; signature honest. Shipping it propagates the derived fact rather than
+;; asking a reader to infer it through the body and every helper below.
+(assert-equal "and the result type is the one the WGSL signature was written with"
+              :f32
+              (wgsl-body-type (wgsl-fn-body 'logpdf-uniform)))
 
 ;; The IR is a plain datum on purpose — a format, not an object — so this
 ;; asserts its literal shape. Something other than the reader above could
@@ -236,8 +262,9 @@
 ;; And it contributes no dual, for the same reason: there is no readable
 ;; body to carry. Staging still accepts the model -- the refusal belongs
 ;; where the body is wanted, which is the backend, not here.
-(assert-equal "a declared-only helper contributes no dual"
-              '() (:duals (stage (calls-a-declared-only 0.5))))
+(assert-true "a declared-only helper contributes no dual of its own"
+             (not (assq 'erfc-device-only
+                        (:duals (staged-export (stage (calls-a-declared-only 0.5)))))))
 
 ;; A dual reached only through another dual's body still travels, because
 ;; a body is unstaged source where a helper call is a plain application --
@@ -247,8 +274,8 @@
 (define-dual (unreached-probe (x :f32)) (- x 1.0))
 (define-gen (calls-quad v) (at :q (normal (quad-probe v) 1.0)))
 (assert-equal "a dual reached only through another dual's body travels too"
-              '(quad-probe sq-probe)
-              (map car (:duals (stage (calls-quad 0.5)))))
+              '(logpdf-normal quad-probe sq-probe)
+              (map car (:duals (staged-export (stage (calls-quad 0.5))))))
 
 ;;--- strict f32: narrowing the oracle on purpose -------------------------
 ;; The two backends differ in precision by design, so comparing them is a

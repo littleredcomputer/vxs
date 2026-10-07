@@ -1114,7 +1114,7 @@
     (wgsl-declare! name wname (map cadr params) ret)
     ;; After the compile, so a body that does not type-check is not kept
     ;; as though it were a citizen.
-    (wgsl-put-body! name params body)
+    (wgsl-put-body! name params ret body)
     ret))
 
 ;; (define-gpu (name (arg type) ...) body)
@@ -1184,15 +1184,22 @@
 ;; of bodies kept is exactly the set of names a kernel may call.
 (define-once wgsl-bodies {})
 
-(define (wgsl-put-body! name params body)
-  (map-set! wgsl-bodies name (cons params body)))
+(define (wgsl-put-body! name params ret body)
+  (map-set! wgsl-bodies name (list params ret body)))
 
 ;; (params . body), or #f for a DECLARED function, which has no body in
 ;; this language to read.
 (define (wgsl-fn-body name) (map-ref wgsl-bodies name))
 
 (define (wgsl-body-params b) (car b))
-(define (wgsl-body-expr b) (cdr b))
+;; The DERIVED result type, kept rather than recomputed. wgsl-define-fn!
+;; already has it -- it writes the WGSL signature with it -- and a backend
+;; emitting MSL, CUDA or Warp needs exactly the same fact. Deriving it a
+;; second time means inferring through the body and transitively through
+;; every helper it calls, which is a type pass to learn something this file
+;; knew and threw away.
+(define (wgsl-body-type b) (cadr b))
+(define (wgsl-body-expr b) (caddr b))
 
 (define (wgsl-forget-body! name)
   (map-delete! wgsl-bodies name))
@@ -1223,7 +1230,7 @@
   ;; map-keys is a snapshot, so forgetting mid-walk cannot trip the walk.
   (for-each
    (lambda (name)
-     (let ((body (cdr (wgsl-fn-body name))))
+     (let ((body (wgsl-body-expr (wgsl-fn-body name))))
        (if (let check ((ns names))
              (cond ((null? ns) #f)
                    ((wgsl-body-mentions? body (car ns)) #t)
