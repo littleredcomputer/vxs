@@ -666,6 +666,27 @@
 ;;
 ;; in the browser, which is the one place nothing here can see. A signature
 ;; is a promise; this is the test that the promise is kept.
+;;
+;; IT IS CHECKED FROM THE WRONG END, and the gap is known. This walks the
+;; DECLARATIONS and asks whether each has a definition. The failure seen in
+;; demos/measure.scm is the other direction -- a CALL to something no longer
+;; declared:
+;;
+;;   unresolved call target 'shared_xs'
+;;
+;; shared-layout! retracts an old layout's declarations along with the
+;; shims that call them, so after a layout change `shared-xs` is not in
+;; wgsl-signatures and is not checked here, while a surviving shim can still
+;; call it and shared-preamble emits nothing for a region that is gone.
+;; wgsl-forget-dependents! is also one level deep by its own comment, so a
+;; shim calling a shim escapes the retraction entirely.
+;;
+;; The test that would catch it starts from calls, not declarations: strip
+;; comments, collect every call-like token in the assembled module, subtract
+;; those with an `fn NAME(` definition, and require the remainder to be a
+;; subset of an explicit WGSL-builtin allowlist. The allowlist is the cost;
+;; an unexpected name failing is the point. Not written yet -- parked
+;; deliberately, not forgotten.
 
 (define asm (wrangle-wgsl ""))
 (for-each

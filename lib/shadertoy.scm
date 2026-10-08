@@ -99,9 +99,17 @@
        ;; had always included them; this one had not, and nothing noticed
        ;; because no fragment kernel had wanted one yet.
        ;;
-       ;; They come before the kernel because WGSL has no forward
-       ;; declarations, and that ordering is also what puts the non-finite
+       ;; They come before the kernel, which also puts the non-finite
        ;; helpers ahead of any use of `-inf`.
+       ;;
+       ;; NOT, however, because "WGSL has no forward declarations", which
+       ;; this comment used to say and which lib/stat.wgsl disproves in the
+       ;; same build: `fn random_normal` at line 60 calls `random_uniform`,
+       ;; defined at line 72, and that file is concatenated into every
+       ;; wrangle shader. If a forward call were fatal nothing here would
+       ;; ever have compiled. Worth knowing because the false reason is a
+       ;; plausible diagnosis for an unresolved call target and sends you
+       ;; looking at the assembly order instead of at what is missing.
        (wgsl-definitions-source) "\n"
        "fn kernel(uv : vec2<f32>, time : f32, res : vec2<f32>) -> vec3<f32> {\n"
        (wgsl-body body shadertoy-env "  ") "\n"
