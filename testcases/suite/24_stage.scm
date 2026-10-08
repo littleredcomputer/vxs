@@ -191,6 +191,14 @@
 
 (define (refused? thunk) (guard (e (#t #t)) (thunk) #f))
 
+;; Is `want` anywhere inside `form`? Used to look for one node of a nested
+;; kernel without asserting the whole shape of it.
+(define (ir-mentions? form want)
+  (cond ((equal? form want) #t)
+        ((pair? form) (or (ir-mentions? (car form) want)
+                          (ir-mentions? (cdr form) want)))
+        (else #f)))
+
 (define-gen (uses-a-global) (at :x (normal SOME-GLOBAL 1.0)))
 (assert-true "a global is refused: staging cannot read one, so it must be a parameter"
              (refused? (lambda () (stage (uses-a-global)))))
@@ -252,10 +260,52 @@
 (assert-true "the same address twice is refused"
              (refused? (lambda () (stage (repeats-an-address)))))
 
+;;--- the gather ----------------------------------------------------------
+;; A computed index used to be refused as "a different primitive with
+;; different in-place safety". That reading was about SCATTER, an indexed
+;; write, which aliases; an indexed READ is what mu[z] needs, and the
+;; device could already express it -- an accessor is a function of :u32 and
+;; (u32 x) converts.
 (define-gen (batches-by-a-computed-index xs n)
   (at :v (batch-i n (j) (normal (view-ref xs (+ j 1)) 1.0))))
-(assert-true "a computed index is refused — that is a gather, a different primitive"
-             (refused? (lambda () (stage (batches-by-a-computed-index xs 3)))))
+(assert-equal "a computed index stages, as a gather"
+              '(sum-over 3 j (score (normal (data xs (+ j 1)) 1.0) (choice-i :v j)))
+              (car (:terms (stage (batches-by-a-computed-index xs 3)))))
+
+;; view-ref reads a batched CHOICE as well as a buffer, which is the use
+;; (choice-vector addr) was named for. mu[z[i]] is the shape every
+;; conjugacy over an assignment needs.
+(define zs-probe (bytes-view (make-bytes 24) :f64))
+(define-gen (mixture-means zs sigma n k)
+  (let ((mu (at :mu (batch-i k (c) (normal 0.0 10.0)))))
+    (at :ys (batch-i n (i) (normal (view-ref mu (view-ref zs i)) sigma)))))
+(define mix (stage (mixture-means zs-probe 1.0 3 2)))
+(assert-equal "a batched choice indexed by data is a gather on the choice"
+              '(sum-over 3 i (score (normal (choice-i :mu (data zs i)) 1.0)
+                                    (choice-i :ys i)))
+              (cadr (:terms mix)))
+(assert-equal "both batched choices are declared"
+              '((:mu batched 2) (:ys batched 3)) (:choices mix))
+
+;; The conversion appears in the kernel exactly where it is needed: a loop
+;; index is already :u32, a computed one is f32.
+(define mix-kernel (staged-kernel mix))
+(assert-true "the kernel converts a computed index and not a loop index"
+             (and (ir-mentions? mix-kernel '(u32 (zs i)))
+                  (ir-mentions? mix-kernel '(mu c))))
+
+;; A scan state's name is a bare symbol too, but it holds a quantity. If it
+;; were admitted here, `symbol?` in an index position would mean two things
+;; and kernel-index could no longer tell which needed converting.
+(define-gen (indexes-by-a-scan-state xs n)
+  (at :ys (scan-i n (j) ((s 0.0 (+ s 1.0))) (normal (view-ref xs s) 1.0))))
+(assert-true "indexing by a scan state is refused: that is a quantity"
+             (refused? (lambda () (stage (indexes-by-a-scan-state xs 3)))))
+
+(define-gen (indexes-a-scalar-choice xs n)
+  (let ((m (at :m (normal 0 1)))) (at :ys (batch-i n (j) (normal (view-ref m j) 1.0)))))
+(assert-true "and so is indexing something that is neither buffer nor batch"
+             (refused? (lambda () (stage (indexes-a-scalar-choice xs 3)))))
 
 (define-gen (adds-a-whole-batch n)
   (let ((v (at :v (batch-i n (j) (normal 0 1))))) (+ v 1.0)))

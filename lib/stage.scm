@@ -232,25 +232,61 @@
         (let ((r (stage-expr (car fs) env ctx)))
           (if (null? (cdr fs)) r (loop (cdr fs)))))))
 
+;; An INDEX is an address rather than a quantity, and the two cases are kept
+;; apart structurally so nothing downstream has to guess which it has.
+;;
+;; A batch-i or scan-i index stands for itself and is already :u32 in the
+;; kernel environment, so it travels as a bare symbol. Anything else is a
+;; GATHER, and travels as a form. That invariant is what lets kernel-index
+;; below decide by shape whether a conversion is needed, and it is why a
+;; SCAN STATE is refused here: its name is a bare symbol too, but it holds
+;; an f32 quantity, so admitting it would make `symbol?` mean two things.
+;; Indexing by one is almost certainly a mistake anyway.
+;;
+;; The gather used to be refused outright, as "a different primitive with
+;; different in-place safety". That reading was about SCATTER -- an indexed
+;; write, which aliases. An indexed read is what mu[z] needs, every
+;; conjugacy over an assignment needs mu[z], and the device can already
+;; express it: an accessor is a function of :u32 and (u32 x) converts.
+;;
+;; OUT OF RANGE DIVERGES ON PURPOSE. A reader on the host refuses a
+;; non-integral or out-of-range index by name, because a loud refusal is
+;; what catches the bug. The device truncates and clamps -- u32(2.7) is 2,
+;; and WGSL bounds-checks to an indeterminate value. Marked, not reconciled.
+(define (stage-index idx env ctx)
+  (let ((b (and (symbol? idx) (env-find env idx))))
+    (cond
+      ((and b (eq? (binding-kind b) :index)) idx)
+      ((and b (eq? (binding-kind b) :state))
+       (error 'stage
+              "a scan state is a quantity, not an index — it cannot address storage"
+              idx))
+      (else (stage-scalar idx env ctx)))))
+
+;; view-ref reads ANY indexable binding: a buffer the model was given, or a
+;; batched choice read elementwise. One form because a model author does not
+;; care which -- staging resolves it from the binding, the way stage-at
+;; resolves batch-i from scan-i -- and the IR keeps them apart as `data` and
+;; `choice-i`, which is where the difference means something: one is input,
+;; the other is latent.
 (define (stage-view-ref e env ctx)
-  (let* ((name (cadr e))
-         (b    (and (symbol? name) (env-find env name))))
-    (if (or (not b) (not (eq? (binding-kind b) :value))
-            (not (view? (binding-payload b))))
-        (error 'stage
-               "view-ref must read a buffer the model was given as a parameter"
-               name))
-    (ctx-buffer! ctx name (binding-payload b))
-    (let ((idx (caddr e)))
-      (if (not (and (symbol? idx)
-                    (let ((ib (env-find env idx)))
-                      (and ib (eq? (binding-kind ib) :index)))))
-          ;; A computed index would be a gather, which is a different
-          ;; primitive with different in-place safety (MANUAL section 6).
-          (error 'stage
-                 "a staged view-ref is indexed by a batch-i index, nothing else"
-                 idx))
-      (list 'data name idx))))
+  (let* ((name    (cadr e))
+         (b       (and (symbol? name) (env-find env name)))
+         (kind    (and b (binding-kind b)))
+         (payload (and b (binding-payload b))))
+    (cond
+      ((and (eq? kind :value) (view? payload))
+       (ctx-buffer! ctx name payload)
+       (list 'data name (stage-index (caddr e) env ctx)))
+      ;; (choice-vector addr) is what stage-batched hands back, named so that
+      ;; arithmetic on it is refused. This is the use it was named for.
+      ((and (eq? kind :expr) (pair? payload) (eq? (car payload) 'choice-vector))
+       (list 'choice-i (cadr payload) (stage-index (caddr e) env ctx)))
+      (else
+       (error 'stage
+              (string-append "view-ref reads a buffer parameter or a batched"
+                             " choice, and this is neither")
+              name)))))
 
 ;;--- reading a choice ---------------------------------------------------
 
@@ -599,6 +635,26 @@
     (if (not entry) (error 'stage "unknown family" (car dist)))
     (sf32 (apply (staged-procedure (cadr entry)) (cons v ps)))))
 
+;; A gather's index arrives as an f32, because a buffer read is one, and
+;; view-ref wants an exact integer. A loop index arrives exact already, so
+;; one path serves both.
+;;
+;; THE CHECK IS THE HOST HALF OF A DELIBERATE DIVERGENCE. A non-integral or
+;; out-of-range index is refused here by name; the device truncates and
+;; clamps, since u32(2.7) is 2 and WGSL bounds-checks to an indeterminate
+;; value. The host can afford to be loud and the device cannot, and a loud
+;; refusal is what catches the bug -- so they are left to differ rather
+;; than meeting in a middle that serves neither.
+(define (staged-index v vw)
+  (if (not (integer? v))
+      (error 'stage
+             "an index must be a whole number — the device would truncate it"
+             v))
+  (let ((i (inexact->exact v)))
+    (if (or (< i 0) (>= i (view-length vw)))
+        (error 'stage "an index falls outside the data it addresses" v))
+    i))
+
 (define (staged-value e st choices idx)
   (cond
     ;; A literal is an f32 literal on the device, so rounding it is part of
@@ -617,11 +673,13 @@
                 (error 'stage "a scalar choice needs a number" (cadr e)))
             (sf32 v)))
          ((eq? head 'choice-i)
-          (sf32 (view-ref (map-ref choices (cadr e))
-                          (staged-value (caddr e) st choices idx))))
+          (let ((vw (map-ref choices (cadr e))))
+            (sf32 (view-ref vw (staged-index
+                                (staged-value (caddr e) st choices idx) vw)))))
          ((eq? head 'data)
-          (sf32 (view-ref (cdr (assq (cadr e) (:buffers st)))
-                          (staged-value (caddr e) st choices idx))))
+          (let ((vw (cdr (assq (cadr e) (:buffers st)))))
+            (sf32 (view-ref vw (staged-index
+                                (staged-value (caddr e) st choices idx) vw)))))
          ((eq? head 'call)
           (sf32 (apply (staged-procedure (cadr e))
                        (map (lambda (a) (staged-value a st choices idx)) (cddr e)))))
@@ -881,6 +939,14 @@
           (cons (kernel-value value)
                 (map kernel-value (cdr dist))))))
 
+;; A bare symbol in an index position is a loop index -- stage-index keeps
+;; that invariant -- and is already :u32 there. Anything else is a gather's
+;; computed index, which is f32, since every bare number in the kernel
+;; language emits as f32. The conversion is explicit because that language
+;; makes it explicit on purpose: "a conversion is worth seeing".
+(define (kernel-index idx)
+  (if (symbol? idx) idx (list 'u32 (kernel-value idx))))
+
 (define (kernel-value e)
   (cond
     ((number? e) e)
@@ -889,8 +955,9 @@
      (let ((head (car e)))
        (cond
          ((eq? head 'choice)   (keyword->name (cadr e)))
-         ((eq? head 'choice-i) (list (keyword->name (cadr e)) (caddr e)))
-         ((eq? head 'data)     (list (cadr e) (caddr e)))
+         ((eq? head 'choice-i) (list (keyword->name (cadr e))
+                                     (kernel-index (caddr e))))
+         ((eq? head 'data)     (list (cadr e) (kernel-index (caddr e))))
          ((eq? head 'call)     (cons (cadr e) (map kernel-value (cddr e))))
          ((memq head '(+ - * /)) (cons head (map kernel-value (cdr e))))
          (else (error 'stage "unknown expression" e)))))
