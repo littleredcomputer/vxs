@@ -199,13 +199,32 @@
 (assert-true "a helper that never entered the kernel domain is refused"
              (refused? (lambda () (stage (uses-a-stranger 1.0)))))
 
+;; Beta and gamma were the standing examples of a family with no device
+;; score, both for want of an lgamma. lib/dist.scm's lgamma-lanczos made
+;; them stage without a line changing in lib/stage.scm, because nothing
+;; listed them -- which is the property those tests were really about.
 (define-gen (uses-beta) (at :p (beta 2.0 3.0)))
-(assert-true "a distribution with no device score is refused (beta needs lgamma)"
-             (refused? (lambda () (stage (uses-beta)))))
+(assert-true "beta stages now that its score is a dual"
+             (guard (e (#t #f)) (stage (uses-beta)) #t))
 
 (define-gen (uses-gamma) (at :g (gamma 2.0 1.0)))
-(assert-true "and gamma, for the same reason"
-             (refused? (lambda () (stage (uses-gamma)))))
+(assert-true "and gamma with it"
+             (guard (e (#t #f)) (stage (uses-gamma)) #t))
+
+;; And the lgamma travels transitively: nothing in the model names it, the
+;; score's BODY does, which is the second walk staged-duals makes.
+(assert-equal "the lgamma a gamma score calls ships with the model"
+              '(logpdf-gamma lgamma-lanczos)
+              (map car (:duals (staged-export (stage (uses-gamma))))))
+
+;; The refusal path still needs a live example, and dirichlet is one that
+;; is structural rather than pending: its host version loops over a view,
+;; and the dual language has no iteration.
+(define-gen (uses-dirichlet w) (at :w (dirichlet w)))
+(assert-true "a family whose score cannot be a dual is still refused by name"
+             (refused? (lambda ()
+                         (stage (uses-dirichlet
+                                 (bytes-view (make-bytes 24) :f64))))))
 
 ;; Exponential is the counter-case, and the pair is the point: both are
 ;; families a model may name on the fiber path, and only one of them can

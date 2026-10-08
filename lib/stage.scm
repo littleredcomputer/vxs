@@ -71,12 +71,18 @@
 ;; the score takes the value first, so the family's parameters are the
 ;; rest, and an arity that cannot drift from the definition it checks.
 ;;
-;; The absences now FALL OUT rather than being maintained: logpdf-gamma
-;; and logpdf-beta need lgamma, which WGSL has not got; logpdf-categorical
-;; needs an indexed buffer read, the gather this file refuses;
-;; logpdf-dirichlet needs both. None of them can be duals, lib/dist.scm
-;; says so at each definition, and a model naming one is refused with
-;; the family in hand — same refusal, no list to fall behind.
+;; The absences FALL OUT rather than being maintained, and the mechanism
+;; has now been exercised in both directions: gamma and beta USED to be
+;; absent for want of an lgamma, and lib/dist.scm's lgamma-lanczos made
+;; them present without a line changing here. Nothing listed them, so
+;; nothing had to be told.
+;;
+;; Still absent: logpdf-categorical needs an indexed buffer read, the
+;; gather this file refuses; logpdf-dirichlet needs a loop, which the dual
+;; language has not got -- its host version iterates over a view, and a
+;; loop-free form would need vector parameters, which caps the component
+;; count at four and would narrow an any-K function. A model naming one is
+;; refused with the family in hand.
 (define (staged-family f)
   (let* ((score (string->symbol
                  (string-append "logpdf-" (symbol->string f))))

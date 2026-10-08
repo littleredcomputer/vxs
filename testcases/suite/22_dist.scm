@@ -169,14 +169,45 @@
 (assert-true "and exponential, which the device did not have at all"
              (dual-both-ways? 'logpdf-exponential "logpdf_exponential"))
 
-;; The two that cannot follow, and the reason is structural rather than
-;; pending: both need lgamma, which WGSL does not have. lib/stage.scm
-;; refuses a model using them by name rather than emitting a call to a
-;; function no shader defines.
-(assert-false "gamma is not dual, because WGSL has no lgamma"
-              (if (wgsl-dual 'logpdf-gamma) #t #f))
-(assert-false "nor beta, for the same reason"
-              (if (wgsl-dual 'logpdf-beta) #t #f))
+;; These two used to be the structural exceptions -- both need lgamma, which
+;; WGSL does not have -- and lgamma-lanczos is now that lgamma. It is loop
+;; free, which is the only property the dual language requires: a fixed
+;; unrolled Lanczos sum rather than an iteration the body could not express.
+(assert-true "gamma is dual now that lgamma-lanczos exists"
+             (dual-both-ways? 'logpdf-gamma "logpdf_gamma"))
+(assert-true "and beta with it"
+             (dual-both-ways? 'logpdf-beta "logpdf_beta"))
+(assert-true "the lgamma itself is dual, being what both call"
+             (dual-both-ways? 'lgamma-lanczos "lgamma_lanczos"))
+
+;; A MEASUREMENT against the VM's std::lgamma, not an equality: Lanczos is
+;; an approximation and the builtin is the oracle. It is reported as the
+;; worst relative error seen, so a regression shows up as a number rather
+;; than as a threshold someone tuned until it passed.
+(define lgamma-worst
+  (let loop ((zs '(0.25 0.5 1.0 1.5 2.5 7.0 50.0 500.0 1000.0)) (worst 0.0))
+    (if (null? zs)
+        worst
+        (let* ((z (car zs))
+               (a (lgamma-lanczos z))
+               (b (lgamma z))
+               (e (if (= b 0.0) (abs a) (abs (/ (- a b) b)))))
+          (loop (cdr zs) (if (> e worst) e worst))))))
+(assert-true "lgamma-lanczos is within 1e-13 of std::lgamma over z in [0.25, 1000]"
+             (< lgamma-worst 1e-13))
+
+;; The guard is a value, not a branch, because `if` lowers to select and
+;; both arms are evaluated. Branching would reach (log v) at v <= 0, which
+;; is nan rather than -inf, and (* 0.0 nan) is nan -- so the wrong answer
+;; would be a finite-looking nan instead of an impossible point.
+(assert-equal "gamma scores -inf below its support, not nan"
+              -inf (logpdf-gamma -1.0 2.0 1.5))
+(assert-equal "and at zero"
+              -inf (logpdf-gamma 0.0 1.0 1.5))
+(assert-equal "beta scores -inf outside [0,1]"
+              -inf (logpdf-beta 1.5 2.0 3.0))
+(assert-equal "and at an endpoint, by the convention above"
+              -inf (logpdf-beta 0.0 1.0 1.0))
 
 ;; Reconciling the two copies meant choosing between them where they
 ;; disagreed, and they did: lib/stat.wgsl tested for NaN and this file did

@@ -156,7 +156,38 @@
          (y (random-gamma-theta-one r beta)))
     (/ x (+ x y))))
 
-(define (lbeta a b) (- (+ (lgamma a) (lgamma b)) (lgamma (+ a b))))
+;;--- log gamma, as a dual ------------------------------------------------
+;; WGSL has no lgamma, which is what kept gamma and beta off the device.
+;; Lanczos supplies one that is loop-free -- a fixed unrolled sum, which is
+;; the whole reason it can be a dual body: there is no iteration in that
+;; language and none needed here.
+;;
+;; g = 7, nine coefficients. MEASURED against the VM's std::lgamma: within
+;; 5e-15 relative over z in [0.25, 500], which is f64-grade, so the host
+;; half loses nothing by using it and the device half is as good as f32
+;; allows. That is what makes one body honest for both -- had the
+;; approximation been f32-grade, define-dual would have forced a worse
+;; oracle on the host.
+;;
+;; NO REFLECTION, so the domain is z > 0. Every concentration, shape and
+;; rate a prior carries is positive, and the series is accurate below 0.5
+;; as well, so the usual (z < 0.5) branch buys nothing here.
+(define-dual (lgamma-lanczos (z :f32))
+  (let* ((w (- z 1.0))
+         (x (+ 0.99999999999980993
+               (/ 676.5203681218851     (+ w 1.0))
+               (/ -1259.1392167224028   (+ w 2.0))
+               (/ 771.32342877765313    (+ w 3.0))
+               (/ -176.61502916214059   (+ w 4.0))
+               (/ 12.507343278686905    (+ w 5.0))
+               (/ -0.13857109526572012  (+ w 6.0))
+               (/ 9.9843695780195716e-6 (+ w 7.0))
+               (/ 1.5056327351493116e-7 (+ w 8.0))))
+         (t (+ w 7.5)))
+    (- (+ 0.9189385332046727 (* (+ w 0.5) (log t)) (log x)) t)))
+
+(define-dual (lbeta (a :f32) (b :f32))
+  (- (+ (lgamma-lanczos a) (lgamma-lanczos b)) (lgamma-lanczos (+ a b))))
 
 ;; (alpha-1)log(v) + (beta-1)log(1-v) - lbeta(alpha,beta).
 ;;
@@ -165,12 +196,22 @@
 ;; principle — but the endpoints have measure zero and the sampler cannot
 ;; produce them, so this is the boundary convention rather than a claim
 ;; about the density.
-(define (logpdf-beta v alpha beta)
-  (if (or (<= v 0.0) (>= v 1.0))
-      -inf
-      (+ (* (- alpha 1.0) (log v))
-         (* (- beta 1.0) (log (- 1.0 v)))
-         (- (lbeta alpha beta)))))
+;;
+;; THE GUARD IS A VALUE, not a branch around the arithmetic, which is
+;; logpdf-uniform's idiom and is forced by the device: `if` lowers to
+;; select, so both arms are evaluated and an arm cannot protect the other.
+;; `safe` keeps every log's argument in range and `(log ind)` contributes
+;; 0 inside the support and -inf outside. Branching instead would compute
+;; (log v) at v <= 0 -- nan, not -inf -- and multiplying it by (alpha - 1)
+;; at alpha = 1 gives 0 * nan, which is nan rather than the -inf wanted.
+(define-dual (logpdf-beta (v :f32) (alpha :f32) (beta :f32))
+  (let* ((inside? (and (> v 0.0) (< v 1.0)))
+         (safe (if inside? v 0.5))
+         (ind  (if inside? 1.0 0.0)))
+    (+ (* (- alpha 1.0) (log safe))
+       (* (- beta 1.0) (log (- 1.0 safe)))
+       (- 0.0 (lbeta alpha beta))
+       (log ind))))
 
 (define (random-gamma r alpha lambda)
   (* (/ 1.0 lambda) (random-gamma-theta-one r alpha)))
@@ -240,17 +281,24 @@
 ;;
 ;;   alpha*log(lambda) - lgamma(alpha) + (alpha-1)*log(v) - lambda*v
 ;;
-;; Absent from lib/stat.wgsl, and it will stay absent until someone writes
-;; an lgamma for WGSL — which has none. When that happens the shader
-;; version is an approximation and must be checked against this one, not
-;; the reverse: the host is the oracle everywhere else here.
-(define (logpdf-gamma v alpha lambda)
-  (if (<= v 0.0)
-      -inf
-      (+ (* alpha (log lambda))
-         (- (lgamma alpha))
-         (* (- alpha 1.0) (log v))
-         (- (* lambda v)))))
+;; It used to say this would stay absent until someone wrote an lgamma for
+;; WGSL, and that the shader version would then be an approximation to be
+;; checked against this one. lgamma-lanczos above is that lgamma, and
+;; define-dual means there is no second version to check: one body, and the
+;; thing it is measured against is the VM's std::lgamma rather than a
+;; parallel implementation that could drift.
+;;
+;; The support guard is a value rather than a branch, for the reason given
+;; on logpdf-beta.
+(define-dual (logpdf-gamma (v :f32) (alpha :f32) (lambda :f32))
+  (let* ((pos? (> v 0.0))
+         (safe (if pos? v 1.0))
+         (ind  (if pos? 1.0 0.0)))
+    (+ (* alpha (log lambda))
+       (- 0.0 (lgamma-lanczos alpha))
+       (* (- alpha 1.0) (log safe))
+       (- 0.0 (* lambda safe))
+       (log ind))))
 
 ;; The NaN branch is not decoration, and it is what the two copies
 ;; DISAGREED about: lib/stat.wgsl tested it and this file did not. Without
